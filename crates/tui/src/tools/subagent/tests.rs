@@ -965,7 +965,7 @@ async fn test_running_count_counts_running_agents_until_status_reconciles() {
 #[tokio::test]
 async fn cleanup_auto_cancels_stale_running_agent_and_releases_slot() {
     let mut manager = SubAgentManager::new(PathBuf::from("."), 1)
-        .with_running_heartbeat_timeout(Duration::from_secs(300));
+        .with_running_heartbeat_timeout(Duration::from_millis(1));
     let (input_tx, _input_rx) = mpsc::unbounded_channel();
     let mut agent = SubAgent::new(
         "test_agent_stale".to_string(),
@@ -978,12 +978,12 @@ async fn cleanup_auto_cancels_stale_running_agent_and_releases_slot() {
         input_tx,
         "boot_test".to_string(),
     );
-    agent.last_activity_at = instant_from_duration(Duration::from_secs(600));
     agent.task_handle = Some(tokio::spawn(async {
         tokio::time::sleep(Duration::from_secs(60)).await;
     }));
     let agent_id = agent.id.clone();
     manager.agents.insert(agent_id.clone(), agent);
+    tokio::time::sleep(Duration::from_millis(5)).await;
 
     assert_eq!(
         manager.running_count(),
@@ -1046,7 +1046,7 @@ async fn cleanup_keeps_recent_running_agent() {
 #[tokio::test]
 async fn touch_refreshes_stale_running_agent_heartbeat() {
     let mut manager = SubAgentManager::new(PathBuf::from("."), 1)
-        .with_running_heartbeat_timeout(Duration::from_secs(300));
+        .with_running_heartbeat_timeout(Duration::from_millis(1));
     let (input_tx, _input_rx) = mpsc::unbounded_channel();
     let mut agent = SubAgent::new(
         "test_agent_touched".to_string(),
@@ -1059,12 +1059,12 @@ async fn touch_refreshes_stale_running_agent_heartbeat() {
         input_tx,
         "boot_test".to_string(),
     );
-    agent.last_activity_at = instant_from_duration(Duration::from_secs(600));
     agent.task_handle = Some(tokio::spawn(async {
         tokio::time::sleep(Duration::from_secs(60)).await;
     }));
     let agent_id = agent.id.clone();
     manager.agents.insert(agent_id.clone(), agent);
+    tokio::time::sleep(Duration::from_millis(5)).await;
 
     assert_eq!(manager.running_count(), 0);
     assert!(manager.touch(&agent_id));

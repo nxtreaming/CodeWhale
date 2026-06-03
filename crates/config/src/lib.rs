@@ -2038,7 +2038,7 @@ pub fn codewhale_home() -> Result<PathBuf> {
             return Ok(PathBuf::from(trimmed));
         }
     }
-    let home = dirs::home_dir().context("failed to resolve home directory")?;
+    let home = effective_home_dir().context("failed to resolve home directory")?;
     Ok(home.join(CODEWHALE_APP_DIR))
 }
 
@@ -2046,8 +2046,15 @@ pub fn codewhale_home() -> Result<PathBuf> {
 ///
 /// Always returns the legacy path regardless of whether it exists.
 pub fn legacy_deepseek_home() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("failed to resolve home directory")?;
+    let home = effective_home_dir().context("failed to resolve home directory")?;
     Ok(home.join(LEGACY_APP_DIR))
+}
+
+fn effective_home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(dirs::home_dir)
 }
 
 /// Resolve a state subdirectory, preferring the CodeWhale root if
@@ -2507,7 +2514,9 @@ mod tests {
 
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     #[test]
@@ -3486,6 +3495,73 @@ unix_socket_path = "/tmp/cw-hooks.sock"
     }
 
     #[test]
+    fn app_homes_prefer_home_env_before_platform_home_fallback() {
+        let _lock = env_lock();
+        struct HomeEnvGuard {
+            home: Option<OsString>,
+            userprofile: Option<OsString>,
+            codewhale_home: Option<OsString>,
+        }
+
+        impl Drop for HomeEnvGuard {
+            fn drop(&mut self) {
+                // Safety: test-only environment mutation is serialized by env_lock().
+                unsafe {
+                    match self.home.take() {
+                        Some(value) => env::set_var("HOME", value),
+                        None => env::remove_var("HOME"),
+                    }
+                    match self.userprofile.take() {
+                        Some(value) => env::set_var("USERPROFILE", value),
+                        None => env::remove_var("USERPROFILE"),
+                    }
+                    match self.codewhale_home.take() {
+                        Some(value) => env::set_var("CODEWHALE_HOME", value),
+                        None => env::remove_var("CODEWHALE_HOME"),
+                    }
+                }
+            }
+        }
+
+        let home =
+            std::env::temp_dir().join(format!("codewhale-config-home-env-{}", std::process::id()));
+        let userprofile = std::env::temp_dir().join(format!(
+            "codewhale-config-userprofile-{}",
+            std::process::id()
+        ));
+        let _env = HomeEnvGuard {
+            home: env::var_os("HOME"),
+            userprofile: env::var_os("USERPROFILE"),
+            codewhale_home: env::var_os("CODEWHALE_HOME"),
+        };
+        // Safety: test-only environment mutation is serialized by env_lock().
+        unsafe {
+            env::set_var("HOME", &home);
+            env::set_var("USERPROFILE", &userprofile);
+            env::remove_var("CODEWHALE_HOME");
+        }
+
+        assert_eq!(
+            codewhale_home().expect("codewhale home"),
+            home.join(CODEWHALE_APP_DIR)
+        );
+        assert_eq!(
+            legacy_deepseek_home().expect("legacy home"),
+            home.join(LEGACY_APP_DIR)
+        );
+
+        let explicit = std::env::temp_dir().join(format!(
+            "codewhale-config-explicit-home-{}",
+            std::process::id()
+        ));
+        // Safety: test-only environment mutation is serialized by env_lock().
+        unsafe {
+            env::set_var("CODEWHALE_HOME", &explicit);
+        }
+        assert_eq!(codewhale_home().expect("explicit home"), explicit);
+    }
+
+    #[test]
     fn migrate_config_reports_copied_legacy_path() {
         let _lock = env_lock();
         struct HomeEnvGuard {
@@ -3550,9 +3626,6 @@ unix_socket_path = "/tmp/cw-hooks.sock"
             "codewhale-config-migration-{}-{unique}",
             std::process::id()
         ));
-        #[cfg(windows)]
-        let legacy_dir = legacy_deepseek_home().expect("legacy home");
-        #[cfg(not(windows))]
         let legacy_dir = home.join(LEGACY_APP_DIR);
         let primary_dir = home.join(CODEWHALE_APP_DIR);
         let legacy_config = legacy_dir.join(CONFIG_FILE_NAME);

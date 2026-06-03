@@ -47,14 +47,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `POST /messages` requests on stale legacy SSE sessions now trigger the same
   reconnect-and-retry path as closed SSE streams, removing a release-gate flake
   and matching the intended recovery behavior (#2597).
+- **Cache-hit cost accounting uses one telemetry source.** Mixed DeepSeek
+  `prompt_cache_hit_tokens` and OpenAI-style `cached_tokens` usage payloads no
+  longer infer cache misses from the wrong hit count, avoiding inflated TUI cost
+  estimates on cached DeepSeek turns (#2567, #2609).
+- **Cygwin/MSYS2 config paths honor exported `$HOME`.** CodeWhale and legacy
+  DeepSeek config roots now prefer a non-empty `$HOME` before falling back to the
+  platform home resolver, while `CODEWHALE_HOME` remains the strongest explicit
+  override (#2369, #2610).
 
 ### Community
 
 Thanks to **@xyuai** (#2587), **@IcedOranges** (#2584), **@BH8GCJ** (#2588),
 **@shenjackyuanjie** (#2618, #2619), **@idling11** (#2606, #2616),
-**@AresNing** (#2578), **@gordonlu**, **@encyc**, and **@simuusang** (#2603,
-#2620) for reports, patches, retesting, and release-stabilization signals that
-shaped this pass.
+**@AresNing** (#2578), **@caiyilian** (#2567), **@buko** (#2369),
+**@gordonlu**, **@encyc**, and **@simuusang** (#2603, #2620) for reports,
+patches, retesting, and release-stabilization signals that shaped this pass.
 
 ## [0.8.51] - 2026-06-02
 

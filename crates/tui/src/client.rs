@@ -1275,7 +1275,7 @@ pub(super) fn parse_usage(usage: Option<&Value>) -> Usage {
     let prompt_cache_miss_tokens = usage
         .and_then(|u| u.get("prompt_cache_miss_tokens"))
         .and_then(Value::as_u64)
-        .or_else(|| cached_tokens.map(|cached| input_tokens.saturating_sub(cached)))
+        .or_else(|| prompt_cache_hit_tokens.map(|hit| input_tokens.saturating_sub(u64::from(hit))))
         .map(|v| v as u32);
     let reasoning_tokens = reasoning_tokens_raw.map(|v| v as u32);
 
@@ -3074,6 +3074,22 @@ mod tests {
 
         assert_eq!(usage.input_tokens, 4000);
         assert_eq!(usage.output_tokens, 20);
+        assert_eq!(usage.prompt_cache_hit_tokens, Some(3000));
+        assert_eq!(usage.prompt_cache_miss_tokens, Some(1000));
+    }
+
+    #[test]
+    fn parse_usage_infers_cache_miss_from_selected_hit_source() {
+        let usage = parse_usage(Some(&json!({
+            "prompt_tokens": 4000,
+            "completion_tokens": 20,
+            "prompt_cache_hit_tokens": 3000,
+            "prompt_tokens_details": {
+                "cached_tokens": 1000
+            }
+        })));
+
+        assert_eq!(usage.input_tokens, 4000);
         assert_eq!(usage.prompt_cache_hit_tokens, Some(3000));
         assert_eq!(usage.prompt_cache_miss_tokens, Some(1000));
     }
