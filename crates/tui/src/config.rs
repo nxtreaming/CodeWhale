@@ -1935,6 +1935,9 @@ impl Config {
                     .with_context(|| format!("Failed to read config file: {}", path.display()))?;
                 let parsed: ConfigFile = toml::from_str(&contents)
                     .with_context(|| format!("Failed to parse config file: {}", path.display()))?;
+                if let Some(msg) = warn_on_misplaced_top_level_keys(&contents) {
+                    tracing::warn!("{msg}");
+                }
                 apply_profile(parsed, profile)?
             } else {
                 Config::default()
@@ -4107,6 +4110,44 @@ fn load_single_config_file(path: &Path) -> Result<Config> {
     Ok(parsed.base)
 }
 
+/// Build a one-line warning when top-level-only keys are nested under a section
+/// CodeWhale does not define (`[general]` / `[sandbox]`). TOML silently drops
+/// those keys, so e.g. `[general]\nallow_shell = true` never takes effect and
+/// the shell tools (`exec_shell`, `task_shell_start`, …) are absent from the
+/// catalog with no explanation. Returns `None` when nothing is misplaced.
+///
+/// This is the exact confusion behind #2589: `allow_shell` and `sandbox_mode`
+/// belong at the top of the file, above any `[section]` header.
+fn warn_on_misplaced_top_level_keys(raw: &str) -> Option<String> {
+    let doc = toml::from_str::<toml::Value>(raw).ok()?;
+    // Sections CodeWhale does not recognize but users nest settings under.
+    const UNKNOWN_SECTIONS: &[&str] = &["general", "sandbox"];
+    // Keys that are only ever read from the top level of the config.
+    const TOP_LEVEL_KEYS: &[&str] = &["allow_shell", "sandbox_mode", "approval_policy"];
+
+    let mut hits: Vec<String> = Vec::new();
+    for section in UNKNOWN_SECTIONS {
+        let Some(table) = doc.get(*section).and_then(toml::Value::as_table) else {
+            continue;
+        };
+        for key in TOP_LEVEL_KEYS {
+            if table.contains_key(*key) {
+                hits.push(format!("`{section}.{key}`"));
+            }
+        }
+    }
+    if hits.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "Ignoring {} — CodeWhale has no `[general]` or `[sandbox]` section, so these \
+         keys are silently dropped. Move them to the TOP of the config file (above any \
+         `[section]` header), e.g. `allow_shell = true`. Until then, shell tools stay \
+         disabled. (#2589)",
+        hits.join(", ")
+    ))
+}
+
 fn apply_managed_overrides(config: &mut Config) -> Result<()> {
     let path = config
         .managed_config_path
@@ -5022,6 +5063,26 @@ mod tests {
             !config.allow_shell(),
             "Config::allow_shell() must default to false when no opt-in is recorded"
         );
+    }
+
+    #[test]
+    fn warns_when_allow_shell_nested_under_general_section() {
+        // #2589: the reporter's config nested top-level keys under sections that
+        // do not exist, so they were silently dropped and shell tools vanished.
+        let raw = "[general]\nallow_shell = true\n\n[sandbox]\nsandbox_mode = \"danger-full-access\"\n";
+        let warning =
+            warn_on_misplaced_top_level_keys(raw).expect("misplaced keys should produce a warning");
+        assert!(warning.contains("general.allow_shell"));
+        assert!(warning.contains("sandbox.sandbox_mode"));
+        assert!(warning.contains("#2589"));
+
+        // Correctly placed top-level keys produce no warning.
+        let ok = "allow_shell = true\nsandbox_mode = \"danger-full-access\"\n";
+        assert!(warn_on_misplaced_top_level_keys(ok).is_none());
+
+        // A parsed config from the correct placement actually enables shell.
+        let parsed: ConfigFile = toml::from_str(ok).expect("parse top-level config");
+        assert!(parsed.base.allow_shell());
     }
 
     #[test]
