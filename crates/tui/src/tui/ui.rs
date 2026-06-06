@@ -2873,29 +2873,35 @@ async fn run_event_loop(
                     apply_alt_4_shortcut(app, key.modifiers);
                     continue;
                 }
-                KeyCode::Char('!') if key.modifiers.contains(KeyModifiers::ALT) => {
+                // Sidebar focus via Alt+! / Alt+@ / Alt+# / Alt+$ / Alt+%)
+                // AltGr on European keyboards emits Ctrl+Alt on Windows, so
+                // exclude Ctrl to avoid swallowing AltGr-typed characters
+                // like @ (AltGr+0 on French AZERTY) and # (AltGr+3). This
+                // matches the has_ctrl_or_alt / is_altgr philosophy in
+                // key_hint.rs: treat Ctrl+Alt as AltGr, not a shortcut.
+                KeyCode::Char('!') if key.modifiers.contains(KeyModifiers::ALT) && !key.modifiers.contains(KeyModifiers::CONTROL) => {
                     app.set_sidebar_focus(SidebarFocus::Work);
                     app.status_message = Some("Sidebar focus: work".to_string());
                     continue;
                 }
-                KeyCode::Char('@') if key.modifiers.contains(KeyModifiers::ALT) => {
+                KeyCode::Char('@') if key.modifiers.contains(KeyModifiers::ALT) && !key.modifiers.contains(KeyModifiers::CONTROL) => {
                     app.set_sidebar_focus(SidebarFocus::Tasks);
                     app.status_message = Some("Sidebar focus: tasks".to_string());
                     continue;
                 }
-                KeyCode::Char('#') if key.modifiers.contains(KeyModifiers::ALT) => {
+                KeyCode::Char('#') if key.modifiers.contains(KeyModifiers::ALT) && !key.modifiers.contains(KeyModifiers::CONTROL) => {
                     app.set_sidebar_focus(SidebarFocus::Agents);
                     app.status_message = Some("Sidebar focus: agents".to_string());
                     continue;
                 }
                 KeyCode::Char('$') | KeyCode::Char('%')
-                    if key.modifiers.contains(KeyModifiers::ALT) =>
+                    if key.modifiers.contains(KeyModifiers::ALT) && !key.modifiers.contains(KeyModifiers::CONTROL) =>
                 {
                     app.set_sidebar_focus(SidebarFocus::Context);
                     app.status_message = Some("Sidebar focus: context".to_string());
                     continue;
                 }
-                KeyCode::Char(')') if key.modifiers.contains(KeyModifiers::ALT) => {
+                KeyCode::Char(')') if key.modifiers.contains(KeyModifiers::ALT) && !key.modifiers.contains(KeyModifiers::CONTROL) => {
                     app.set_sidebar_focus(SidebarFocus::Auto);
                     app.status_message = Some("Sidebar focus: auto".to_string());
                     continue;
