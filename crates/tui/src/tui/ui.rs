@@ -1239,6 +1239,7 @@ async fn run_event_loop(
     // codex's frame coalescing that maps cleanly onto our poll-based loop.
     let mut frame_rate_limiter = crate::tui::frame_rate_limiter::FrameRateLimiter::default();
     let mut web_config_session: Option<WebConfigSession> = None;
+    let mut prev_input_snapshot = String::new();
     let mut terminal_paused_at: Option<Instant> = None;
     let mut force_terminal_repaint = false;
     let mut draws_since_last_full_repaint: u64 = 0;
@@ -1390,6 +1391,24 @@ async fn run_event_loop(
             }
             last_task_refresh = Instant::now();
             app.needs_redraw = true;
+        }
+
+        // Clear suggestion when the user modifies the input.
+        if app.input != prev_input_snapshot {
+            app.prompt_suggestion = None;
+            prev_input_snapshot = app.input.clone();
+        }
+
+        // Poll prompt suggestion cell from background generation task.
+        // Discard stale results whose generation token no longer matches.
+        if let Ok(mut guard) = app.prompt_suggestion_cell.try_lock()
+            && let Some((gen_token, suggestion)) = guard.take()
+            && gen_token
+                == app
+                    .prompt_suggestion_gen
+                    .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            app.prompt_suggestion = Some(suggestion);
         }
 
         // First, poll for engine events (non-blocking)
@@ -1746,6 +1765,9 @@ async fn run_event_loop(
                         app.is_loading = true;
                         app.offline_mode = false;
                         app.turn_error_posted = false;
+                        app.prompt_suggestion = None;
+                        app.prompt_suggestion_gen
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         app.dispatch_started_at = None;
                         current_streaming_text.clear();
                         app.streaming_state.reset();
@@ -1949,6 +1971,38 @@ async fn run_event_loop(
                                 crate::tui::notifications::stop_title_animation();
                             } else {
                                 crate::tui::notifications::stop_title_animation_quietly();
+                            }
+                        }
+
+                        // Generate ghost-text follow-up suggestion asynchronously.
+                        if status == crate::core::events::TurnOutcomeStatus::Completed
+                            && config.prompt_suggestion_enabled()
+                            && app.api_messages.len() >= 2
+                        {
+                            let suggestion_cell = app.prompt_suggestion_cell.clone();
+                            let api_key = config.deepseek_api_key().unwrap_or_default();
+                            let base_url = config.deepseek_base_url();
+                            let model = config.default_model();
+                            let messages: Vec<crate::models::Message> = app.api_messages.clone();
+                            let gen_token = app
+                                .prompt_suggestion_gen
+                                .load(std::sync::atomic::Ordering::Relaxed);
+                            if !api_key.is_empty() {
+                                tokio::spawn(async move {
+                                    let summary =
+                                        crate::tui::prompt_suggestion::summarize_recent_messages(
+                                            &messages, 8,
+                                        );
+                                    if let Some(suggestion) =
+                                        crate::tui::prompt_suggestion::generate_suggestion(
+                                            &api_key, &base_url, &model, &summary,
+                                        )
+                                        .await
+                                        && let Ok(mut guard) = suggestion_cell.lock()
+                                    {
+                                        *guard = Some((gen_token, suggestion));
+                                    }
+                                });
                             }
                         }
 
@@ -3822,6 +3876,14 @@ async fn run_event_loop(
                         continue;
                     }
                     if app.is_loading && queue_current_draft_for_next_turn(app) {
+                        continue;
+                    }
+                    if app.input.is_empty()
+                        && let Some(suggestion) = app.prompt_suggestion.take()
+                    {
+                        app.input = suggestion;
+                        app.cursor_position = app.input.chars().count();
+                        app.needs_redraw = true;
                         continue;
                     }
                     let prior_model = app.model.clone();

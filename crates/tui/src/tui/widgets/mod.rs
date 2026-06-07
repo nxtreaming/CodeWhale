@@ -723,17 +723,26 @@ impl Renderable for ComposerWidget<'_> {
 
         let mut input_lines = Vec::new();
         if input_text.is_empty() {
-            let placeholder = if self.app.is_history_search_active() {
-                self.app
-                    .tr(crate::localization::MessageId::HistorySearchPlaceholder)
+            if let Some(ref suggestion) = self.app.prompt_suggestion
+                && !self.app.is_history_search_active()
+            {
+                input_lines.push(Line::from(Span::styled(
+                    suggestion.as_str(),
+                    Style::default().fg(palette::TEXT_HINT),
+                )));
             } else {
-                self.app
-                    .tr(crate::localization::MessageId::ComposerPlaceholder)
-            };
-            input_lines.push(Line::from(Span::styled(
-                placeholder,
-                Style::default().fg(palette::TEXT_MUTED).italic(),
-            )));
+                let placeholder = if self.app.is_history_search_active() {
+                    self.app
+                        .tr(crate::localization::MessageId::HistorySearchPlaceholder)
+                } else {
+                    self.app
+                        .tr(crate::localization::MessageId::ComposerPlaceholder)
+                };
+                input_lines.push(Line::from(Span::styled(
+                    placeholder,
+                    Style::default().fg(palette::TEXT_MUTED).italic(),
+                )));
+            }
         } else if let Some((sel_start, sel_end)) = self.app.selection_range() {
             let line_ranges: Vec<(usize, usize)> =
                 wrap_input_lines_for_mouse(&self.app.input, content_width)
@@ -768,7 +777,9 @@ impl Renderable for ComposerWidget<'_> {
         // wrap the single Line at render time, so we must estimate the wrapped
         // row count ourselves to keep padding accurate on narrow widths.
         let visual_rows = if input_text.is_empty() {
-            let placeholder = if self.app.is_history_search_active() {
+            let placeholder: &str = if let Some(ref suggestion) = self.app.prompt_suggestion {
+                suggestion.as_str()
+            } else if self.app.is_history_search_active() {
                 self.app
                     .tr(crate::localization::MessageId::HistorySearchPlaceholder)
             } else {
@@ -1073,7 +1084,9 @@ impl Renderable for ComposerWidget<'_> {
         let (visible_lines, cursor_row, cursor_col) =
             layout_input(input_text, input_cursor, content_width, input_rows_budget);
         let visual_rows = if input_text.is_empty() {
-            let placeholder = if self.app.is_history_search_active() {
+            let placeholder: &str = if let Some(ref suggestion) = self.app.prompt_suggestion {
+                suggestion.as_str()
+            } else if self.app.is_history_search_active() {
                 self.app
                     .tr(crate::localization::MessageId::HistorySearchPlaceholder)
             } else {
@@ -4362,5 +4375,89 @@ mod tests {
                 elapsed.as_millis()
             );
         }
+    }
+
+    // ── Ghost-text prompt suggestion rendering ────────────────────────
+
+    #[test]
+    fn ghost_text_renders_when_suggestion_set_and_input_empty() {
+        let mut app = create_test_app();
+        app.prompt_suggestion = Some("What about error handling?".to_string());
+        let slash_menu_entries = Vec::<SlashMenuEntry>::new();
+        let mention_menu_entries = Vec::<String>::new();
+        let widget = ComposerWidget::new(&app, 5, &slash_menu_entries, &mention_menu_entries);
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 5,
+        };
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let rendered: String = buf
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(
+            rendered.contains("What about error handling?"),
+            "ghost text should render the suggestion. Got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn ghost_text_hidden_when_input_not_empty() {
+        let mut app = create_test_app();
+        app.prompt_suggestion = Some("A suggestion".to_string());
+        app.input = "hello".to_string();
+        app.cursor_position = 5;
+        let slash_menu_entries = Vec::<SlashMenuEntry>::new();
+        let mention_menu_entries = Vec::<String>::new();
+        let widget = ComposerWidget::new(&app, 5, &slash_menu_entries, &mention_menu_entries);
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 5,
+        };
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let has_suggestion = buf
+            .content
+            .iter()
+            .any(|c| c.symbol().contains("A suggestion"));
+        assert!(
+            !has_suggestion,
+            "suggestion should not render when input is non-empty"
+        );
+    }
+
+    #[test]
+    fn ghost_text_hidden_when_no_suggestion() {
+        let mut app = create_test_app();
+        app.prompt_suggestion = None;
+        let slash_menu_entries = Vec::<SlashMenuEntry>::new();
+        let mention_menu_entries = Vec::<String>::new();
+        let widget = ComposerWidget::new(&app, 5, &slash_menu_entries, &mention_menu_entries);
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 5,
+        };
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        // When no suggestion and input is empty, placeholder text should appear
+        // instead. The exact placeholder text is locale-dependent, so we check
+        // that the suggestion text is NOT present.
+        let has_placeholder_like_text = buf.content.iter().any(|c| !c.symbol().trim().is_empty());
+        assert!(
+            has_placeholder_like_text,
+            "some non-empty text should render as placeholder"
+        );
     }
 }

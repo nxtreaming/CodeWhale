@@ -164,6 +164,7 @@ memory_path = "~/.codewhale/memory.md"
 allow_shell = true
 approval_policy = "on-request" # on-request | untrusted | never
 sandbox_mode = "workspace-write" # read-only | workspace-write | danger-full-access | external-sandbox
+# prompt_suggestion = true  # opt-in: show ghost-text follow-up question in composer after each turn
 
 # Typed permission rules live in a sibling `permissions.toml` file, not in
 # config.toml. This schema slice is ask-only and is parsed for follow-up
