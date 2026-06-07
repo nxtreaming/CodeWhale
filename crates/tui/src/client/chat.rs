@@ -434,13 +434,11 @@ impl DeepSeekClient {
                 }
             }
 
-            // Close any open blocks — use the current content_index
-            // (which points to the next unused slot, so -1 gives the
-            // last-opened block) but guard against underflow when no
-            // content block was ever opened.
+            // Close any open blocks — content_index points to the
+            // currently active open block (it is only incremented
+            // *after* a block is closed, not when opened).
             if thinking_started || text_started {
-                let idx = content_index.saturating_sub(1);
-                yield Ok(StreamEvent::ContentBlockStop { index: idx });
+                yield Ok(StreamEvent::ContentBlockStop { index: content_index });
             }
 
             release_stream_buffer(byte_buf);
