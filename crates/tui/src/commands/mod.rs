@@ -1318,7 +1318,7 @@ mod tests {
                 command.name
             );
 
-            for alias in command.aliases {
+            for &alias in command.aliases {
                 assert!(
                     !alias.trim().is_empty(),
                     "/{} alias must not be empty",
@@ -1326,7 +1326,7 @@ mod tests {
                 );
                 assert_eq!(
                     alias.trim(),
-                    *alias,
+                    alias,
                     "/{} alias /{alias} must not need trimming",
                     command.name
                 );
@@ -1353,7 +1353,7 @@ mod tests {
                 assert_eq!(resolved.name, command.name);
             }
 
-            for alias in command.aliases {
+            for &alias in command.aliases {
                 for lookup in [alias.to_string(), format!("/{alias}")] {
                     let resolved = get_command_info(&lookup).unwrap_or_else(|| {
                         panic!("{lookup:?} should resolve to /{}", command.name)
@@ -1366,8 +1366,8 @@ mod tests {
 
     #[test]
     fn every_registered_command_has_a_help_topic() {
+        let mut app = create_test_app();
         for command in COMMANDS {
-            let mut app = create_test_app();
             let result = execute(&format!("/help {}", command.name), &mut app);
             assert!(
                 !result.is_error,
