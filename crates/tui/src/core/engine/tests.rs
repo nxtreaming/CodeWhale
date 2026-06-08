@@ -3244,6 +3244,10 @@ fn missing_shell_tool_error_message_names_allow_shell_gate() {
     ] {
         let message = missing_tool_error_message(tool_name, &catalog);
         assert!(message.contains("not available in the current tool catalog"));
+        assert!(
+            message.contains("allow_shell = false"),
+            "{tool_name}: {message}"
+        );
         assert!(message.contains("allow_shell"), "{tool_name}: {message}");
         assert!(
             message.contains("/config allow_shell true"),
@@ -3272,6 +3276,7 @@ fn missing_shell_tool_error_message_keeps_allow_shell_hint_with_suggestions() {
 
     assert!(message.contains("Did you mean:"));
     assert!(message.contains("exec"));
+    assert!(message.contains("allow_shell = false"));
     assert!(message.contains("allow_shell"));
     assert!(message.contains("/config allow_shell true"));
     assert!(message.contains("--save"));
