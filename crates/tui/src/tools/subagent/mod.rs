@@ -2648,7 +2648,14 @@ impl ToolSpec for AgentSpawnTool {
             child_runtime.context.workspace = cwd;
         }
         let configured_model = match spawn_request.model.clone() {
-            Some(model) => Some(model),
+            // #3018 audit fix: spawn-time `model` must be validated and
+            // canonicalized here — passing it through raw turns a typo into
+            // an opaque provider 400 instead of a clear spawn-time error.
+            Some(model) => Some(normalize_requested_subagent_model(
+                &model,
+                "model",
+                self.runtime.client.api_provider(),
+            )?),
             None => configured_model_for_role_or_type(
                 &self.runtime,
                 spawn_request.assignment.role.as_deref(),
@@ -5081,16 +5088,37 @@ fn with_default_fork_context(mut input: Value, default: bool) -> Value {
 pub(crate) fn normalize_requested_subagent_model(
     value: &str,
     field: &str,
+    provider: crate::config::ApiProvider,
 ) -> Result<String, ToolError> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Err(ToolError::invalid_input(format!("{field} cannot be blank")));
     }
-    crate::config::normalize_model_name(trimmed).ok_or_else(|| {
+    // #3018: Use provider-aware validation so non-DeepSeek providers can
+    // accept their own model IDs instead of failing with "Expected a
+    // DeepSeek model id".
+    crate::config::requested_model_for_provider(provider, trimmed).ok_or_else(|| {
+        let valid_names = crate::config::model_completion_names_for_provider(provider);
+        let valid_hint = if valid_names.is_empty() {
+            String::new()
+        } else {
+            format!(" (accepted: {})", valid_names.join(", "))
+        };
         ToolError::invalid_input(format!(
-            "Invalid {field} '{trimmed}'. Expected a DeepSeek model id such as deepseek-v4-pro or deepseek-v4-flash"
+            "Invalid {field} '{trimmed}' for provider {}{valid_hint}",
+            provider_name_for_error(provider)
         ))
     })
+}
+
+fn provider_name_for_error(provider: crate::config::ApiProvider) -> &'static str {
+    match provider {
+        crate::config::ApiProvider::Deepseek | crate::config::ApiProvider::DeepseekCN => "DeepSeek",
+        crate::config::ApiProvider::Openai | crate::config::ApiProvider::OpenaiCodex => "OpenAI",
+        crate::config::ApiProvider::Moonshot => "Moonshot",
+        crate::config::ApiProvider::Ollama => "Ollama",
+        _ => "this provider",
+    }
 }
 
 pub(crate) fn configured_model_for_role_or_type(
@@ -5107,8 +5135,12 @@ pub(crate) fn configured_model_for_role_or_type(
 
     for key in keys {
         if let Some(model) = runtime.role_models.get(&key) {
-            return normalize_requested_subagent_model(model, &format!("subagents.{key}.model"))
-                .map(Some);
+            return normalize_requested_subagent_model(
+                model,
+                &format!("subagents.{key}.model"),
+                runtime.client.api_provider(),
+            )
+            .map(Some);
         }
     }
     Ok(None)
@@ -5161,7 +5193,15 @@ fn tool_agent_route(parent_model: &str, configured_model: Option<String>) -> Sub
 }
 
 fn should_use_subagent_flash_router(runtime: &SubAgentRuntime) -> bool {
-    runtime.auto_model
+    // #3018: providers without a known cheap tier skip the network router
+    // entirely — there is no alternative model worth a round-trip.
+    runtime.auto_model && subagent_router_candidates(runtime).cheap.is_some()
+}
+
+/// Candidate pair for the sub-agent router, derived from the active
+/// provider and the (already provider-resolved) parent model (#3018).
+fn subagent_router_candidates(runtime: &SubAgentRuntime) -> crate::model_routing::RouterCandidates {
+    crate::model_routing::provider_router_candidates(runtime.client.api_provider(), &runtime.model)
 }
 
 fn fallback_subagent_assignment_route(
@@ -5172,7 +5212,13 @@ fn fallback_subagent_assignment_route(
     let model = if let Some(model) = configured_model {
         model
     } else if runtime.auto_model {
-        crate::model_routing::auto_model_heuristic(prompt, &runtime.model)
+        // #3018: candidate-aware — on providers without a cheap tier this
+        // always resolves to the parent model instead of a DeepSeek id.
+        crate::model_routing::auto_model_heuristic_for_candidates(
+            prompt,
+            &runtime.model,
+            &subagent_router_candidates(runtime),
+        )
     } else {
         runtime.model.clone()
     };
@@ -5203,8 +5249,15 @@ async fn subagent_flash_router(
         return Ok(None);
     }
 
+    let candidates = subagent_router_candidates(runtime);
+    let Some(cheap_model) = candidates.cheap.clone() else {
+        // should_use_subagent_flash_router already gates on this; defensive
+        // second gate so the router can never 400 a cheap-tier-less provider.
+        return Ok(None);
+    };
+
     let request = MessageRequest {
-        model: "deepseek-v4-flash".to_string(),
+        model: cheap_model,
         messages: vec![Message {
             role: "user".to_string(),
             content: vec![ContentBlock::Text {
@@ -5213,9 +5266,9 @@ async fn subagent_flash_router(
             }],
         }],
         max_tokens: 96,
-        system: Some(SystemPrompt::Text(
-            SUBAGENT_ROUTER_SYSTEM_PROMPT.to_string(),
-        )),
+        system: Some(SystemPrompt::Text(subagent_router_system_prompt(
+            &candidates,
+        ))),
         tools: None,
         tool_choice: None,
         metadata: None,
@@ -5231,21 +5284,31 @@ async fn subagent_flash_router(
         runtime.client.create_message(request),
     )
     .await??;
-    Ok(crate::model_routing::parse_auto_route_recommendation(
-        &message_response_text(&response.content),
-    ))
+    Ok(
+        crate::model_routing::parse_auto_route_recommendation_for_candidates(
+            &message_response_text(&response.content),
+            &candidates,
+        ),
+    )
 }
 
-const SUBAGENT_ROUTER_SYSTEM_PROMPT: &str = "\
-You are the codewhale sub-agent routing manager. Return only compact JSON: \
-{\"model\":\"deepseek-v4-flash|deepseek-v4-pro\",\"thinking\":\"off|high|max\"}. \
+/// Render the sub-agent router system prompt from the actual candidate ids
+/// (#3018) so the classifier answers with ids the active provider serves.
+fn subagent_router_system_prompt(candidates: &crate::model_routing::RouterCandidates) -> String {
+    let cheap = candidates.cheap_or_big();
+    let big = &candidates.big;
+    format!(
+        "You are the codewhale sub-agent routing manager. Return only compact JSON: \
+{{\"model\":\"{cheap}|{big}\",\"thinking\":\"off|high|max\"}}. \
 Treat each child assignment like a customer request entering a team queue: decide the least \
 sufficient worker and thinking budget for that assignment. Do not treat being a sub-agent as \
-important by itself. Use Flash for trivial, read-only, status, lookup, or single-step work. \
-Use Pro for coding, debugging, release work, multi-file changes, security, architecture, \
+important by itself. Use {cheap} for trivial, read-only, status, lookup, or single-step work. \
+Use {big} for coding, debugging, release work, multi-file changes, security, architecture, \
 high-risk decisions, ambiguous requests, or work likely to need tool-call judgment. Use thinking \
 off for trivial no-tool work, high for ordinary reasoning, and max only for hard, risky, \
-multi-step, uncertain, or tool-heavy work.";
+multi-step, uncertain, or tool-heavy work."
+    )
+}
 
 fn subagent_router_prompt(runtime: &SubAgentRuntime, prompt: &str) -> String {
     format!(
@@ -5297,7 +5360,15 @@ fn message_response_text(blocks: &[ContentBlock]) -> String {
 fn parse_optional_subagent_model(input: &Value, key: &str) -> Result<Option<String>, ToolError> {
     match input.get(key) {
         None | Some(Value::Null) => Ok(None),
-        Some(Value::String(value)) => normalize_requested_subagent_model(value, key).map(Some),
+        Some(Value::String(value)) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return Err(ToolError::invalid_input(format!("{key} cannot be blank")));
+            }
+            // #3018: Basic parsing only — provider-aware validation is deferred
+            // to the spawn path where the runtime's ApiProvider is available.
+            Ok(Some(trimmed.to_string()))
+        }
         Some(_) => Err(ToolError::invalid_input(format!("{key} must be a string"))),
     }
 }

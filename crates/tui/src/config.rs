@@ -575,6 +575,19 @@ pub(crate) fn normalize_custom_model_id(model: &str) -> Option<String> {
     }
 }
 
+/// Validate a user-requested model id against the active provider (#3018).
+///
+/// DeepSeek providers use the strict `normalize_model_name` gate (official
+/// API only accepts DeepSeek IDs).  All other providers pass any non-empty,
+/// non-control-character string through — the provider API is the authority.
+#[must_use]
+pub fn requested_model_for_provider(provider: ApiProvider, model: &str) -> Option<String> {
+    match provider {
+        ApiProvider::Deepseek | ApiProvider::DeepseekCN => normalize_model_name(model),
+        _ => normalize_custom_model_id(model),
+    }
+}
+
 fn canonical_official_deepseek_model_id(model: &str) -> Option<&'static str> {
     match model.trim().to_ascii_lowercase().as_str() {
         "deepseek-v4-pro"
@@ -7889,6 +7902,25 @@ api_key = "old-openrouter-key"
             ..Default::default()
         };
         assert_eq!(config.default_model(), DEFAULT_TEXT_MODEL);
+    }
+
+    #[test]
+    fn requested_model_for_provider_is_permissive_off_deepseek() {
+        // #3018: the provider API is the authority for non-DeepSeek routes.
+        assert_eq!(
+            requested_model_for_provider(ApiProvider::Moonshot, "kimi-k2.5").as_deref(),
+            Some("kimi-k2.5")
+        );
+        assert_eq!(
+            requested_model_for_provider(ApiProvider::Ollama, "qwen3:32b").as_deref(),
+            Some("qwen3:32b")
+        );
+        // The official DeepSeek API stays strict.
+        assert!(requested_model_for_provider(ApiProvider::Deepseek, "kimi-k2.5").is_none());
+        assert_eq!(
+            requested_model_for_provider(ApiProvider::Deepseek, "deepseek-v4-pro").as_deref(),
+            Some("deepseek-v4-pro")
+        );
     }
 
     #[test]
