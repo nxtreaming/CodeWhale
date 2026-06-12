@@ -93,7 +93,6 @@ pub(crate) fn render_footer(f: &mut Frame, area: Rect, app: &mut App) {
         if let Some(reason) = stall_reason(app) {
             label = format!("{label}  ({reason})");
         }
-        maybe_log_provider_wait_incident(app);
         props.state_label = label;
         props.state_color = palette::DEEPSEEK_SKY;
 

@@ -3821,9 +3821,6 @@ impl App {
     }
 
     fn strip_raw_mouse_reports_from_input(&mut self) {
-        if !self.use_mouse_capture {
-            return;
-        }
         if let Some((input, cursor_position)) =
             strip_raw_mouse_report_runs(&self.input, self.cursor_position)
         {
@@ -5653,12 +5650,34 @@ mod tests {
     }
 
     #[test]
-    fn composer_keeps_mouse_like_text_when_mouse_capture_is_disabled() {
+    fn composer_strips_raw_sgr_mouse_report_when_mouse_capture_is_disabled() {
         let mut app = App::new(test_options(false), &Config::default());
 
         app.insert_str("[<35;44;18M");
 
-        assert_eq!(app.input, "[<35;44;18M");
+        assert_eq!(app.input, "");
+        assert_eq!(app.cursor_position, 0);
+    }
+
+    #[test]
+    fn composer_strips_tail_only_mouse_report_burst_when_mouse_capture_is_disabled() {
+        let mut app = App::new(test_options(false), &Config::default());
+        app.insert_str("draft ");
+
+        app.insert_str(";76;20M35;74;22M35;73;23M");
+
+        assert_eq!(app.input, "draft ");
+        assert_eq!(app.cursor_position, "draft ".chars().count());
+    }
+
+    #[test]
+    fn composer_keeps_coordinate_like_text_when_mouse_capture_is_disabled() {
+        let mut app = App::new(test_options(false), &Config::default());
+
+        app.insert_str("Size 12;34M");
+
+        assert_eq!(app.input, "Size 12;34M");
+        assert_eq!(app.cursor_position, "Size 12;34M".chars().count());
     }
 
     #[test]

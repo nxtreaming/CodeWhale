@@ -2759,6 +2759,7 @@ async fn run_event_loop(
         // window. Triggers a redraw if the prompt was visible.
         app.tick_quit_armed();
         app.tick_receipt();
+        crate::tui::footer_ui::maybe_log_provider_wait_incident(app);
         // While the user is drag-selecting past the transcript edge, advance
         // the viewport on a fixed cadence and extend the selection head so a
         // long passage can be selected in one drag (#1163).
