@@ -166,7 +166,9 @@ impl FleetLedger {
     }
 
     pub fn create_run(&self, run: &FleetRun) -> Result<()> {
-        self.append_record(&FleetLedgerRecord::RunCreated { run: run.clone() })
+        self.append_record(&FleetLedgerRecord::RunCreated {
+            run: sanitize_run_for_ledger(run),
+        })
     }
 
     pub fn update_run_status(
@@ -487,13 +489,15 @@ fn apply_record(state: &mut FleetLedgerState, record: FleetLedgerRecord) {
             task_id,
             worker_id,
             leased_at,
-            lease_expires_at: _,
+            lease_expires_at,
         } => {
             let key = task_key(&run_id.0, &task_id);
             if let Some(task) = state.tasks.get_mut(&key) {
                 task.status = FleetTaskLedgerStatus::Leased;
                 task.leased_to = Some(worker_id);
                 task.leased_at = Some(leased_at);
+                task.entry.lease_deadline = lease_expires_at;
+                task.entry.attempts = task.entry.attempts.saturating_add(1);
             }
         }
         FleetLedgerRecord::TaskCompletedOrFailed {
@@ -523,10 +527,26 @@ fn apply_record(state: &mut FleetLedgerState, record: FleetLedgerRecord) {
             }
             // Derive worker status from lifecycle events.
             match &event.payload {
-                FleetWorkerEventPayload::Starting | FleetWorkerEventPayload::Running => {
+                FleetWorkerEventPayload::Leased { .. }
+                | FleetWorkerEventPayload::Restarted { .. }
+                | FleetWorkerEventPayload::ModelWait { .. }
+                | FleetWorkerEventPayload::RunningTool { .. }
+                | FleetWorkerEventPayload::Heartbeat { .. }
+                | FleetWorkerEventPayload::Starting
+                | FleetWorkerEventPayload::Running => {
                     state
                         .workers
                         .insert(event.worker_id.clone(), FleetWorkerStatus::Busy);
+                }
+                FleetWorkerEventPayload::Interrupted { .. } => {
+                    state
+                        .workers
+                        .insert(event.worker_id.clone(), FleetWorkerStatus::Draining);
+                }
+                FleetWorkerEventPayload::Stale { .. } => {
+                    state
+                        .workers
+                        .insert(event.worker_id.clone(), FleetWorkerStatus::Unhealthy);
                 }
                 FleetWorkerEventPayload::Completed { .. } => {
                     mark_task_terminal(
@@ -602,6 +622,29 @@ fn apply_record(state: &mut FleetLedgerState, record: FleetLedgerRecord) {
             // Alerts are audit-only for state reconstruction.
         }
     }
+}
+
+fn sanitize_run_for_ledger(run: &FleetRun) -> FleetRun {
+    let mut run = run.clone();
+    for task in &mut run.task_specs {
+        if let Some(policy) = &mut task.alert_policy {
+            for channel in &mut policy.channels {
+                match channel {
+                    FleetAlertChannel::Slack { webhook_url } => {
+                        *webhook_url = "<redacted>".to_string();
+                    }
+                    FleetAlertChannel::Webhook { url, secret } => {
+                        *url = "<redacted>".to_string();
+                        *secret = secret.as_ref().map(|_| "<redacted>".to_string());
+                    }
+                    FleetAlertChannel::PagerDuty { routing_key, .. } => {
+                        *routing_key = "<redacted>".to_string();
+                    }
+                }
+            }
+        }
+    }
+    run
 }
 
 #[cfg(test)]
