@@ -2410,13 +2410,29 @@ impl Engine {
         }
 
         let max = crate::tools::goal::MAX_GOAL_CONTINUATIONS_PER_TURN;
-        if *continuations_this_turn >= max {
-            let _ = self
-                .tx_event
-                .send(Event::status(format!(
+        // Route the continuation decision through the goal-loop decision core
+        // (#3215). The hook has already returned for non-active goals, so the
+        // status here is Active; the decision currently enforces the per-turn
+        // continuation cap (behavior-preserving). This is the seam where durable
+        // cross-turn budget — token/time from the per-goal accounting wired in
+        // `crates/state` `record_thread_goal_usage` — will be enforced as goal
+        // mode becomes a persistent work loop.
+        let decision = crate::goal_loop::decide_continuation(
+            crate::goal_loop::GoalRunStatus::Active,
+            crate::goal_loop::GoalProgress {
+                continuations: *continuations_this_turn,
+                ..Default::default()
+            },
+            crate::goal_loop::GoalBudget::with_continuation_cap(max),
+        );
+        if let crate::goal_loop::ContinuationDecision::Stop(reason) = decision {
+            let message = match reason {
+                crate::goal_loop::StopReason::ContinuationLimit => format!(
                     "Goal remains active after {max} continuation pass(es); ending turn to avoid a runaway loop."
-                )))
-                .await;
+                ),
+                other => format!("Goal continuation stopped: {other:?}."),
+            };
+            let _ = self.tx_event.send(Event::status(message)).await;
             return None;
         }
 
