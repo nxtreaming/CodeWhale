@@ -105,7 +105,7 @@ pub(crate) fn render_footer(f: &mut Frame, area: Rect, app: &mut App) {
         if app.fancy_animations {
             props.working_strip_frame = Some(now_ms);
         }
-    } else if props.state_label == "ready"
+    } else if matches!(props.state_label.as_str(), "idle" | "ready")
         && let Some(label) = selected_detail_footer_label(app)
     {
         props.state_label = label;
@@ -950,12 +950,14 @@ pub(crate) fn footer_state_label(app: &App) -> (&'static str, ratatui::style::Co
     if app.is_purging {
         return ("purging \u{238B}", app.ui_theme.status_warning);
     }
-    // Note: we deliberately do NOT show a "thinking" label for `is_loading`.
-    // The animated water-spout strip in the footer's spacer is the visual
-    // signal that the model is live; "thinking" was misleading because it
-    // fired for every kind of in-flight work (tool calls, streaming, etc.),
-    // not strictly reasoning. Sub-agents still surface "working" because
-    // that's a distinct lifecycle the user can act on (open `/agents`).
+    if app.is_loading || matches!(app.runtime_turn_status.as_deref(), Some("in_progress")) {
+        return ("busy", app.ui_theme.status_working);
+    }
+    // Note: we deliberately do NOT show a "thinking" label for live turns.
+    // Busy can mean model bytes, tool calls, approval waits, or sub-agents;
+    // the label should be a state indicator, not an invented activity.
+    // Sub-agents still surface "working" because that's a distinct lifecycle
+    // the user can act on (open `/agents`).
     if running_agent_count(app) > 0 {
         return ("working", app.ui_theme.status_working);
     }
@@ -971,7 +973,7 @@ pub(crate) fn footer_state_label(app: &App) -> (&'static str, ratatui::style::Co
         return ("draft", app.ui_theme.text_muted);
     }
 
-    ("ready", app.ui_theme.status_ready)
+    ("idle", app.ui_theme.status_ready)
 }
 
 #[cfg(test)]
