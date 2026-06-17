@@ -1412,6 +1412,11 @@ pub struct SubAgentRuntime {
     /// child registries. Keeps parent and sub-agent `speech` / `tts` tools on
     /// the same `[speech].output_dir` / env override.
     pub speech_output_dir: Option<PathBuf>,
+    /// Shared todo list — the parent's `SharedTodoList`, cloned into each
+    /// child so sub-agent `checklist_update` calls are visible in the
+    /// Work sidebar live. Without this, each child gets a fresh isolated
+    /// list and the parent never sees child progress until completion.
+    pub todos: SharedTodoList,
 }
 
 impl SubAgentRuntime {
@@ -1449,7 +1454,17 @@ impl SubAgentRuntime {
             mcp_pool: None,
             step_api_timeout: DEFAULT_STEP_API_TIMEOUT,
             speech_output_dir: None,
+            todos: crate::tools::todo::new_shared_todo_list(),
         }
+    }
+
+    /// Attach the parent's shared todo list so sub-agent `checklist_update`
+    /// calls are visible in the Work sidebar live. Without this, children
+    /// get a fresh isolated list.
+    #[must_use]
+    pub fn with_todos(mut self, todos: SharedTodoList) -> Self {
+        self.todos = todos;
+        self
     }
 
     /// Attach an MCP pool so the subagent can execute MCP tools.
@@ -1602,6 +1617,7 @@ impl SubAgentRuntime {
             mcp_pool: self.mcp_pool.clone(),
             step_api_timeout: self.step_api_timeout,
             speech_output_dir: self.speech_output_dir.clone(),
+            todos: self.todos.clone(),
         }
     }
 
@@ -3705,7 +3721,10 @@ async fn run_subagent(
         runtime_for_tools,
         agent_type.clone(),
         allowed_tools.clone(),
-        Arc::new(Mutex::new(TodoList::new())),
+        // Share the parent's todo list so child checklist updates are visible
+        // in the Work sidebar live. Previously each child got a fresh isolated
+        // TodoList — parent never saw child progress until completion.
+        runtime.todos.clone(),
         Arc::new(Mutex::new(PlanState::default())),
     );
     let unavailable_tools = tool_registry.unavailable_allowed_tools();

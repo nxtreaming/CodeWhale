@@ -1327,6 +1327,7 @@ impl Engine {
                         .with_step_api_timeout(self.config.subagent_api_timeout)
                         .with_speech_output_dir(self.config.speech_output_dir.clone())
                         .with_mcp_pool(mcp_pool)
+                        .with_todos(self.config.todos.clone())
                         .background_runtime();
                         let route = resolve_subagent_assignment_route(
                             &runtime,
@@ -2089,6 +2090,7 @@ impl Engine {
                         .with_step_api_timeout(self.config.subagent_api_timeout)
                         .with_speech_output_dir(self.config.speech_output_dir.clone())
                         .with_mcp_pool(mcp_pool.clone())
+                        .with_todos(self.config.todos.clone())
                         .with_parent_completion_tx(self.tx_subagent_completion.clone());
                         if let Some(context) = fork_context_for_runtime.clone() {
                             rt = rt.with_fork_context(context);

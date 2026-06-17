@@ -2914,6 +2914,7 @@ fn stub_runtime() -> SubAgentRuntime {
         mcp_pool: None,
         step_api_timeout: DEFAULT_STEP_API_TIMEOUT,
         speech_output_dir: None,
+        todos: crate::tools::todo::new_shared_todo_list(),
     }
 }
 
