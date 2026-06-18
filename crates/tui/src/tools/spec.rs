@@ -147,6 +147,12 @@ pub struct ToolContext {
     /// and refreshed when the user runs `/trust add <path>`. Distinct from
     /// `trust_mode`, which is the all-or-nothing legacy switch (#29).
     pub trusted_external_paths: Vec<PathBuf>,
+    /// Whether to follow symbolic links during file discovery and tool
+    /// operations. When `true`, symlinked directories are traversed and
+    /// symlinked paths that resolve outside the workspace are still allowed
+    /// (the symlink itself must be inside the workspace). Mirrors the
+    /// `workspace_follow_symlinks` setting.
+    pub follow_symlinks: bool,
     /// Per-domain network policy (#135). When `None`, network tools fall back
     /// to a permissive default that mirrors pre-v0.7.0 behavior so tests and
     /// other contexts that don't construct a real policy keep working.
@@ -223,6 +229,7 @@ impl ToolContext {
             features: Features::with_defaults(),
             state_namespace: "workspace".to_string(),
             trusted_external_paths: Vec::new(),
+            follow_symlinks: false,
             network_policy: None,
             runtime: RuntimeToolServices::default(),
             session_objects: None,
@@ -262,6 +269,7 @@ impl ToolContext {
             features: Features::with_defaults(),
             state_namespace: "workspace".to_string(),
             trusted_external_paths: Vec::new(),
+            follow_symlinks: false,
             network_policy: None,
             runtime: RuntimeToolServices::default(),
             session_objects: None,
@@ -301,6 +309,7 @@ impl ToolContext {
             features: Features::with_defaults(),
             state_namespace: "workspace".to_string(),
             trusted_external_paths: Vec::new(),
+            follow_symlinks: false,
             network_policy: None,
             runtime: RuntimeToolServices::default(),
             session_objects: None,
@@ -368,6 +377,16 @@ impl ToolContext {
         self
     }
 
+    /// Set whether tools should follow symbolic links. When `true`,
+    /// `resolve_path` allows symlinked paths that resolve outside the
+    /// workspace, and walk-based tools traverse symlinked directories.
+    /// Mirrors the `workspace_follow_symlinks` setting.
+    #[must_use]
+    pub fn with_follow_symlinks(mut self, follow: bool) -> Self {
+        self.follow_symlinks = follow;
+        self
+    }
+
     /// Attach an LSP manager so that edit tools can auto-inject diagnostics
     /// into their results after a successful file modification (#428).
     #[must_use]
@@ -411,6 +430,30 @@ impl ToolContext {
             .canonicalize()
             .unwrap_or_else(|_| self.workspace.clone());
 
+        // When follow_symlinks is enabled, check the non-canonical (symlink)
+        // path against the workspace first. A symlink inside the workspace
+        // that resolves outside is allowed — the symlink itself is the gate.
+        if self.follow_symlinks {
+            let candidate_normalized = normalize_path(&candidate);
+            let workspace_normalized = normalize_path(&self.workspace);
+            let workspace_canonical_normalized = normalize_path(&workspace_canonical);
+
+            if candidate_normalized.starts_with(&workspace_normalized)
+                || candidate_normalized.starts_with(&workspace_canonical_normalized)
+            {
+                // The symlink (or plain path) is inside the workspace.
+                // Return the canonicalized target so file I/O works correctly.
+                if candidate.exists() {
+                    return Ok(candidate.canonicalize().unwrap_or(candidate));
+                }
+                // Non-existent path: canonicalize the deepest existing ancestor
+                return self.resolve_nonexistent_path(candidate, &workspace_canonical);
+            }
+
+            // Path is outside workspace even before resolving symlinks.
+            // Fall through to the standard escape check.
+        }
+
         // For the initial check, also try to canonicalize the candidate if possible
         // This handles symlinks like /var -> /private/var on macOS
         let candidate_canonical = candidate
@@ -453,8 +496,19 @@ impl ToolContext {
             return Ok(canonical);
         }
 
-        // For non-existent paths (e.g., files to be created), validate via parent
-        // Find the deepest existing ancestor and canonicalize it
+        self.resolve_nonexistent_path(candidate, &workspace_canonical)
+    }
+
+    /// Resolve a non-existent path by canonicalizing its deepest existing
+    /// ancestor and validating the result is under the workspace or a
+    /// trusted external path.
+    fn resolve_nonexistent_path(
+        &self,
+        candidate: PathBuf,
+        workspace_canonical: &Path,
+    ) -> Result<PathBuf, ToolError> {
+        let workspace_normalized = normalize_path(workspace_canonical);
+        let workspace_plain = normalize_path(&self.workspace);
         let mut existing_ancestor = candidate.clone();
         let mut suffix_parts: Vec<std::ffi::OsString> = Vec::new();
 
@@ -472,6 +526,7 @@ impl ToolContext {
                 }
             }
         }
+        let ancestor_normalized = normalize_path(&existing_ancestor);
 
         let canonical_ancestor = if existing_ancestor.exists() {
             existing_ancestor
@@ -488,10 +543,17 @@ impl ToolContext {
         }
         let canonical = normalize_path(&canonical);
 
+        if self.follow_symlinks
+            && (ancestor_normalized.starts_with(&workspace_plain)
+                || ancestor_normalized.starts_with(&workspace_normalized))
+        {
+            return Ok(canonical);
+        }
+
         // Validate it's under workspace, OR is under a user-trusted external
         // path (`/trust add <path>` from the slash command, persisted in
         // `~/.deepseek/workspace-trust.json`).
-        if !canonical.starts_with(&workspace_canonical)
+        if !canonical.starts_with(workspace_canonical)
             && !canonical.starts_with(&workspace_normalized)
             && !self.is_trusted_external_path(&canonical)
         {
@@ -739,6 +801,8 @@ pub trait ToolSpec: Send + Sync {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
     use tempfile::tempdir;
 
     #[test]
@@ -851,6 +915,47 @@ mod tests {
         let err = ctx
             .resolve_path(other_file.to_str().unwrap())
             .expect_err("untrusted path must error");
+        assert!(matches!(err, ToolError::PathEscape { .. }));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_tool_context_follow_symlinks_allows_nonexistent_path_under_workspace_symlink() {
+        let tmp = tempdir().expect("tempdir");
+        let workspace = tmp.path().join("workspace");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&workspace).expect("mkdir workspace");
+        std::fs::create_dir_all(outside.join("target")).expect("mkdir outside target");
+        symlink(outside.join("target"), workspace.join("linked")).expect("symlink");
+
+        let ctx = ToolContext::new(workspace).with_follow_symlinks(true);
+        let resolved = ctx
+            .resolve_path("linked/new.txt")
+            .expect("path under workspace symlink should resolve");
+
+        let expected = outside
+            .join("target")
+            .canonicalize()
+            .expect("canonical target")
+            .join("new.txt");
+        assert_eq!(resolved, normalize_path(&expected));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_tool_context_default_mode_rejects_nonexistent_path_under_workspace_symlink() {
+        let tmp = tempdir().expect("tempdir");
+        let workspace = tmp.path().join("workspace");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&workspace).expect("mkdir workspace");
+        std::fs::create_dir_all(outside.join("target")).expect("mkdir outside target");
+        symlink(outside.join("target"), workspace.join("linked")).expect("symlink");
+
+        let ctx = ToolContext::new(workspace);
+        let err = ctx
+            .resolve_path("linked/new.txt")
+            .expect_err("default mode should still reject workspace symlink escapes");
+
         assert!(matches!(err, ToolError::PathEscape { .. }));
     }
 

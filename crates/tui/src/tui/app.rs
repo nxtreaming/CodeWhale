@@ -1042,6 +1042,9 @@ pub struct MentionCompletionCache {
     /// Completion behavior used for this walk. Included so live config changes
     /// invalidate cached popup results.
     pub behavior: String,
+    /// Whether symlink following was enabled for this completion walk.
+    /// Included so live config changes invalidate cached popup results.
+    pub follow_links: bool,
     /// Cached completion entries.
     pub entries: Vec<String>,
 }
@@ -1476,6 +1479,10 @@ pub struct App {
     /// `@`-mention completion behavior: fuzzy workspace search or deterministic
     /// directory browser.
     pub mention_menu_behavior: String,
+    /// Follow symbolic links during workspace file discovery walks.
+    /// When `true`, symlinked directories are traversed, enabling
+    /// multi-project workspaces.
+    pub workspace_follow_symlinks: bool,
     pub use_bracketed_paste: bool,
     pub use_paste_burst_detection: bool,
     /// Set to `true` the first time a real `Event::Paste` arrives during a
@@ -2534,6 +2541,7 @@ impl App {
             mention_menu_limit: settings.mention_menu_limit,
             mention_walk_depth: settings.mention_walk_depth,
             mention_menu_behavior: settings.mention_menu_behavior.clone(),
+            workspace_follow_symlinks: settings.workspace_follow_symlinks,
             session_title: None,
             receipt_text: None,
             receipt_started_at: None,
