@@ -342,6 +342,18 @@ fn runtime_auth_generates_token_by_default() {
 }
 
 #[test]
+fn runtime_auth_status_does_not_render_generated_token() {
+    let auth = ResolvedRuntimeAuth {
+        token: Some("cwrt_super_secret_test_token".to_string()),
+        generated: true,
+    };
+    let rendered = runtime_auth_status_lines(&auth).join("\n");
+
+    assert!(!rendered.contains("cwrt_super_secret_test_token"));
+    assert!(rendered.contains("not printed"));
+}
+
+#[test]
 fn runtime_auth_requires_explicit_insecure_for_no_token() {
     let auth = resolve_runtime_auth(None, None, true);
     assert_eq!(

@@ -147,6 +147,19 @@ fn resolve_runtime_auth(
     }
 }
 
+fn runtime_auth_status_lines(auth: &ResolvedRuntimeAuth) -> Vec<String> {
+    if auth.generated {
+        return vec![
+            "Runtime API auth: generated bearer token for this process (not printed).".to_string(),
+            "  Set CODEWHALE_RUNTIME_TOKEN (or DEEPSEEK_RUNTIME_TOKEN as an alias) or pass --auth-token when another client needs to connect.".to_string(),
+        ];
+    }
+    if auth.token.is_some() {
+        return vec!["Runtime API auth: bearer token required for /v1/* routes.".to_string()];
+    }
+    vec!["Runtime API auth: disabled by explicit insecure mode.".to_string()]
+}
+
 fn first_nonblank_token(token: Option<String>) -> Option<String> {
     token
         .map(|token| token.trim().to_string())
@@ -536,26 +549,11 @@ pub async fn run_http_server(
         .with_context(|| format!("Failed to bind {addr}"))?;
 
     println!("Runtime API listening on http://{addr}");
-    if resolved_auth.generated {
-        if let Some(token) = runtime_token.as_deref() {
-            println!("Runtime API auth: generated bearer token for this process.");
-            println!("  Authorization: Bearer {token}");
-            println!(
-                "  Set CODEWHALE_RUNTIME_TOKEN (or DEEPSEEK_RUNTIME_TOKEN as an alias) or pass --auth-token for a stable token."
-            );
-        }
-    } else if auth_enabled {
-        println!("Runtime API auth: bearer token required for /v1/* routes.");
-    } else {
-        println!("Runtime API auth: disabled by explicit insecure mode.");
+    for line in runtime_auth_status_lines(&resolved_auth) {
+        println!("{line}");
     }
     if options.mobile {
-        print_mobile_urls(
-            addr,
-            runtime_token.as_deref(),
-            auth_enabled,
-            options.show_qr,
-        );
+        print_mobile_urls(addr, auth_enabled, resolved_auth.generated, options.show_qr);
     }
     let is_loopback = options.host == "127.0.0.1" || options.host == "::1";
     if is_loopback {
@@ -790,7 +788,7 @@ async fn mobile_page(State(state): State<RuntimeApiState>, req: Request) -> Resp
     Html(MOBILE_HTML).into_response()
 }
 
-fn print_mobile_urls(addr: SocketAddr, _token: Option<&str>, auth_enabled: bool, show_qr: bool) {
+fn print_mobile_urls(addr: SocketAddr, auth_enabled: bool, generated_auth: bool, show_qr: bool) {
     println!("Mobile control page enabled.");
 
     let port = addr.port();
@@ -810,7 +808,13 @@ fn print_mobile_urls(addr: SocketAddr, _token: Option<&str>, auth_enabled: bool,
         url
     };
     if auth_enabled {
-        println!("  Enter the runtime token in the page connection field.");
+        if generated_auth {
+            println!(
+                "  Auth uses an unprinted generated token; restart with CODEWHALE_RUNTIME_TOKEN or --auth-token to sign in from another client."
+            );
+        } else {
+            println!("  Enter the configured runtime token in the page connection field.");
+        }
     }
     println!("Mobile security: use only on a trusted LAN/VPN; this server does not provide TLS.");
 
