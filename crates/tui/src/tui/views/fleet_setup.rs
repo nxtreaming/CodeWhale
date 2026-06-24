@@ -1,4 +1,12 @@
 //! Fleet setup and loadout planner.
+//!
+//! NOTE (audit #7 / #3167): the modal title, footer hints, and the lane/row
+//! taxonomy below are intentionally English for now. #3167 reworks this view
+//! from a read-only summary into an interactive provider/model picker, which
+//! will churn most of this text; localizing the ~90 volatile technical strings
+//! into all shipped locales before that lands would be throwaway work. The
+//! command entry (`CmdFleetDescription`) is already localized, and the
+//! functional selection wiring (audit #8) is handled here regardless of locale.
 
 use std::path::{Path, PathBuf};
 
@@ -132,12 +140,21 @@ impl FleetSetupSnapshot {
     }
 }
 
+/// Lane index of the role picker (lane "1 Role").
+const ROLE_LANE: usize = 0;
+/// Lane index of the model-class picker (lane "2 Model").
+const MODEL_LANE: usize = 1;
+
 pub struct FleetSetupView {
     lanes: Vec<FleetSetupLane>,
     selected_lane: usize,
     selected_rows: Vec<usize>,
     scrolls: Vec<usize>,
-    profile_prompt: String,
+    // The route context the profile prompt is generated against. The prompt
+    // itself is built on demand from the *current* role/model selection (see
+    // `insert_profile_prompt_action`) so the planner selection has a functional
+    // outcome.
+    snapshot: FleetSetupSnapshot,
 }
 
 impl FleetSetupView {
@@ -147,7 +164,6 @@ impl FleetSetupView {
     }
 
     fn from_snapshot(snapshot: FleetSetupSnapshot) -> Self {
-        let profile_prompt = profile_authoring_prompt(&snapshot);
         let lanes = build_lanes(&snapshot);
         let len = lanes.len();
         Self {
@@ -155,8 +171,29 @@ impl FleetSetupView {
             selected_lane: 0,
             selected_rows: vec![0; len],
             scrolls: vec![0; len],
-            profile_prompt,
+            snapshot,
         }
+    }
+
+    /// Label of the row currently selected in `lane`, if any.
+    fn selected_label(&self, lane: usize) -> Option<&str> {
+        let row = self.selected_rows.get(lane).copied().unwrap_or_default();
+        self.lanes
+            .get(lane)
+            .and_then(|lane| lane.rows.get(row))
+            .map(|row| row.label.as_str())
+    }
+
+    /// The planner role chosen in the Role lane (drives the profile file name
+    /// and `role_hint`). Falls back to `custom` when unresolved.
+    fn selected_role(&self) -> &str {
+        self.selected_label(ROLE_LANE).unwrap_or("custom")
+    }
+
+    /// The model class chosen in the Model lane, mapped to a profile schema
+    /// `model_class_hint` value.
+    fn selected_model_class(&self) -> &'static str {
+        model_class_hint(self.selected_label(MODEL_LANE).unwrap_or("inherit"))
     }
 
     fn selected_row(&self) -> usize {
@@ -203,14 +240,20 @@ impl FleetSetupView {
     fn insert_profile_prompt_action(&self) -> ViewAction {
         ViewAction::EmitAndClose(ViewEvent::CommandPaletteSelected {
             action: CommandPaletteAction::InsertText {
-                text: self.profile_prompt.clone(),
+                text: self.profile_prompt(),
             },
         })
     }
 
-    #[cfg(test)]
-    fn profile_prompt(&self) -> &str {
-        &self.profile_prompt
+    /// Build the profile authoring prompt for the *current* role/model
+    /// selection. Re-evaluated each time so navigating the planner changes what
+    /// `g`/Enter inserts.
+    fn profile_prompt(&self) -> String {
+        profile_authoring_prompt(
+            &self.snapshot,
+            self.selected_role(),
+            self.selected_model_class(),
+        )
     }
 }
 
@@ -602,17 +645,52 @@ fn profile_file_status(workspace: &Path) -> (String, String) {
     }
 }
 
-fn profile_authoring_prompt(snapshot: &FleetSetupSnapshot) -> String {
+/// Map a Model-lane row label to a profile-schema `model_class_hint` value.
+/// Route-context rows (`current route`, `fixed model`) and anything unknown
+/// resolve to `inherit` so the generated profile reuses the active route.
+fn model_class_hint(label: &str) -> &'static str {
+    match label {
+        "fast" => "fast",
+        "balanced" => "balanced",
+        // "strong" = security/release/architecture work → the strongest schema class.
+        "strong" => "deep-reasoning",
+        "deep-reasoning" => "deep-reasoning",
+        "tool-heavy" => "tool-heavy",
+        _ => "inherit",
+    }
+}
+
+/// Sanitize a planner role label into a safe TOML file stem.
+fn profile_file_stem(role: &str) -> String {
+    let stem: String = role
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let stem = stem.trim_matches('-').to_ascii_lowercase();
+    if stem.is_empty() {
+        "custom".to_string()
+    } else {
+        stem
+    }
+}
+
+fn profile_authoring_prompt(
+    snapshot: &FleetSetupSnapshot,
+    role: &str,
+    model_class: &str,
+) -> String {
+    let file_stem = profile_file_stem(role);
     format!(
         "Create a safe CodeWhale Fleet agent profile file for this workspace.\n\n\
-         Target path: {PROFILE_DIR}/reviewer.toml\n\
+         Selected planner role: {role}. Selected model class: {model_class}.\n\
+         Target path: {PROFILE_DIR}/{file_stem}.toml\n\
          Current route context only: provider = {provider}, model = {model}, reasoning = {reasoning}\n\n\
          Write TOML using only this schema:\n\
          - name\n\
          - display_name\n\
          - description\n\
-         - role_hint\n\
-         - model_class_hint (inherit, fast, balanced, deep-reasoning, code, review, or tool-heavy)\n\
+         - role_hint (set to \"{role}\")\n\
+         - model_class_hint (set to \"{model_class}\"; one of inherit, fast, balanced, deep-reasoning, code, review, or tool-heavy)\n\
          - model (optional explicit model id on the active/resolved route; omit for loadout auto)\n\
          - [instructions].text\n\
          - [tools].posture = \"read-only\"\n\n\
@@ -684,7 +762,9 @@ mod tests {
             ViewAction::EmitAndClose(ViewEvent::CommandPaletteSelected {
                 action: CommandPaletteAction::InsertText { text },
             }) => {
-                assert!(text.contains("Target path: .codewhale/agents/reviewer.toml"));
+                // Default selection is the first Role row ("manager").
+                assert!(text.contains("Target path: .codewhale/agents/manager.toml"));
+                assert!(text.contains("role_hint (set to \"manager\")"));
                 assert!(text.contains("provider = DeepSeek"));
                 assert!(text.contains("model (optional explicit model id"));
                 assert!(text.contains("Do not include provider, base_url"));
@@ -692,6 +772,35 @@ mod tests {
             }
             other => panic!("expected profile prompt insertion, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn selected_role_and_model_class_drive_generated_profile() {
+        let mut view = FleetSetupView::from_snapshot(snapshot());
+
+        // Role lane: manager(0) main(1) scout(2) builder(3) ... → move to builder.
+        view.handle_key(key(KeyCode::Down));
+        view.handle_key(key(KeyCode::Down));
+        view.handle_key(key(KeyCode::Down));
+        // Model lane: current route(0) inherit(1) fast(2) ... → move right then to fast.
+        view.handle_key(key(KeyCode::Right));
+        view.handle_key(key(KeyCode::Down));
+        view.handle_key(key(KeyCode::Down));
+
+        let prompt = view.profile_prompt();
+        assert!(
+            prompt.contains("Target path: .codewhale/agents/builder.toml"),
+            "selection should drive the profile file name; got: {prompt}"
+        );
+        assert!(
+            prompt.contains("role_hint (set to \"builder\")"),
+            "selection should drive role_hint; got: {prompt}"
+        );
+        assert!(
+            prompt.contains("model_class_hint (set to \"fast\""),
+            "selection should drive model_class_hint; got: {prompt}"
+        );
+        assert!(prompt.contains("Selected planner role: builder. Selected model class: fast."));
     }
 
     #[test]
