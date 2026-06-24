@@ -686,12 +686,22 @@ fn parse_responses_usage(val: &Value) -> Usage {
         .and_then(|d| d.get("cached_tokens"))
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as u32;
+    // Mirror the Chat-Completions parser: derive cache-miss as input minus the
+    // cached hit when the payload reports cached input tokens. Responses nests
+    // reasoning under `output_tokens_details` (not `completion_tokens_details`).
+    let prompt_cache_hit_tokens = if cached > 0 { Some(cached) } else { None };
+    let prompt_cache_miss_tokens = prompt_cache_hit_tokens.map(|hit| input.saturating_sub(hit));
+    let reasoning_tokens = val
+        .get("output_tokens_details")
+        .and_then(|d| d.get("reasoning_tokens"))
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u32);
     Usage {
         input_tokens: input,
         output_tokens: output,
-        prompt_cache_hit_tokens: if cached > 0 { Some(cached) } else { None },
-        prompt_cache_miss_tokens: None,
-        reasoning_tokens: None,
+        prompt_cache_hit_tokens,
+        prompt_cache_miss_tokens,
+        reasoning_tokens,
         reasoning_replay_tokens: None,
         server_tool_use: None,
     }
@@ -1001,6 +1011,33 @@ mod tests {
 
         assert_eq!(code, "content_filter");
         assert_eq!(message, "response incomplete: content_filter");
+    }
+
+    #[test]
+    fn parse_responses_usage_derives_cache_miss_and_reasoning() {
+        let usage = json!({
+            "input_tokens": 1000,
+            "output_tokens": 200,
+            "input_tokens_details": { "cached_tokens": 600 },
+            "output_tokens_details": { "reasoning_tokens": 120 }
+        });
+
+        let parsed = parse_responses_usage(&usage);
+
+        assert_eq!(parsed.input_tokens, 1000);
+        assert_eq!(parsed.output_tokens, 200);
+        assert_eq!(parsed.prompt_cache_hit_tokens, Some(600));
+        // Cache-miss is derived as input minus the cached hit when cached > 0.
+        assert_eq!(parsed.prompt_cache_miss_tokens, Some(400));
+        // Reasoning surfaces from output_tokens_details (Responses dialect).
+        assert_eq!(parsed.reasoning_tokens, Some(120));
+
+        // Without cached/reasoning details, the derived fields stay None.
+        let bare = json!({ "input_tokens": 1000, "output_tokens": 200 });
+        let parsed_bare = parse_responses_usage(&bare);
+        assert_eq!(parsed_bare.prompt_cache_hit_tokens, None);
+        assert_eq!(parsed_bare.prompt_cache_miss_tokens, None);
+        assert_eq!(parsed_bare.reasoning_tokens, None);
     }
 
     #[test]

@@ -10,10 +10,14 @@ use std::path::Path;
 use chrono::{SecondsFormat, Utc};
 use serde::Serialize;
 
+use codewhale_config::route::RouteLimits;
+
 use crate::compaction::{estimate_input_tokens_conservative, estimate_text_tokens_conservative};
-use crate::config::Config;
-use crate::models::{ContentBlock, Message, context_window_for_model};
+use crate::config::{ApiProvider, Config, provider_capability};
+use crate::context_budget::PressureLevel;
+use crate::models::{ContentBlock, Message};
 use crate::prompts::{COMPACT_TEMPLATE, Personality};
+use crate::route_budget::route_context_window_tokens;
 use crate::tui::app::App;
 
 #[derive(Debug, Clone, Serialize)]
@@ -157,7 +161,9 @@ impl ReportBuilder {
 
     fn finish(
         self,
+        provider: ApiProvider,
         model: &str,
+        route_limits: Option<RouteLimits>,
         active_context_estimated_tokens: usize,
         note: impl Into<String>,
     ) -> PromptSourceMap {
@@ -166,7 +172,11 @@ impl ReportBuilder {
             .iter()
             .map(|entry| entry.estimated_tokens)
             .sum();
-        let context_window_tokens = context_window_for_model(model);
+        // Overlay the resolved route's context window when known, falling back
+        // to the provider+model capability matrix (route_context_window_tokens
+        // always yields a concrete value, so this is never None at runtime).
+        let context_window_tokens =
+            Some(route_context_window_tokens(provider, model, route_limits));
         let budget_used_percent = context_window_tokens.map(|window| {
             ((active_context_estimated_tokens as f64 / f64::from(window)) * 100.0).clamp(0.0, 100.0)
         });
@@ -188,7 +198,9 @@ pub fn build_context_report(app: &App) -> PromptSourceMap {
     let active_context_estimated_tokens =
         estimate_input_tokens_conservative(&app.api_messages, app.system_prompt.as_ref());
     builder.finish(
+        app.api_provider,
         &app.model,
+        app.active_route_limits,
         active_context_estimated_tokens,
         "Diagnostic source map. Token counts are conservative estimates and may differ from provider billing.",
     )
@@ -229,10 +241,12 @@ pub fn build_headless_context_report(config: &Config, workspace: &Path) -> Promp
         None,
         ActivationReason::RuntimeState,
         &format!(
-            "provider: {}\nmodel: {}\ncontext_window: {:?}",
+            "provider: {}\nmodel: {}\ncontext_window: {}",
             config.api_provider().as_str(),
             model,
-            context_window_for_model(&model)
+            // Route limits aren't resolved in the headless doctor path, so report
+            // the provider+model capability window (route overlay is unavailable).
+            provider_capability(config.api_provider(), &model).context_window
         ),
         CountingConfidence::Approximate,
         None,
@@ -244,7 +258,10 @@ pub fn build_headless_context_report(config: &Config, workspace: &Path) -> Promp
         .map(|entry| entry.estimated_tokens)
         .sum();
     builder.finish(
+        config.api_provider(),
         &model,
+        // Route limits aren't resolved in the headless doctor path.
+        None,
         active_context_estimated_tokens,
         "Headless diagnostic source map. Conversation, tool results, and live TUI state are unavailable in doctor mode.",
     )
@@ -565,11 +582,11 @@ fn content_block_text(block: &ContentBlock) -> String {
 }
 
 fn pressure_label(percent: Option<f64>) -> &'static str {
+    // Delegate to the unified pressure thresholds so this diagnostic label can't
+    // drift from `context_budget::PressureLevel`. `None` (unknown window) keeps
+    // its own sentinel since a level requires a usage percentage.
     match percent {
-        Some(value) if value >= 90.0 => "critical",
-        Some(value) if value >= 70.0 => "high",
-        Some(value) if value >= 40.0 => "moderate",
-        Some(_) => "low",
+        Some(value) => PressureLevel::from_usage_percent(value).label(),
         None => "unknown",
     }
 }
@@ -704,7 +721,7 @@ mod tests {
             Some(1),
         ));
         add_message_entries(&mut builder, &messages);
-        let report = builder.finish("deepseek-v4-pro", 123, "test");
+        let report = builder.finish(ApiProvider::Deepseek, "deepseek-v4-pro", None, 123, "test");
         let json = context_report_json(&report);
 
         assert!(json.contains("\"source_kind\": \"tool_result\""));
@@ -732,11 +749,62 @@ mod tests {
             CountingConfidence::High,
             Some(7),
         ));
-        let report = builder.finish("deepseek-v4-pro", 525, "test");
+        let report = builder.finish(ApiProvider::Deepseek, "deepseek-v4-pro", None, 525, "test");
         let summary = format_context_summary(&report);
 
         assert!(summary.contains("Context Summary"));
         assert!(summary.contains("Tool schemas (500)"));
+    }
+
+    #[test]
+    fn finish_reflects_route_context_window_over_model_default() {
+        // deepseek-v4-pro defaults to a 1M window; a resolved route advertising a
+        // smaller window must win in the report's context_window_tokens.
+        let route_window = 128_000u64;
+        let model_default = crate::models::context_window_for_model("deepseek-v4-pro")
+            .expect("model has a default window");
+        assert_ne!(
+            u64::from(model_default),
+            route_window,
+            "test fixture must differ from the model default to be meaningful"
+        );
+
+        let limits = RouteLimits {
+            context_tokens: Some(route_window),
+            input_tokens: None,
+            output_tokens: None,
+        };
+        let builder = ReportBuilder::new();
+        let report = builder.finish(
+            ApiProvider::Deepseek,
+            "deepseek-v4-pro",
+            Some(limits),
+            10_000,
+            "test",
+        );
+
+        assert_eq!(report.context_window_tokens, Some(route_window as u32));
+        // Budget percent is computed against the route window, not the default.
+        let expected = (10_000.0 / route_window as f64) * 100.0;
+        let actual = report.budget_used_percent.expect("window known");
+        assert!(
+            (actual - expected).abs() < 1e-6,
+            "got {actual}, want {expected}"
+        );
+    }
+
+    #[test]
+    fn pressure_label_matches_unified_pressure_levels() {
+        // Boundaries mirror context_budget::PressureLevel.
+        assert_eq!(pressure_label(None), "unknown");
+        assert_eq!(pressure_label(Some(0.0)), "low");
+        assert_eq!(pressure_label(Some(39.9)), "low");
+        assert_eq!(pressure_label(Some(40.0)), "moderate");
+        assert_eq!(pressure_label(Some(74.9)), "moderate");
+        assert_eq!(pressure_label(Some(75.0)), "high");
+        assert_eq!(pressure_label(Some(89.9)), "high");
+        assert_eq!(pressure_label(Some(90.0)), "critical");
+        assert_eq!(pressure_label(Some(100.0)), "critical");
     }
 
     #[test]

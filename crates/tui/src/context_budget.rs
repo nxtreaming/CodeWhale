@@ -36,6 +36,11 @@
 // indicator (those consumers are wired in a later pass). Allow dead_code so the
 // substrate can land warning-clean ahead of its callers, matching how other
 // not-yet-wired primitives in this crate are gated.
+//
+// Note: the context report now consumes `PressureLevel::from_usage_percent` and
+// `label`, but the rest of the substrate (`ContextBudget` and its methods,
+// `PressureLevel::suggests_compaction`) is still pending its engine/TUI
+// consumers, so the blanket allow stays until those land.
 #![allow(dead_code)]
 
 /// Fraction of the window, expressed as a percentage, at or above which
