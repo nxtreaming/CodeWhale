@@ -1434,8 +1434,8 @@ fn english(id: MessageId) -> &'static str {
             "Switch mode or open picker: /mode [agent|plan|yolo|1|2|3]"
         }
         MessageId::CmdModelDescription => "Switch or view current model",
-        MessageId::CmdModelsDescription => "List available models from API",
-        MessageId::CmdModelDbDescription => "Browse the bundled model reference database",
+        MessageId::CmdModelsDescription => "Toolbox: fetch live model IDs from the active API",
+        MessageId::CmdModelDbDescription => "Reference: browse the bundled model database",
         MessageId::CmdNetworkDescription => "Manage network allow and deny rules",
         MessageId::CmdNoteDescription => "Add, list, edit, or remove workspace notes",
         MessageId::CmdThemeDescription => "Switch theme or open the theme picker",
@@ -1469,7 +1469,7 @@ fn english(id: MessageId) -> &'static str {
         }
         MessageId::CmdRetryDescription => "Retry the last request",
         MessageId::CmdReviewDescription => "Run a structured code review on a file, diff, or PR",
-        MessageId::CmdRlmDescription => "Open a persistent RLM context: /rlm [0-3] <file_or_text>",
+        MessageId::CmdRlmDescription => "Toolbox: open a persistent RLM context for a file or text",
         MessageId::CmdSaveDescription => "Save session to file",
         MessageId::CmdForkDescription => "Fork the active conversation into a sibling session",
         MessageId::CmdNewDescription => "Start a fresh saved session",

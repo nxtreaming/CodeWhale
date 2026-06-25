@@ -106,8 +106,8 @@ Useful in-session commands:
 - `/restore` rolls back a prior turn from side-git snapshots.
 - `/fleet` opens the Fleet setup view — roles, profiles, loadouts, and policy.
 - `/skills` loads reusable workflows from `~/.codewhale/skills/`.
-- `/config` edits runtime settings; `/statusline` shows the current route,
-  cost, and session state.
+- `/config` edits runtime settings; `/statusline` chooses which footer chips
+  show route, cost, and session state.
 - `! cargo test -p codewhale-tui` runs any shell command through the normal
   approval and sandbox path.
 

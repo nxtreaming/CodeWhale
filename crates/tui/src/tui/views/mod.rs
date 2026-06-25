@@ -823,18 +823,22 @@ impl ConfigView {
 
         let section = row.section.label(self.locale).to_lowercase();
         let section_en = row.section.label(Locale::En).to_lowercase();
+        let label = config_label_for_key(&row.key).to_lowercase();
         let key = row.key.to_lowercase();
         let value = self.row_display_value(row).to_lowercase();
         let scope = row.scope.label(self.locale).to_lowercase();
         let scope_en = row.scope.label(Locale::En).to_lowercase();
+        let hint = config_hint_for_key(&row.key).to_lowercase();
 
         filter.split_whitespace().all(|term| {
             section.contains(term)
                 || section_en.contains(term)
+                || label.contains(term)
                 || key.contains(term)
                 || value.contains(term)
                 || scope.contains(term)
                 || scope_en.contains(term)
+                || hint.contains(term)
         })
     }
 
@@ -868,7 +872,7 @@ impl ConfigView {
     fn key_column_width(&self) -> usize {
         self.rows
             .iter()
-            .map(|row| row.key.chars().count())
+            .map(|row| config_label_for_key(&row.key).chars().count())
             .max()
             .unwrap_or(CONFIG_MIN_KEY_COLUMN_WIDTH)
             .max(CONFIG_MIN_KEY_COLUMN_WIDTH)
@@ -1147,6 +1151,21 @@ impl ConfigView {
 
         row.value.clone()
     }
+
+    fn selected_row_hint(&self) -> Option<String> {
+        let row_idx = self.selected_row_index()?;
+        let row = self.rows.get(row_idx)?;
+        let label = config_label_for_key(&row.key);
+        let hint = config_hint_for_key(&row.key);
+        if !hint.is_empty() {
+            return Some(format!("{label}: {hint}"));
+        }
+        if row.editable {
+            Some(format!("{label}: Enter to edit ({})", row.key))
+        } else {
+            Some(format!("{label}: read-only status ({})", row.key))
+        }
+    }
 }
 
 fn config_base_url_row_key(provider: ApiProvider) -> &'static str {
@@ -1232,6 +1251,78 @@ fn experimental_feature_value(effective: bool, default_enabled: bool, configured
     }
 }
 
+fn config_label_for_key(key: &str) -> String {
+    let static_label = match key {
+        "provider" => "Active provider",
+        "base_url" => "DeepSeek API URL",
+        "provider_url" => "Provider API URL",
+        "model" => "Current model",
+        "default_model" => "Default model",
+        "reasoning_effort" => "Reasoning level",
+        "approval_mode" => "Current approval mode",
+        "default_mode" => "Startup mode",
+        "allow_shell" => "Shell access",
+        "stream_chunk_timeout_secs" => "Stream timeout",
+        "theme" => "Theme",
+        "locale" => "Language",
+        "background_color" => "Background",
+        "calm_mode" => "Calm mode",
+        "low_motion" => "Low motion",
+        "fancy_animations" => "Animations",
+        "show_thinking" => "Show thinking",
+        "show_tool_details" => "Tool detail level",
+        "status_indicator" => "Status indicator",
+        "synchronized_output" => "Output pacing",
+        "cost_currency" => "Cost currency",
+        "transcript_spacing" => "Transcript spacing",
+        "tool_collapse" => "Tool cards",
+        "composer_density" => "Composer density",
+        "composer_border" => "Composer border",
+        "composer_vim_mode" => "Composer Vim mode",
+        "bracketed_paste" => "Bracketed paste",
+        "paste_burst_detection" => "Paste detection",
+        "mention_menu_limit" => "Mention menu limit",
+        "mention_menu_behavior" => "Mention menu behavior",
+        "mention_walk_depth" => "File mention depth",
+        "workspace_follow_symlinks" => "Follow symlinks",
+        "sidebar_width" => "Sidebar width",
+        "sidebar_focus" => "Sidebar focus",
+        "context_panel" => "Context panel",
+        "auto_compact" => "Auto compact",
+        "auto_compact_threshold_percent" => "Compact threshold",
+        "max_history" => "Input history",
+        "prefer_external_pdftotext" => "PDF text extractor",
+        "mcp_config_path" => "MCP config path",
+        "fleet.exec.max_spawn_depth" => "Fleet recursion depth",
+        "goal_command" => "Goal command",
+        "whaleflow" => "WhaleFlow",
+        _ => {
+            if let Some(feature) = key.strip_prefix("features.") {
+                return format!("Feature: {}", humanize_config_key(feature));
+            } else {
+                return humanize_config_key(key);
+            }
+        }
+    };
+    static_label.to_string()
+}
+
+fn humanize_config_key(key: &str) -> String {
+    key.split(['.', '_', '-'])
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            let Some(first) = chars.next() else {
+                return String::new();
+            };
+            let mut word = first.to_uppercase().collect::<String>();
+            word.push_str(chars.as_str());
+            word
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn config_hint_for_key(key: &str) -> &'static str {
     match key {
         "model" => "deepseek-v4-pro | deepseek-v4-flash | deepseek-*",
@@ -1268,6 +1359,14 @@ fn config_hint_for_key(key: &str) -> &'static str {
         "fleet.exec.max_spawn_depth" => {
             "0 blocks child agents; 3 default (same axis as sub-agents); capped at 8"
         }
+        "features.subagents" => "read-only feature flag state; Fleet setup is the user-facing path",
+        "features.web_search" => "read-only feature flag state for web search tools",
+        "features.apply_patch" => "read-only feature flag state for patch editing tools",
+        "features.mcp" => "read-only feature flag state for MCP tools",
+        "features.exec_policy" => "read-only feature flag state for execution policy tools",
+        "features.vision_model" => "read-only feature flag state for vision/model image support",
+        "goal_command" => "preview-only; not a stable command surface yet",
+        "whaleflow" => "preview-only workflow/fleet overlay; not a stable command surface yet",
         _ => "",
     }
 }
@@ -1479,8 +1578,19 @@ impl ModalView for ConfigView {
         let inner = base_block.inner(popup_area);
         let (lines, footer) = if let Some(edit) = self.editing.as_ref() {
             let mut lines: Vec<Line> = Vec::new();
+            let edit_label = config_label_for_key(&edit.key);
+            let edit_title = if edit_label == edit.key {
+                format!("{}{}", self.tr(MessageId::ConfigEditTitlePrefix), edit.key)
+            } else {
+                format!(
+                    "{}{} [{}]",
+                    self.tr(MessageId::ConfigEditTitlePrefix),
+                    edit_label,
+                    edit.key
+                )
+            };
             lines.push(Line::from(vec![Span::styled(
-                format!("{}{}", self.tr(MessageId::ConfigEditTitlePrefix), edit.key),
+                edit_title,
                 Style::default().fg(palette::DEEPSEEK_SKY).bold(),
             )]));
             lines.push(Line::from(""));
@@ -1550,7 +1660,7 @@ impl ModalView for ConfigView {
                 Line::from(""),
                 Line::from(format!(
                     "  {:<key_width$} {:<value_width$} {:<scope_width$}",
-                    "Key",
+                    "Setting",
                     "Value",
                     "Scope",
                     key_width = key_column_width,
@@ -1592,7 +1702,8 @@ impl ModalView for ConfigView {
                         } else {
                             Style::default().fg(palette::TEXT_PRIMARY)
                         };
-                        let key = truncate_view_text(&row.key, key_column_width);
+                        let label = config_label_for_key(&row.key);
+                        let key = truncate_view_text(&label, key_column_width);
                         let value =
                             truncate_view_text(&self.row_display_value(row), value_column_width);
                         let scope =
@@ -1623,6 +1734,7 @@ impl ModalView for ConfigView {
                 )));
             }
 
+            let selected_hint = self.selected_row_hint();
             let bottom_text = if let Some(status) = self.status.as_ref() {
                 status.clone()
             } else if !self.filter.is_empty() {
@@ -1631,18 +1743,23 @@ impl ModalView for ConfigView {
                     self.tr(MessageId::ConfigFilteredSettings)
                 )
             } else if scrollable && !items.is_empty() {
-                format!(
+                let showing = format!(
                     "{} {}-{} / {}",
                     self.tr(MessageId::ConfigShowing),
                     self.scroll.saturating_add(1),
                     end,
                     items.len()
-                )
+                );
+                if let Some(hint) = selected_hint {
+                    format!("{showing} | {hint}")
+                } else {
+                    showing
+                }
             } else {
-                String::new()
+                selected_hint.unwrap_or_default()
             };
             lines.push(Line::from(Span::styled(
-                bottom_text,
+                truncate_view_text(&bottom_text, usize::from(inner.width)),
                 Style::default().fg(palette::TEXT_MUTED),
             )));
 
@@ -2851,6 +2968,42 @@ base_url = "https://api.xiaomimimo.com/v1"
     }
 
     #[test]
+    fn config_view_filter_matches_friendly_labels_and_hints() {
+        let mut view = create_config_view(Locale::En);
+
+        type_filter(&mut view, "shell access");
+        assert_eq!(visible_row_keys(&view), vec!["allow_shell"]);
+
+        view.clear_filter();
+        type_filter(&mut view, "reasoning level");
+        assert_eq!(visible_row_keys(&view), vec!["reasoning_effort"]);
+
+        view.clear_filter();
+        type_filter(&mut view, "fleet setup user-facing");
+        assert_eq!(visible_row_keys(&view), vec!["features.subagents"]);
+    }
+
+    #[test]
+    fn config_view_renders_friendly_setting_labels() {
+        let view = create_config_view(Locale::En);
+        let area = Rect::new(0, 0, 100, 40);
+        let mut buf = Buffer::empty(area);
+
+        view.render(area, &mut buf);
+
+        let dump = buffer_text(&buf, area);
+        assert!(
+            dump.contains("Active provider"),
+            "missing provider label:\n{dump}"
+        );
+        assert!(
+            dump.contains("Shell access"),
+            "missing shell label:\n{dump}"
+        );
+        assert!(dump.contains("Setting"), "missing table heading:\n{dump}");
+    }
+
+    #[test]
     fn localized_config_view_renders_at_narrow_width() {
         let mut app = create_test_app();
         app.ui_locale = Locale::PtBr;
@@ -2922,12 +3075,16 @@ base_url = "https://api.xiaomimimo.com/v1"
 
         let dump = buffer_text(&buf, area);
         assert!(
-            dump.contains("paste_burst_detection"),
-            "long config keys should stay readable:\n{dump}"
+            dump.contains("Paste detection"),
+            "friendly config labels should stay readable:\n{dump}"
         );
         let scope_columns = dump
             .lines()
-            .filter(|line| line.contains("composer_") || line.contains("bracketed_paste"))
+            .filter(|line| {
+                line.contains("Composer")
+                    || line.contains("Bracketed paste")
+                    || line.contains("Paste detection")
+            })
             .filter_map(|line| line.find('已'))
             .collect::<Vec<_>>();
         assert!(

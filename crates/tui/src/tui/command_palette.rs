@@ -37,6 +37,7 @@ pub struct CommandPaletteEntry {
     pub description: String,
     pub command: String,
     pub action: CommandPaletteAction,
+    show_on_empty_query: bool,
 }
 
 pub struct CommandPaletteView {
@@ -81,6 +82,7 @@ pub fn build_entries(
                 description,
                 command: command.palette_command(),
                 action,
+                show_on_empty_query: command.show_in_empty_discovery(),
             });
         }
 
@@ -111,6 +113,7 @@ pub fn build_entries(
                 description,
                 command: slash_command,
                 action,
+                show_on_empty_query: true,
             });
         }
     });
@@ -129,6 +132,7 @@ pub fn build_entries(
             action: CommandPaletteAction::ExecuteCommand {
                 command: format!("${}", skill.name),
             },
+            show_on_empty_query: true,
         });
     }
 
@@ -196,6 +200,7 @@ pub fn build_entries(
                     title: format!("Tool: {}", tool.name()),
                     content: format_tool_details(tool.name(), tool.description(), &tags),
                 },
+                show_on_empty_query: true,
             })
         })
         .collect::<Vec<_>>();
@@ -251,6 +256,7 @@ fn build_mcp_entries(
         action: CommandPaletteAction::ExecuteCommand {
             command: "/mcp".to_string(),
         },
+        show_on_empty_query: true,
     }];
 
     let Some(snapshot) = snapshot else {
@@ -286,6 +292,7 @@ fn build_mcp_entries(
                 title: format!("MCP Server: {}", server.name),
                 content: format_mcp_server_details(snapshot, server),
             },
+            show_on_empty_query: true,
         });
 
         for tool in &server.tools {
@@ -309,6 +316,7 @@ fn build_mcp_entries(
                         tool.description.as_deref().unwrap_or("(no description)")
                     ),
                 },
+                show_on_empty_query: true,
             });
             // Add a "use" entry that inserts the tool's model_name into the input
             // so users can quickly reference the tool in their message to the AI.
@@ -327,6 +335,7 @@ fn build_mcp_entries(
                     action: CommandPaletteAction::InsertText {
                         text: tool.model_name.clone(),
                     },
+                    show_on_empty_query: true,
                 });
             }
         }
@@ -347,6 +356,7 @@ fn build_mcp_entries(
                         server.name, resource.name
                     ),
                 },
+                show_on_empty_query: true,
             });
         }
 
@@ -370,6 +380,7 @@ fn build_mcp_entries(
                         server.name, prompt.model_name
                     ),
                 },
+                show_on_empty_query: true,
             });
         }
     }
@@ -465,7 +476,10 @@ fn command_runs_directly(name: &str) -> bool {
         "help"
             | "clear"
             | "exit"
+            | "provider"
+            | "model"
             | "models"
+            | "modeldb"
             | "queue"
             | "stash"
             | "hooks"
@@ -477,6 +491,9 @@ fn command_runs_directly(name: &str) -> bool {
             | "compact"
             | "export"
             | "config"
+            | "fleet"
+            | "mode"
+            | "statusline"
             | "yolo"
             | "agent"
             | "plan"
@@ -675,7 +692,12 @@ impl CommandPaletteView {
             .entries
             .iter()
             .enumerate()
-            .filter_map(|(idx, entry)| entry_match_score(entry, &terms).map(|score| (idx, score)))
+            .filter_map(|(idx, entry)| {
+                if terms.is_empty() && !entry.show_on_empty_query {
+                    return None;
+                }
+                entry_match_score(entry, &terms).map(|score| (idx, score))
+            })
             .collect::<Vec<_>>();
 
         filtered.sort_by_key(|(idx, score)| {
@@ -855,7 +877,11 @@ impl ModalView for CommandPaletteView {
             Style::default().fg(palette::TEXT_MUTED),
         )));
         let match_count = if self.query.is_empty() {
-            format!("{} entries", self.entries.len())
+            format!(
+                "{} shown / {} entries",
+                self.filtered.len(),
+                self.entries.len()
+            )
         } else {
             format!("{} / {} matches", self.filtered.len(), self.entries.len())
         };
@@ -1047,6 +1073,7 @@ mod tests {
             action: CommandPaletteAction::InsertText {
                 text: command.to_string(),
             },
+            show_on_empty_query: true,
         }
     }
 
@@ -1433,7 +1460,44 @@ mod tests {
     }
 
     #[test]
-    fn command_palette_inserts_model_command_for_argument_entry() {
+    fn command_palette_hides_toolbox_commands_until_searched() {
+        let entries = build_entries(
+            Locale::En,
+            Path::new("."),
+            false,
+            Path::new("."),
+            Path::new("mcp.json"),
+            None,
+        );
+        let mut view = CommandPaletteView::new(entries);
+        let root_labels = view
+            .filtered
+            .iter()
+            .map(|idx| view.entries[*idx].label.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(root_labels.contains(&"/provider"));
+        assert!(root_labels.contains(&"/model"));
+        assert!(root_labels.contains(&"/fleet"));
+        assert!(root_labels.contains(&"/config"));
+        assert!(root_labels.contains(&"/statusline"));
+        assert!(!root_labels.contains(&"/rlm"));
+        assert!(!root_labels.contains(&"/modeldb"));
+        assert!(!root_labels.contains(&"/models"));
+        assert!(!root_labels.contains(&"/subagents"));
+
+        view.query = "rlm".to_string();
+        view.refilter();
+        assert!(
+            view.filtered
+                .iter()
+                .any(|idx| view.entries[*idx].label == "/rlm"),
+            "advanced /rlm should still be searchable"
+        );
+    }
+
+    #[test]
+    fn command_palette_runs_model_command_to_open_picker() {
         let entries = build_entries(
             Locale::En,
             Path::new("."),
@@ -1450,7 +1514,7 @@ mod tests {
         assert_eq!(model.command, "/model ");
         assert!(matches!(
             &model.action,
-            CommandPaletteAction::InsertText { text } if text == "/model "
+            CommandPaletteAction::ExecuteCommand { command } if command == "/model"
         ));
     }
 
@@ -1603,6 +1667,7 @@ mod tests {
             action: CommandPaletteAction::ExecuteCommand {
                 command: "/config".to_string(),
             },
+            show_on_empty_query: true,
         }];
         let mut view = CommandPaletteView::new(entries);
 

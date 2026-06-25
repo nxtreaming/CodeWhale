@@ -2511,6 +2511,7 @@ pub(crate) fn slash_completion_hints_with_model_candidates(
                 if builtin_visible_for_completion_match(
                     cmd,
                     &all_user_commands,
+                    &prefix_lower,
                     name_match,
                     alias_matches,
                 ) {
@@ -2557,6 +2558,7 @@ pub(crate) fn slash_completion_hints_with_model_candidates(
                 if builtin_visible_for_completion_match(
                     cmd,
                     &all_user_commands,
+                    &prefix_lower,
                     name_match,
                     alias_matches,
                 ) {
@@ -2695,6 +2697,7 @@ fn all_command_names_matching_loaded(
             builtin_visible_for_completion_match(
                 cmd,
                 all_user_commands,
+                &prefix,
                 cmd.name.starts_with(&prefix),
                 |alias| alias.starts_with(&prefix),
             )
@@ -2719,9 +2722,14 @@ fn all_command_names_matching_loaded(
 fn builtin_visible_for_completion_match(
     builtin: &commands::CommandInfo,
     user_commands: &[&commands::user_registry::UserCommandMetadata],
+    prefix: &str,
     canonical_name_matches: bool,
     alias_matches: impl Fn(&str) -> bool,
 ) -> bool {
+    if !builtin.show_in_slash_completion(prefix) {
+        return false;
+    }
+
     if user_command_shadows_builtin_canonical(builtin, user_commands) {
         return false;
     }
@@ -3506,6 +3514,31 @@ mod tests {
         let hints = slash_completion_hints("/", 128, &[], Locale::En, None, ApiProvider::Deepseek);
         assert!(!hints.iter().any(|hint| hint.name == "/set"));
         assert!(!hints.iter().any(|hint| hint.name == "/codewhale"));
+    }
+
+    #[test]
+    fn slash_completion_hints_hide_toolbox_commands_until_typed() {
+        let root = slash_completion_hints("/", 128, &[], Locale::En, None, ApiProvider::Deepseek);
+        assert!(root.iter().any(|hint| hint.name == "/provider"));
+        assert!(root.iter().any(|hint| hint.name == "/model"));
+        assert!(root.iter().any(|hint| hint.name == "/fleet"));
+        assert!(root.iter().any(|hint| hint.name == "/config"));
+        assert!(root.iter().any(|hint| hint.name == "/statusline"));
+        assert!(!root.iter().any(|hint| hint.name == "/rlm"));
+        assert!(!root.iter().any(|hint| hint.name == "/modeldb"));
+        assert!(!root.iter().any(|hint| hint.name == "/models"));
+        assert!(!root.iter().any(|hint| hint.name == "/subagents"));
+
+        let rlm = slash_completion_hints("/rl", 128, &[], Locale::En, None, ApiProvider::Deepseek);
+        assert!(rlm.iter().any(|hint| hint.name == "/rlm"));
+
+        let modeldb =
+            slash_completion_hints("/modeld", 128, &[], Locale::En, None, ApiProvider::Deepseek);
+        assert!(modeldb.iter().any(|hint| hint.name == "/modeldb"));
+
+        let subagents =
+            slash_completion_hints("/sub", 128, &[], Locale::En, None, ApiProvider::Deepseek);
+        assert!(subagents.iter().any(|hint| hint.name == "/subagents"));
     }
 
     #[test]

@@ -15,6 +15,19 @@ pub struct CommandInfo {
     pub description_id: MessageId,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandDiscovery {
+    Primary,
+    Advanced,
+    Compatibility,
+}
+
+impl CommandDiscovery {
+    pub fn show_at_root(self) -> bool {
+        matches!(self, CommandDiscovery::Primary)
+    }
+}
+
 impl CommandInfo {
     pub fn requires_argument(&self) -> bool {
         self.usage.contains('<') || self.usage.contains('[')
@@ -52,6 +65,26 @@ impl CommandInfo {
         } else {
             format!("{}  aliases: {}", desc, self.aliases.join(", "))
         }
+    }
+
+    pub fn discovery(&self) -> CommandDiscovery {
+        match self.name {
+            "subagents" => CommandDiscovery::Compatibility,
+            "anchor" | "balance" | "cache" | "change" | "context" | "debt" | "diff" | "edit"
+            | "goal" | "hf" | "hooks" | "lsp" | "modeldb" | "models" | "network" | "plugins"
+            | "profile" | "purge" | "relay" | "rename" | "rlm" | "settings" | "share"
+            | "sidebar" | "status" | "system" | "theme" | "tokens" | "translate" | "trust"
+            | "verbose" | "workspace" => CommandDiscovery::Advanced,
+            _ => CommandDiscovery::Primary,
+        }
+    }
+
+    pub fn show_in_empty_discovery(&self) -> bool {
+        self.discovery().show_at_root()
+    }
+
+    pub fn show_in_slash_completion(&self, prefix: &str) -> bool {
+        !prefix.trim_start_matches('/').trim().is_empty() || self.show_in_empty_discovery()
     }
 }
 

@@ -267,15 +267,18 @@ Common commands for first-time users:
 | --- | --- |
 | `/mode` | Open the mode picker or switch with `/mode agent` |
 | `/model` | Select a model or use `/model auto` |
-| `/models` | Fetch or list models from the active endpoint |
 | `/provider` | Pick the active API provider |
+| `/fleet` | Configure Fleet roles or open worker status |
 | `/config` | Edit runtime and provider settings |
 | `/statusline` | Choose which footer status chips are visible |
-| `/settings` | Inspect persistent UI preferences |
 | `/compact` | Summarize long context to recover token budget |
 | `/review` | Ask for a structured review workflow |
 | `/memory` | Inspect or manage memory when enabled |
 | `/mcp` | Configure or inspect MCP server integration |
+
+Toolbox commands stay searchable when you type them directly: `/models`
+fetches live endpoint IDs, `/modeldb` opens the bundled model reference, and
+`/rlm` opens a manual persistent RLM context.
 
 Use `/provider` when you want to switch away from the default DeepSeek route.
 Provider IDs, environment variables, model defaults, and capability notes are
