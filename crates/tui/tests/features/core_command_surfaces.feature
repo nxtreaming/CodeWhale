@@ -38,5 +38,5 @@ Feature: Core command visible surfaces
     Then the message window should include "Opening persistent sub-agent at depth 2"
     When the user runs the core command "/rlm 1 inspect command extraction"
     Then the message window should include "Opening persistent RLM context at depth 1"
-    When the user runs the core command "/swarm 2 audit commands"
-    Then the message window should include "/swarm is gated"
+    When the user runs the core command "/fleet help"
+    Then the message window should include "/fleet status shows Fleet worker status"
