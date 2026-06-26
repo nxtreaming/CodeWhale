@@ -223,7 +223,11 @@ fn should_auto_approve_approval_request(
 ) -> bool {
     !approval_force_prompt
         && (is_session_approved_for_tool(app, tool_name, grouping_key)
-            || app.approval_mode == ApprovalMode::Auto)
+            || app_auto_approve_enabled(app))
+}
+
+fn app_auto_approve_enabled(app: &App) -> bool {
+    app.mode == AppMode::Yolo || app.approval_mode == ApprovalMode::Auto
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6288,7 +6292,7 @@ async fn dispatch_user_message(
             auto_model: app.auto_model,
             allow_shell: app.allow_shell,
             trust_mode: app.trust_mode,
-            auto_approve: app.mode == AppMode::Yolo,
+            auto_approve: app_auto_approve_enabled(app),
             approval_mode: app.approval_mode,
             translation_enabled: app.translation_enabled,
             show_thinking: app.show_thinking,
@@ -6388,7 +6392,7 @@ async fn handle_bang_shell_input(
             command: command.to_string(),
             mode: app.mode,
             trust_mode: app.trust_mode,
-            auto_approve: app.mode == AppMode::Yolo,
+            auto_approve: app_auto_approve_enabled(app),
             approval_mode: app.approval_mode,
         })
         .await?;
