@@ -291,15 +291,76 @@ export function preservedChatStateFields(state = {}, fields = ["model"]) {
 
 export function splitMessage(text, maxChars = 3500) {
   const value = String(text || "");
+  const limit = Math.max(1, Math.floor(Number(maxChars) || 3500));
   const chars = Array.from(value);
-  if (chars.length <= maxChars) return value ? [value] : [];
+  if (chars.length <= limit) return value ? [value] : [];
   const chunks = [];
-  let cursor = 0;
-  while (cursor < chars.length) {
-    chunks.push(chars.slice(cursor, cursor + maxChars).join(""));
-    cursor += maxChars;
+  let remaining = value;
+  let openFence = null;
+  while (remaining) {
+    const next = takeRenderedSplitMessageChunk(remaining, limit, openFence);
+    chunks.push(next.chunk);
+    remaining = next.remaining;
+    openFence = next.openFence;
   }
   return chunks;
+}
+
+function takeRenderedSplitMessageChunk(text, maxChars, openFence) {
+  const prefix = openFence !== null ? `\`\`\`${openFence}\n` : "";
+  let payloadLimit = Math.max(1, maxChars - charLength(prefix));
+
+  while (true) {
+    const next = takeSplitMessageChunk(text, payloadLimit);
+    const body = `${prefix}${next.chunk}`;
+    const nextOpenFence = updateCodeFenceState(openFence, next.chunk);
+    const suffix = nextOpenFence !== null && next.remaining ? (body.endsWith("\n") ? "```" : "\n```") : "";
+    const chunk = `${body}${suffix}`;
+    const overflow = charLength(chunk) - maxChars;
+    if (overflow <= 0 || payloadLimit === 1) {
+      return { chunk, remaining: next.remaining, openFence: nextOpenFence };
+    }
+    payloadLimit = Math.max(1, payloadLimit - overflow);
+  }
+}
+
+function takeSplitMessageChunk(text, maxChars) {
+  const chars = Array.from(text);
+  if (chars.length <= maxChars) {
+    return { chunk: text, remaining: "" };
+  }
+  const splitAt = preferredSplitIndex(chars, maxChars);
+  return {
+    chunk: chars.slice(0, splitAt).join(""),
+    remaining: chars.slice(splitAt).join("")
+  };
+}
+
+function preferredSplitIndex(chars, maxChars) {
+  const limit = Math.min(chars.length, maxChars);
+  for (let i = limit - 1; i > 0; i -= 1) {
+    if (chars[i] === "\n") return i + 1;
+  }
+  for (let i = limit - 1; i > 0; i -= 1) {
+    if (/\s/u.test(chars[i])) return i + 1;
+  }
+  return limit;
+}
+
+function charLength(text) {
+  return Array.from(text).length;
+}
+
+function updateCodeFenceState(openFence, text) {
+  let current = openFence;
+  for (const match of text.matchAll(/^```([^\n`]*)\s*$/gm)) {
+    if (current === null) {
+      current = match[1]?.trim() || "";
+    } else {
+      current = null;
+    }
+  }
+  return current;
 }
 
 export function compactRuntimeError(status, body) {

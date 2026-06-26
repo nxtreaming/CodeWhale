@@ -79,6 +79,16 @@ test("state/message/runtime helpers preserve bridge behavior", () => {
     { model: "m", replyToMessageId: "r" }
   );
   assert.deepEqual(splitMessage("a🧪b", 2), ["a🧪", "b"]);
+  assert.deepEqual(splitMessage("alpha beta gamma", 12), ["alpha beta ", "gamma"]);
+  const fenced = splitMessage("```js\nconst first = 1;\nconst second = 2;\n```\nDone", 24);
+  assert.ok(fenced.length > 1);
+  assert.equal(fenced[0].endsWith("\n```"), true);
+  assert.equal(fenced[1].startsWith("```js\n"), true);
+  assert.equal(fenced.at(-1).includes("Done"), true);
+  for (const chunk of fenced) {
+    assert.ok(Array.from(chunk).length <= 24);
+    assert.equal((chunk.match(/```/g) || []).length % 2, 0);
+  }
   assert.deepEqual(activeTurnBlock({ turns: [{ id: "t1", status: "queued" }] }), {
     turnId: "t1",
     message: "Thread already has active turn t1. Wait for it to finish or send /interrupt."
