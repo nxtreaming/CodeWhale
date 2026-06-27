@@ -10,6 +10,7 @@ use crate::core::ops::UserInputProvenance;
 use crate::prompt_zones::PinnedPrefix;
 
 const MAX_APPROVAL_INTENT_SUMMARY_CHARS: usize = 2_000;
+const TOOL_ERROR_DEGRADATION_THRESHOLD: u32 = 2;
 
 fn approval_intent_summary(text: &str) -> Option<String> {
     let trimmed = text.trim();
@@ -40,6 +41,51 @@ pub(super) fn registered_tool_approval_required(
         return true;
     }
     !auto_approve
+}
+
+pub(super) fn tool_error_degradation_runtime_hint(
+    consecutive_tool_error_steps: u32,
+    step_error_tool_names: &[String],
+    step_error_categories: &[ErrorCategory],
+) -> Option<String> {
+    if consecutive_tool_error_steps < TOOL_ERROR_DEGRADATION_THRESHOLD {
+        return None;
+    }
+    if !step_error_categories
+        .iter()
+        .any(|category| tool_error_category_allows_degradation(*category))
+    {
+        return None;
+    }
+
+    let mut tool_names = step_error_tool_names
+        .iter()
+        .map(|name| name.trim())
+        .filter(|name| !name.is_empty())
+        .collect::<Vec<_>>();
+    tool_names.sort_unstable();
+    tool_names.dedup();
+    let tools = if tool_names.is_empty() {
+        "tools".to_string()
+    } else {
+        tool_names.join(", ")
+    };
+
+    Some(format!(
+        "Tool calls have failed for {consecutive_tool_error_steps} consecutive steps ({tools}). \
+do not repeat the same call unchanged; switch to an alternate tool or source, narrow the request, \
+or ask for the required input before trying again."
+    ))
+}
+
+fn tool_error_category_allows_degradation(category: ErrorCategory) -> bool {
+    matches!(
+        category,
+        ErrorCategory::Network
+            | ErrorCategory::RateLimit
+            | ErrorCategory::Timeout
+            | ErrorCategory::Tool
+    )
 }
 
 fn registered_tool_requires_non_bypassable_approval(tool_name: &str) -> bool {
@@ -2235,6 +2281,7 @@ impl Engine {
             // (e.g.) a Tool failure that should escalate from a permission
             // denial that should not.
             let mut step_error_categories: Vec<ErrorCategory> = Vec::new();
+            let mut step_error_tool_names: Vec<String> = Vec::new();
             let mut stop_after_plan_tool = false;
 
             for outcome in outcomes.into_iter().flatten() {
@@ -2311,6 +2358,7 @@ impl Engine {
                         }));
                         step_error_count += 1;
                         step_error_categories.push(envelope.category);
+                        step_error_tool_names.push(outcome.name.clone());
                         let error = format_tool_error(&e, &outcome.name);
                         self.session.working_set.observe_tool_call(
                             &tool_name_for_ws,
@@ -2351,6 +2399,17 @@ impl Engine {
 
             if step_error_count > 0 {
                 consecutive_tool_error_steps = consecutive_tool_error_steps.saturating_add(1);
+                if let Some(hint) = tool_error_degradation_runtime_hint(
+                    consecutive_tool_error_steps,
+                    &step_error_tool_names,
+                    &step_error_categories,
+                ) {
+                    self.add_session_message(self.runtime_text_message_with_turn_metadata(
+                        hint,
+                        UserInputProvenance::Runtime,
+                    ))
+                    .await;
+                }
             } else {
                 consecutive_tool_error_steps = 0;
             }
