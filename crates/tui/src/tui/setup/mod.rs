@@ -307,17 +307,12 @@ impl SetupRuntimeFacts {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SetupRuntimePreset {
     AskFirst,
+    #[default]
     NormalAgent,
     HighTrustLocal,
-}
-
-impl Default for SetupRuntimePreset {
-    fn default() -> Self {
-        Self::NormalAgent
-    }
 }
 
 impl SetupRuntimePreset {
