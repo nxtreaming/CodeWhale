@@ -45,6 +45,7 @@ pub enum ModalKind {
     ModePicker,
     FleetSetup,
     HotbarSetup,
+    SetupWizard,
     FilePicker,
     StatusPicker,
     FeedbackPicker,
@@ -458,6 +459,12 @@ pub enum ViewEvent {
     /// handled by the follow-up persistence slice.
     HotbarSetupSaved {
         bindings: Vec<codewhale_config::HotbarBindingToml>,
+    },
+    /// Emitted by the constitution-first setup shell when a staged setup-state
+    /// record should be committed atomically to `$CODEWHALE_HOME/setup_state.json`.
+    SetupStateCommitRequested {
+        state: codewhale_config::SetupState,
+        message: String,
     },
     /// Emitted by the `/hotbar` setup wizard when the user chooses "Disable
     /// Hotbar". The host persists `hotbar = []` and hides the panel.

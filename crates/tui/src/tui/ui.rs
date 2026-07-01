@@ -740,6 +740,17 @@ pub async fn run_tui(config: &Config, options: TuiOptions) -> Result<()> {
         app.maybe_show_feature_intro();
     }
 
+    if options.resume_session_id.is_none()
+        && app.onboarding == crate::tui::app::OnboardingState::None
+        && crate::tui::setup::should_open_update_checkpoint(&app, config)
+        && app.view_stack.top_kind() != Some(ModalKind::SetupWizard)
+    {
+        app.view_stack
+            .push(crate::tui::setup::SetupWizardView::new_for_app(
+                &app, config,
+            ));
+    }
+
     // Load existing session if resuming.
     if let Some(ref session_id) = options.resume_session_id
         && let Ok(manager) = SessionManager::default_location()
@@ -7594,6 +7605,12 @@ async fn apply_command_result(
                         .push(crate::tui::hotbar::setup::HotbarSetupView::new(app, config));
                 }
             }
+            AppAction::OpenSetupWizard => {
+                if app.view_stack.top_kind() != Some(ModalKind::SetupWizard) {
+                    app.view_stack
+                        .push(crate::tui::setup::SetupWizardView::new_for_app(app, config));
+                }
+            }
             AppAction::DisableHotbar => disable_hotbar(app, config),
             AppAction::RestoreHotbarDefaults => restore_hotbar_defaults(app, config),
             AppAction::OpenExternalUrl { url, label } => match open_external_url(&url) {
@@ -9419,6 +9436,14 @@ async fn handle_view_events(
             ViewEvent::HotbarSetupSaved { bindings } => {
                 apply_hotbar_setup_saved(app, config, bindings);
             }
+            ViewEvent::SetupStateCommitRequested { state, message } => match state.save() {
+                Ok(()) => {
+                    app.status_message = Some(message);
+                }
+                Err(err) => {
+                    app.status_message = Some(format!("Setup state could not be saved: {err}"));
+                }
+            },
             ViewEvent::HotbarDisableRequested => {
                 disable_hotbar(app, config);
             }

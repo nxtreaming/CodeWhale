@@ -27,6 +27,7 @@ mod profile;
 mod provider;
 mod queue;
 mod rlm;
+mod setup;
 mod stash;
 mod subagents;
 mod translate;
@@ -99,6 +100,10 @@ impl CommandGroup for CoreCommands {
             Box::new(FunctionCommand::new(
                 hotbar::HotbarCmd::info(),
                 hotbar::HotbarCmd::execute,
+            )),
+            Box::new(FunctionCommand::new(
+                setup::SetupCmd::info(),
+                setup::SetupCmd::execute,
             )),
             Box::new(FunctionCommand::new(
                 agent::AgentCmd::info(),

@@ -5912,6 +5912,8 @@ pub enum AppAction {
     OpenFleetSetup,
     /// Open the `/hotbar` setup wizard.
     OpenHotbarSetup,
+    /// Open the constitution-first `/setup` wizard shell.
+    OpenSetupWizard,
     /// Disable the Hotbar: persist `hotbar = []` and clear the live slots.
     DisableHotbar,
     /// Restore the default recommended Hotbar slots: remove the `hotbar` key so
