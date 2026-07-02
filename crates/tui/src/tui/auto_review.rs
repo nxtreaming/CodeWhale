@@ -744,6 +744,52 @@ mod tests {
     }
 
     #[test]
+    fn name_keyed_shell_tools_follow_the_same_floor_as_exec_shell() {
+        // #3883: the fix reasoned about task_shell_start/run_verifiers but
+        // pinned only exec_shell. Lock the name-keyed shell path too: an
+        // ordinary background task_shell_start does not hold in YOLO, a
+        // dangerous one does, and run_verifiers (Unknown category, not a
+        // destructive action kind) never trips the floor.
+        let policy = AutoReviewPolicy::default();
+
+        let ordinary = ctx_for(
+            "task_shell_start",
+            json!({ "command": "cargo test", "background": true }),
+            RunOrigin::Background,
+            ApprovalMode::Bypass,
+        );
+        assert_ne!(
+            policy.evaluate(&ordinary).action,
+            AutoReviewAction::HoldForReview,
+            "ordinary background task_shell_start must not prompt in YOLO"
+        );
+
+        let dangerous = ctx_for(
+            "task_shell_start",
+            json!({ "command": "rm -rf ~/", "background": true }),
+            RunOrigin::Background,
+            ApprovalMode::Bypass,
+        );
+        assert_eq!(
+            policy.evaluate(&dangerous).action,
+            AutoReviewAction::HoldForReview,
+            "dangerous background task_shell_start must still hold"
+        );
+
+        let verifiers = ctx_for(
+            "run_verifiers",
+            json!({ "background": true }),
+            RunOrigin::Background,
+            ApprovalMode::Bypass,
+        );
+        assert_ne!(
+            policy.evaluate(&verifiers).action,
+            AutoReviewAction::HoldForReview,
+            "run_verifiers is not a destructive action kind and must not hold"
+        );
+    }
+
+    #[test]
     fn background_device_and_filesystem_destroyers_are_held_by_safety_floor() {
         // #3883 follow-up: the narrowed floor must still hold catastrophic
         // writes that command_safety rates only RequiresApproval, even in

@@ -3264,6 +3264,38 @@ fn subagent_failed_sentinel_format_is_well_formed() {
 }
 
 #[test]
+fn annotated_failure_message_composes_class_tag_and_model_hint() {
+    // #3884: the failure recorder composes subagent_failure_message (adds the
+    // class tag + full chain) with annotate_child_model_error (adds the
+    // model-availability hint). Pin the composition the mailbox/update_failed
+    // call sites actually perform, not just the helper in isolation.
+    let err = anyhow::Error::new(crate::llm_client::LlmError::AuthorizationError(
+        "The model `gpt-5.5-codex` does not exist or you do not have access".to_string(),
+    ))
+    .context("Responses API request failed");
+
+    let annotated = annotate_child_model_error(&subagent_failure_message(&err), "gpt-5.5-codex");
+
+    // Class tag from subagent_failure_message.
+    assert!(annotated.starts_with("[auth]"), "{annotated}");
+    // Full chain preserved.
+    assert!(
+        annotated.contains("Responses API request failed"),
+        "{annotated}"
+    );
+    assert!(annotated.contains("does not exist"), "{annotated}");
+    // Model-availability hint fired because the real provider text now
+    // reaches the classifier (it could not when only the masked outer
+    // context string was recorded).
+    assert!(annotated.contains("gpt-5.5-codex"), "{annotated}");
+    assert!(
+        annotated.contains("child model override")
+            || annotated.contains("child-agent model config"),
+        "{annotated}"
+    );
+}
+
+#[test]
 fn subagent_failure_message_preserves_error_chain() {
     // #3884: `to_string()` on an anyhow error prints only the outermost
     // context ("Responses API request failed"), masking the HTTP status and

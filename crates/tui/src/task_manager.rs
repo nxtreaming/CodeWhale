@@ -1870,6 +1870,40 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn boot_does_not_rewrite_non_recovered_task_files() -> Result<()> {
+        // #3757 boot-persist narrowing: TaskManager::start must persist only
+        // the reconciled queue and the running->failed recoveries — a
+        // completed task's file must be byte-identical across a restart.
+        let root = std::env::temp_dir().join(format!("deepseek-task-test-{}", Uuid::new_v4()));
+        let manager =
+            TaskManager::start_with_executor(test_config(root.clone()), Arc::new(MockExecutor))
+                .await?;
+        let task = manager
+            .add_task(NewTaskRequest::from_prompt("finish then persist"))
+            .await?;
+        let finished = wait_for_terminal_state(&manager, &task.id, Duration::from_secs(10)).await?;
+        assert_eq!(finished.status, TaskStatus::Completed);
+        drop(manager);
+
+        let task_file = root.join("tasks").join(format!("{}.json", task.id));
+        let before = fs::read(&task_file)?;
+
+        let recovered =
+            TaskManager::start_with_executor(test_config(root.clone()), Arc::new(MockExecutor))
+                .await?;
+        // Give start() a beat to run its (narrowed) boot persist.
+        sleep(Duration::from_millis(50)).await;
+        drop(recovered);
+
+        let after = fs::read(&task_file)?;
+        assert_eq!(
+            before, after,
+            "a completed task file must not be rewritten on boot"
+        );
+        Ok(())
+    }
+
     #[test]
     fn running_tasks_are_not_requeued_after_restart() -> Result<()> {
         let root = std::env::temp_dir().join(format!("deepseek-task-test-{}", Uuid::new_v4()));
