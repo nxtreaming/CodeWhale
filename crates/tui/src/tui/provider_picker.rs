@@ -1149,21 +1149,23 @@ impl ProviderPickerView {
     /// instead of dead-ending with an error. Falls back to the normal list
     /// if the target has no row (e.g. an unknown custom id).
     #[must_use]
+    /// Returns `None` when `target` has no picker row (an unknown/custom
+    /// provider we could not focus or key-enter) so the caller can keep its
+    /// honest error instead of opening a dead-end picker.
     pub fn new_for_missing_auth(
         active: ApiProvider,
         target: ApiProvider,
         config: &Config,
         runtime_status: Option<ProviderRuntimeStatus>,
-    ) -> Self {
+    ) -> Option<Self> {
         let mut picker = Self::new_with_runtime_status(active, config, runtime_status);
-        if let Some(idx) = picker.rows.iter().position(|row| row.provider == target) {
-            picker.selected_idx = idx;
-            // The target may be an unconfigured catalog row; show the catalog
-            // so it is visible, then jump into key entry for it.
-            picker.view = ProviderListView::Catalog;
-            picker.enter_key_entry();
-        }
-        picker
+        let idx = picker.rows.iter().position(|row| row.provider == target)?;
+        picker.selected_idx = idx;
+        // The target may be an unconfigured catalog row; show the catalog so
+        // it is visible, then jump into key entry for it.
+        picker.view = ProviderListView::Catalog;
+        picker.enter_key_entry();
+        Some(picker)
     }
 
     fn row_visible(&self, idx: usize) -> bool {
@@ -3098,7 +3100,8 @@ mod tests {
             ApiProvider::Anthropic,
             &config,
             None,
-        );
+        )
+        .expect("Anthropic has a picker row");
         assert_eq!(picker.stage, Stage::KeyEntry);
         assert_eq!(picker.selected_provider(), ApiProvider::Anthropic);
     }

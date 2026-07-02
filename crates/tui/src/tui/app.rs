@@ -4023,6 +4023,7 @@ impl App {
         // a neutral Info toast rather than a misleading Success.
         let negated = has("not ")
             || has("no longer")
+            || has("no ")
             || has("could not")
             || has("couldn't")
             || has("cannot")

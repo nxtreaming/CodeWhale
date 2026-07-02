@@ -3343,6 +3343,8 @@ fn status_classifier_does_not_paint_negated_success_green() {
     assert_ne!(level, StatusToastLevel::Success);
     let (level, _, _) = App::classify_status_text("Could not enable subagents");
     assert_ne!(level, StatusToastLevel::Success);
+    let (level, _, _) = App::classify_status_text("No sessions found");
+    assert_ne!(level, StatusToastLevel::Success);
 
     // Genuine successes still classify green.
     let (level, _, _) = App::classify_status_text("Fleet profile saved: reviewer.toml");

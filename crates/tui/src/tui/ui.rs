@@ -7303,20 +7303,22 @@ async fn switch_provider(
                 && app.view_stack.top_kind() != Some(ModalKind::ProviderPicker)
             {
                 let runtime_status = query_provider_runtime_status(engine_handle).await;
-                app.view_stack.push(
+                if let Some(picker) =
                     crate::tui::provider_picker::ProviderPickerView::new_for_missing_auth(
                         previous_provider,
                         target,
                         config,
                         runtime_status,
-                    ),
-                );
-                app.status_message = Some(format!(
-                    "{} needs a key or local runtime — enter one to switch.",
-                    target.display_name()
-                ));
-                app.needs_redraw = true;
-                return;
+                    )
+                {
+                    app.view_stack.push(picker);
+                    app.status_message = Some(format!(
+                        "{} needs a key or local runtime — enter one to switch.",
+                        target.display_name()
+                    ));
+                    app.needs_redraw = true;
+                    return;
+                }
             }
             app.add_message(HistoryCell::System {
                 content: format!(
@@ -9940,12 +9942,29 @@ async fn handle_view_events(
                 // make the whole agents dir fail to load on the duplicate).
                 // Overwriting the SAME file is fine — that is an intentional
                 // re-draft of this profile.
-                let id_conflict =
-                    crate::fleet::profile::load_workspace_agent_profiles(&app.workspace)
-                        .ok()
-                        .into_iter()
-                        .flatten()
-                        .find(|p| p.id == draft.id && p.source != target);
+                // Fail CLOSED: if the agents dir can't be read/parsed we
+                // cannot prove there's no id collision, so refuse rather than
+                // write into a dir that already fails to load.
+                let existing_profiles =
+                    crate::fleet::profile::load_workspace_agent_profiles(&app.workspace);
+                if let Err(err) = &existing_profiles {
+                    let zh = app.ui_locale == crate::localization::Locale::ZhHans;
+                    app.status_message = Some(if zh {
+                        format!(
+                            "无法校验现有配置（.codewhale/agents 中有文件无法读取：{err}）；请先修复再保存。"
+                        )
+                    } else {
+                        format!(
+                            "Could not verify existing profiles (a file in .codewhale/agents is unreadable: {err}); fix it before saving."
+                        )
+                    });
+                    app.needs_redraw = true;
+                    continue;
+                }
+                let id_conflict = existing_profiles
+                    .into_iter()
+                    .flatten()
+                    .find(|p| p.id == draft.id && p.source != target);
                 if let Some(existing) = id_conflict {
                     let zh = app.ui_locale == crate::localization::Locale::ZhHans;
                     app.status_message = Some(if zh {
