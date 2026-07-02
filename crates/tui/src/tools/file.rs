@@ -545,7 +545,7 @@ impl ToolSpec for WriteFileTool {
             })?;
         }
 
-        fs::write(&file_path, file_content).map_err(|e| {
+        crate::utils::write_atomic(&file_path, file_content.as_bytes()).map_err(|e| {
             ToolError::execution_failed(format!("Failed to write {}: {}", file_path.display(), e))
         })?;
         context.note_file_read(&file_path);
@@ -702,7 +702,7 @@ impl ToolSpec for EditFileTool {
             (contents.replace(search, replace), count, None)
         };
 
-        fs::write(&file_path, &updated).map_err(|e| {
+        crate::utils::write_atomic(&file_path, updated.as_bytes()).map_err(|e| {
             ToolError::execution_failed(format!("Failed to write {}: {}", file_path.display(), e))
         })?;
         context.note_file_read(&file_path);
