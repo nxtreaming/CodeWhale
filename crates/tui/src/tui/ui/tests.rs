@@ -1725,6 +1725,16 @@ fn create_test_app() -> App {
     // Pin locale and currency for deterministic tests regardless of host locale.
     app.cost_currency = crate::pricing::CostCurrency::Usd;
     app.ui_locale = crate::localization::Locale::En;
+    // Pin the route identity too: App::new consults the developer's real
+    // saved settings (provider/model maps, auto-model, route limits), so on
+    // a machine with customized settings the context-window tests computed
+    // against a different model than the requested deepseek-v4-pro.
+    app.api_provider = crate::config::ApiProvider::Deepseek;
+    app.model = "deepseek-v4-pro".to_string();
+    app.auto_model = false;
+    app.last_effective_model = None;
+    app.active_route_limits = None;
+    app.active_context_window_override = None;
     app
 }
 
