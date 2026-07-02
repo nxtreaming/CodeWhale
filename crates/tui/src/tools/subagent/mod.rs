@@ -4577,6 +4577,37 @@ fn subagent_transient_provider_retry_delay(retry_number: u32) -> Duration {
     SUBAGENT_TRANSIENT_PROVIDER_INITIAL_BACKOFF.saturating_mul(multiplier.min(4))
 }
 
+#[derive(Debug, Clone, Copy)]
+struct RetryableSubAgentProviderFailure {
+    label: &'static str,
+    checkpoint_reason: &'static str,
+    delay: Duration,
+}
+
+fn retryable_subagent_provider_failure(
+    error: &anyhow::Error,
+    retry_number: u32,
+) -> Option<RetryableSubAgentProviderFailure> {
+    if let Some(LlmError::RateLimited { retry_after, .. }) = error.downcast_ref::<LlmError>() {
+        return Some(RetryableSubAgentProviderFailure {
+            label: "rate-limited provider response",
+            checkpoint_reason: "api_rate_limited",
+            delay: retry_after
+                .unwrap_or_else(|| subagent_transient_provider_retry_delay(retry_number)),
+        });
+    }
+
+    if is_transient_subagent_provider_error(error) {
+        return Some(RetryableSubAgentProviderFailure {
+            label: "transient provider failure",
+            checkpoint_reason: "api_transient_provider_failure",
+            delay: subagent_transient_provider_retry_delay(retry_number),
+        });
+    }
+
+    None
+}
+
 fn is_transient_subagent_provider_error(error: &anyhow::Error) -> bool {
     let message = format!("{error:#}").to_ascii_lowercase();
     [
@@ -4618,25 +4649,33 @@ async fn request_subagent_model_response_with_retries(
         .await
         {
             Ok(Ok(response)) => return Ok(response),
-            Ok(Err(err)) if is_transient_subagent_provider_error(&err) => {
+            Ok(Err(err)) => {
+                let retry_number = transient_failures.saturating_add(1);
+                let Some(retryable) = retryable_subagent_provider_failure(&err, retry_number)
+                else {
+                    return Err(SubAgentApiRequestFailure::Fatal(err));
+                };
+
                 if transient_failures >= SUBAGENT_TRANSIENT_PROVIDER_MAX_RETRIES {
                     let attempts = transient_failures.saturating_add(1);
                     return Err(SubAgentApiRequestFailure::Interrupted {
                         reason: format!(
-                            "Transient provider failure after {attempts} API attempt(s): {err}; checkpoint preserved for continuation"
+                            "{} after {attempts} API attempt(s): {err}; checkpoint preserved for continuation",
+                            retryable.label
                         ),
-                        checkpoint_reason: "api_transient_provider_failure",
+                        checkpoint_reason: retryable.checkpoint_reason,
                     });
                 }
 
                 transient_failures = transient_failures.saturating_add(1);
-                let delay = subagent_transient_provider_retry_delay(transient_failures);
+                let delay = retryable.delay;
                 record_agent_progress(
                     runtime,
                     agent_id,
                     format!(
-                        "{}: transient provider failure; retrying API request {}/{} in {}ms ({err})",
+                        "{}: {}; retrying API request {}/{} in {}ms ({err})",
                         format_step_counter(steps, max_steps),
+                        retryable.label,
                         transient_failures,
                         SUBAGENT_TRANSIENT_PROVIDER_MAX_RETRIES,
                         delay.as_millis(),
@@ -4644,7 +4683,6 @@ async fn request_subagent_model_response_with_retries(
                 );
                 tokio::time::sleep(delay).await;
             }
-            Ok(Err(err)) => return Err(SubAgentApiRequestFailure::Fatal(err)),
             Err(_) => {
                 return Err(SubAgentApiRequestFailure::Interrupted {
                     reason: format!(
