@@ -595,6 +595,31 @@ fn open_setup_checkpoint_if_due(app: &mut App, config: &Config, skip_onboarding:
     true
 }
 
+fn complete_trust_directory_onboarding(app: &mut App, config: &Config) -> Result<(), String> {
+    onboarding::mark_trusted(&app.workspace).map_err(|err| err.to_string())?;
+    app.trust_mode = true;
+    app.hooks = HookExecutor::new(
+        crate::hooks::HooksConfig::load_with_project(config.hooks_config(), &app.workspace),
+        app.workspace.clone(),
+    );
+    app.runtime_services.hook_executor = Some(std::sync::Arc::new(app.hooks.clone()));
+    app.status_message = None;
+    if app.onboarding_workspace_trust_gate {
+        app.onboarding_workspace_trust_gate = false;
+        app.onboarding = OnboardingState::None;
+    } else {
+        app.onboarding = OnboardingState::Tips;
+    }
+    Ok(())
+}
+
+fn back_from_api_key_onboarding(app: &mut App) {
+    app.onboarding = OnboardingState::Language;
+    app.api_key_input.clear();
+    app.api_key_cursor = 0;
+    app.status_message = None;
+}
+
 /// Run the interactive TUI event loop.
 ///
 /// # Examples
@@ -3793,10 +3818,7 @@ async fn run_event_loop(
                         return Ok(());
                     }
                     KeyCode::Esc if app.onboarding == OnboardingState::ApiKey => {
-                        app.onboarding = OnboardingState::Welcome;
-                        app.api_key_input.clear();
-                        app.api_key_cursor = 0;
-                        app.status_message = None;
+                        back_from_api_key_onboarding(app);
                     }
                     KeyCode::Esc if app.onboarding == OnboardingState::Language => {
                         app.onboarding = OnboardingState::Welcome;
@@ -3901,7 +3923,12 @@ async fn run_event_loop(
                                 }
                             }
                         }
-                        OnboardingState::TrustDirectory => {}
+                        OnboardingState::TrustDirectory => {
+                            if let Err(err) = complete_trust_directory_onboarding(app, config) {
+                                app.status_message =
+                                    Some(format!("Failed to trust workspace: {err}"));
+                            }
+                        }
                         OnboardingState::Tips => {
                             app.finish_onboarding_without_feature_intro();
                             if !open_setup_checkpoint_if_due(app, config, false) {
@@ -3913,30 +3940,8 @@ async fn run_event_loop(
                     KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('1')
                         if app.onboarding == OnboardingState::TrustDirectory =>
                     {
-                        match onboarding::mark_trusted(&app.workspace) {
-                            Ok(_) => {
-                                app.trust_mode = true;
-                                app.hooks = HookExecutor::new(
-                                    crate::hooks::HooksConfig::load_with_project(
-                                        config.hooks_config(),
-                                        &app.workspace,
-                                    ),
-                                    app.workspace.clone(),
-                                );
-                                app.runtime_services.hook_executor =
-                                    Some(std::sync::Arc::new(app.hooks.clone()));
-                                app.status_message = None;
-                                if app.onboarding_workspace_trust_gate {
-                                    app.onboarding_workspace_trust_gate = false;
-                                    app.onboarding = OnboardingState::None;
-                                } else {
-                                    app.onboarding = OnboardingState::Tips;
-                                }
-                            }
-                            Err(err) => {
-                                app.status_message =
-                                    Some(format!("Failed to trust workspace: {err}"));
-                            }
+                        if let Err(err) = complete_trust_directory_onboarding(app, config) {
+                            app.status_message = Some(format!("Failed to trust workspace: {err}"));
                         }
                     }
                     KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('2')

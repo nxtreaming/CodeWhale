@@ -7341,6 +7341,40 @@ fn onboarding_after_api_key_save_routes_to_trust_when_needed() {
 }
 
 #[test]
+fn api_key_escape_returns_to_language_step() {
+    let mut app = create_test_app();
+    app.onboarding = OnboardingState::ApiKey;
+    app.api_key_input = "sk-test-value".to_string();
+    app.api_key_cursor = 4;
+    app.status_message = Some("editing".to_string());
+
+    back_from_api_key_onboarding(&mut app);
+
+    assert_eq!(app.onboarding, OnboardingState::Language);
+    assert!(app.api_key_input.is_empty());
+    assert_eq!(app.api_key_cursor, 0);
+    assert_eq!(app.status_message, None);
+}
+
+#[test]
+fn trust_directory_completion_advances_to_tips() {
+    let _guard = ConfigPathEnvGuard::new();
+    let tmpdir = TempDir::new().expect("workspace tempdir");
+    let mut app = create_test_app();
+    app.workspace = tmpdir.path().to_path_buf();
+    app.onboarding = OnboardingState::TrustDirectory;
+    app.onboarding_workspace_trust_gate = false;
+    app.trust_mode = false;
+
+    complete_trust_directory_onboarding(&mut app, &Config::default())
+        .expect("trust completion should succeed");
+
+    assert!(app.trust_mode);
+    assert_eq!(app.onboarding, OnboardingState::Tips);
+    assert!(app.runtime_services.hook_executor.is_some());
+}
+
+#[test]
 fn api_key_paste_shortcut_is_not_plain_text_input() {
     let ctrl_v = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL);
     assert!(crate::tui::key_shortcuts::is_paste_shortcut(&ctrl_v));
