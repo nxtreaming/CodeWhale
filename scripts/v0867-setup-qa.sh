@@ -35,6 +35,9 @@ if [[ -z "$BIN" ]]; then
     BIN="target/release/codewhale-tui"
   fi
 fi
+if [[ "$BIN" != /* ]]; then
+  BIN="$REPO_ROOT/$BIN"
+fi
 echo "Using binary: $BIN" >&2
 
 PASS=0
@@ -118,7 +121,7 @@ cat > "$WS/.codewhale/constitution.json" <<'EOF'
 EOF
 CTX="$(cd "$WS" && CODEWHALE_HOME="$H/codewhale-home" HOME="$H/home" USERPROFILE="$H/home" \
   "$BIN" doctor --context-json 2>/dev/null || true)"
-if echo "$CTX" | jq -e '.entries[] | select(.source_kind == "constitution")' >/dev/null 2>&1; then
+if echo "$CTX" | jq -e '.entries[] | select(.source_kind == "repo_constitution")' >/dev/null 2>&1; then
   pass "repo constitution surfaces in --context-json"
 else
   fail "repo constitution not found in --context-json"
