@@ -9,6 +9,9 @@ This document keeps its legacy `WHALEFLOW_AUTHORING.md` path for compatibility.
 Public UI and docs should say Workflow; internal crate and package names may
 still use `whaleflow` where renaming would create churn.
 
+For a guided walkthrough from Fleet task specs to Workflow authoring and
+monitoring, see [Fleet + Workflow Tutorial](FLEET_WORKFLOW_TUTORIAL.md).
+
 ## Language Choice
 
 | Surface | Strength | Tradeoff | v0.8.60 stance |

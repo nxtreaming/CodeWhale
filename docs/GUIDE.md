@@ -290,6 +290,9 @@ Use `/provider` when you want to switch away from the default DeepSeek route.
 Provider IDs, environment variables, model defaults, and capability notes are
 kept in the provider registry document.
 
+Next for durable multi-worker work: [FLEET_WORKFLOW_TUTORIAL.md](FLEET_WORKFLOW_TUTORIAL.md)
+walks through Fleet task specs, monitoring, and Workflow authoring.
+
 Use `/model auto` when you want CodeWhale to choose the model and thinking
 level per turn. Use a fixed model when you need repeatable comparisons or a
 strict cost profile.
