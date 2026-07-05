@@ -183,6 +183,12 @@ const DEFAULT_CLIENT_RATE_LIMIT_RPS: f64 = 8.0;
 const DEFAULT_CLIENT_RATE_LIMIT_BURST: f64 = 16.0;
 const ALLOW_INSECURE_HTTP_ENV: &str = "DEEPSEEK_ALLOW_INSECURE_HTTP";
 
+/// Upper bound on a single sleep inside the provider-wide rate-limit pause
+/// loop in `send_with_retry`. The pause window lives in process-global state
+/// (`retry_status`), so waiting requests re-poll it on this cadence instead
+/// of committing to the full remaining window up front.
+const RATE_LIMIT_PAUSE_RECHECK_INTERVAL: Duration = Duration::from_millis(250);
+
 pub(super) const SSE_BACKPRESSURE_HIGH_WATERMARK: usize = 8 * 1024 * 1024; // 8 MB
 pub(super) const SSE_BACKPRESSURE_SLEEP_MS: u64 = 10;
 pub(super) const SSE_MAX_LINES_PER_CHUNK: usize = 256;
@@ -1425,8 +1431,13 @@ impl DeepSeekClient {
             || {
                 let request = build();
                 async move {
+                    // Sleep in bounded slices rather than the full remaining
+                    // window: the pause is process-global, so a concurrent
+                    // `clear_rate_limit()` (or a shortened deadline) must
+                    // release requests that are already waiting instead of
+                    // stranding them for the whole original window.
                     while let Some(delay) = crate::retry_status::rate_limit_remaining() {
-                        tokio::time::sleep(delay).await;
+                        tokio::time::sleep(delay.min(RATE_LIMIT_PAUSE_RECHECK_INTERVAL)).await;
                     }
                     self.wait_for_rate_limit().await;
                     let response = request
