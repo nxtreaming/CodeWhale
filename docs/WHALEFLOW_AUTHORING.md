@@ -10,14 +10,14 @@ files, shell, network, providers, cancellation, or TUI state.
 | Surface | Strength | Tradeoff | v0.8.60 stance |
 |---|---|---|---|
 | YAML / JSON IR | Simple, reviewable, no runtime | Verbose for generated workflows | Keep as interchange/debug format |
-| Starlark | Existing safe evaluator and helper functions | Less familiar to most JS/TS developers and coding agents | Keep supported |
 | JavaScript | Familiar object syntax and easy agent generation | Unsafe if executed as a general runtime | First-class authoring through declarative compile-only subset |
 | TypeScript | Best editor/types story for workflow SDK | Needs stripping/typechecking if full TS is supported | Same compile-only subset for now; richer SDK later |
 
 The default high-capability path is TypeScript/JavaScript authoring, but only as
-a compile step. The v0.8.60 compiler accepts a JSON-compatible object inside
+a compile step. The compiler accepts a JSON-compatible object inside
 `workflow({...})` from `.workflow.js` or `.workflow.ts`, lowers it to
-`WorkflowSpec`, and runs the same Rust validation gate used by Starlark.
+`WorkflowSpec`, and runs the Rust validation gate. (Starlark authoring was a
+bootstrap reference and has been removed; WhaleFlow is JS-only.)
 
 ## Contract
 
@@ -46,6 +46,11 @@ Supported node wrappers: `agent`, `branch`, `sequence`, `reduce`,
 `teacher_review`, `loop_until`, `cond`, and `expand`. Raw `WorkflowNode` JSON IR
 with `kind` / `spec` also remains valid.
 
+An `agent` node may declare `"profile": "reviewer"` to run as a named Fleet
+roster profile. The name is trimmed and lowercased at compile time and must be
+a single token (no whitespace, quotes, or `=`); the saved roster is resolved at
+dispatch time, and explicit fields on the agent override profile defaults.
+
 The compiler rejects effectful constructs such as `import`, `require`, `fetch`,
 `process`, `Deno`, `Bun`, `child_process`, file reads/writes, `eval`, `async`,
 and `await`. This is intentionally stricter than JavaScript: workflow source is
@@ -54,7 +59,6 @@ a familiar declaration format, not a second execution runtime.
 ## Verification
 
 - `cargo test -p codewhale-whaleflow --locked javascript`
-- `cargo test -p codewhale-whaleflow --locked starlark`
 
 Current example: `workflows/issue_audit.workflow.js`.
 

@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -272,6 +273,10 @@ struct SessionIndexEntry {
 pub struct StateStore {
     db_path: PathBuf,
     session_index_path: PathBuf,
+    // Single long-lived connection shared by all clones. SQLite pragmas are
+    // per-connection, so opening once in `open` and applying them there keeps
+    // every operation consistent without re-opening the database per call.
+    conn: Arc<Mutex<Connection>>,
 }
 
 impl StateStore {
@@ -291,12 +296,16 @@ impl StateStore {
                 format!("failed to create state directory {}", parent.display())
             })?;
         }
-        let store = Self {
+        let conn = Connection::open(&db_path)
+            .with_context(|| format!("failed to open state db {}", db_path.display()))?;
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .with_context(|| format!("failed to enable foreign keys for {}", db_path.display()))?;
+        Self::init_schema(&conn)?;
+        Ok(Self {
             db_path,
             session_index_path,
-        };
-        store.init_schema()?;
-        Ok(store)
+            conn: Arc::new(Mutex::new(conn)),
+        })
     }
 
     /// Returns the filesystem path of the underlying SQLite database.
@@ -304,21 +313,16 @@ impl StateStore {
         &self.db_path
     }
 
-    fn conn(&self) -> Result<Connection> {
-        let conn = Connection::open(&self.db_path)
-            .with_context(|| format!("failed to open state db {}", self.db_path.display()))?;
-        conn.pragma_update(None, "foreign_keys", "ON")
-            .with_context(|| {
-                format!(
-                    "failed to enable foreign keys for {}",
-                    self.db_path.display()
-                )
-            })?;
-        Ok(conn)
+    fn conn(&self) -> Result<MutexGuard<'_, Connection>> {
+        // Poisoning means a panic mid-operation; any open transaction was
+        // rolled back when it dropped, but surface the condition rather than
+        // silently continuing on a connection whose state we can't vouch for.
+        self.conn
+            .lock()
+            .map_err(|_| anyhow::anyhow!("state db connection mutex poisoned"))
     }
 
-    fn init_schema(&self) -> Result<()> {
-        let conn = self.conn()?;
+    fn init_schema(conn: &Connection) -> Result<()> {
         let mut user_version: u32 = conn.query_row("PRAGMA user_version;", [], |row| row.get(0))?;
         if user_version == 0 {
             conn.execute_batch(
@@ -1917,6 +1921,41 @@ mod tests {
                 .expect("count child rows");
             assert_eq!(count, 0, "{table} row survived thread deletion");
         }
+    }
+
+    #[test]
+    fn state_store_reuses_one_connection_across_operations_and_clones() {
+        let store = temp_state_store("conn-reuse");
+        {
+            let conn = store.conn().expect("conn");
+            conn.execute_batch("CREATE TEMP TABLE conn_reuse_probe(id INTEGER);")
+                .expect("create temp table");
+        }
+        // TEMP tables are visible only on the connection that created them, so
+        // seeing the probe again — through a clone, after real operations ran —
+        // proves the store holds one long-lived connection instead of
+        // reopening the database (and reapplying pragmas) per call.
+        let clone = store.clone();
+        clone
+            .upsert_thread(&test_thread("thread-conn-reuse"))
+            .expect("upsert thread");
+        let conn = clone.conn().expect("conn");
+        let probe_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_temp_master WHERE name = 'conn_reuse_probe'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query temp master");
+        assert_eq!(
+            probe_count, 1,
+            "temp table not visible: a fresh connection was opened"
+        );
+        // The pragma applied once at open still governs the shared connection.
+        let foreign_keys: i64 = conn
+            .query_row("PRAGMA foreign_keys;", [], |row| row.get(0))
+            .expect("read foreign_keys pragma");
+        assert_eq!(foreign_keys, 1);
     }
 
     #[test]

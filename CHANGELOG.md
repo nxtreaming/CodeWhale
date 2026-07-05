@@ -7,33 +7,151 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.67] - 2026-07-04
+
 ### Added
 
-- Added a website localization matrix with a locale registry and drift checks.
-  Harvested from #3763 by @idling11.
+- Added the constitution-first setup wizard: a unified `/setup` shell with
+  resume, back navigation, and skip-retry state; provider/model readiness
+  cards with a custom-provider form and provider-picker detail layout; a
+  runtime posture card with preset application and project-override warnings;
+  a setup verification report; and transactional setup persistence with
+  secret redaction and rollback (#3402, #3403, #3404, #3405, #3406, #3410,
+  #3411).
+- Added a structured user-global constitution with a deterministic renderer,
+  prompt-block injection, guided principle authoring with preview and preset
+  save, and a `/constitution` manager command as the primary constitution
+  management surface, with file state shown in setup and actions surfaced in
+  diagnostics (#3793, #3806, #3811).
+- Added model-assisted constitution and fleet-profile drafting behind an
+  explicit ratify gate, with untrusted-draft provenance recorded so
+  model-authored text is never applied silently. Updating users keep their
+  existing constitution unchanged, and a localized constitution checkpoint is
+  required after update (#3794).
+- Added the Hotbar route editor v1 with route-switch slot actions and support
+  for custom model routes, plus a configured-provider route manager for
+  `/provider` and `/model` with a missing-auth handoff into provider key
+  entry (#2066, #3830, #3831).
+- Added auto-discovery of `.codewhale/rules/` and `.claude/rules/`
+  directories as project context, with a total byte-budget cap on the
+  assembled rules block. Contributed by maple (@yekern).
+- Exposed `context_input_budget_for_route` from the engine so external
+  integrations can reuse route budget math. Contributed by hexin
+  (@h3c-hexin).
+- Added GUI config persistence to the runtime API. Contributed by @gaord.
+- Added a website localization matrix with a locale registry and drift
+  checks. Harvested from #3763 by @idling11 (#3090).
+- Added `doctor` detection of half-applied setup state, and startup milestone
+  tracing for boot-performance diagnosis.
+- Fleet: local worker memory usage is now reported, including retained memory
+  while a task is in Running status. Contributed by @cyq1017 (#3901).
+- Website: community hub, constitution thesis page and constitution-centered
+  homepage, models page generated from the provider registry, docs dark mode
+  and full SEO metadata/sitemap coverage, terminal player for real
+  constitution traces, and a live star badge and version.
 
 ### Changed
 
 - Documented the Homebrew rollout strategy and added a distribution-channel
-  check to the release checklist. Harvested from #3760 by @idling11.
+  check to the release checklist. Harvested from #3760 by @idling11 (#3489).
+- Made the approval prompt calm, compact, and honest, and centered the
+  first-run follow-up on the constitution; first-run onboarding now hands off
+  into the setup wizard, and the language picker offers every shipped locale
+  (#3929).
+- Startup performance: boot janitors and store scans no longer block the
+  first frame, `@mention` completion no longer re-walks the workspace per
+  keystroke, and idle offline-queue clones and duplicate tool-output hashing
+  were eliminated.
+- Clarified the misleading "Ctrl+B backgrounds this command" shell wording
+  (#3859) and the hotbar help shortcuts. Docs contribution by Chanhyo Jung
+  (@roian6).
+- Documented the enforced repo-law invariants, the constitution flow, and the
+  `/fleet setup` profile-authoring wizard; aligned `permissions.toml` action
+  docs. Docs contribution by @greyfreedom.
+- Bumped web dependencies: wrangler 4.103.0 → 4.107.0, mermaid 11.15.0 →
+  11.16.0, vitest 4.1.8 → 4.1.9 (@dependabot).
 
 ### Fixed
 
 - Raised the streamed model-response idle timeout and matched the TUI stall
   watchdog to the configured stream budget so long reasoning pauses are not
-  recovered as stalled turns (#2487).
+  recovered as stalled turns (#2487, #3998).
 - Fixed Codex OAuth/sub-agent release diagnostics so `auth list` reports an
   active Codex OAuth file, Responses API child requests encode inherited tool
-  names safely, and rate-limited Codex child requests checkpoint as resumable
-  provider interruptions instead of terminal opaque failures (#3884).
-- Fixed fresh launch/setup testing with an explicit `CODEWHALE_HOME` so config,
-  settings, theme prefs, and doctor legacy-state diagnostics do not inherit
-  unrelated ambient `~/.deepseek` files.
+  names safely, rate-limited child requests checkpoint as resumable provider
+  interruptions, and failure records surface the real Responses API error
+  (#3884).
+- Fixed fresh launch/setup testing with an explicit `CODEWHALE_HOME` so
+  config, settings, theme prefs, and doctor legacy-state diagnostics do not
+  inherit unrelated ambient `~/.deepseek` files (#4001, #4002).
+- Sub-agent state now persists to `.codewhale/` instead of the lingering
+  pre-rebrand `.deepseek/` path (#3864). Contributed by Stime (@yekern).
+- `/plugin enable|disable` now persists across restarts (#3918), and the
+  plugin command is hidden from the root slash menu and kept canonical after
+  the scanner merge. Contributed by Nightt (@nightt5879).
+- `/config ask-rules` now shows ask rule actions with improved diagnostics,
+  with file-rule action precedence under test. Contributed by @greyfreedom.
+- Fleet/sub-agents: enforced an absolute recursion-depth ceiling and widened
+  task-id entropy, gave each atomic state write a unique temp path, kept
+  sub-agent tool catalogs in parent parity (#3836), and made the Agents
+  sidebar reconcile sub-agent completion and cancellation live (#3837).
+- Fixed apply_patch mangling newlines, defaulted fuzz to 3, and made writes
+  atomic; fixed compaction to preserve pins on emergency compaction, harden
+  the summary fallback, and count image tokens; corrected backtrack boundary,
+  checkpoint clear ordering, prune guard, and durable rename.
+- Fixed the SSE client to flush the final frame, join multi-line data fields,
+  and stop corrupting multibyte UTF-8 split across network reads.
+- Kept review-only turns read-only, aliased `auto` mode to the agent policy,
+  showed the mode-derived safety policy in status (contributed by @cyq1017),
+  and stopped the durable-review floor from holding routine YOLO work
+  (#3883).
+- Fixed self-update to prefer exact binary release assets. Contributed by
+  @LI-Jialu.
+- UI polish: stopped constitution and fleet-profile model drafts from
+  freezing the event loop, scoped the context-menu backdrop to the popup
+  rect, stacked model-picker panes on narrow modals, unified display-width
+  helpers on one contract (#3924), removed misleading success toasts,
+  issue-number leaks, and dead-end empty states, and repaired the onboarding
+  trust and api-key keys.
+- Normalized discovered skill names, removed unenforced trust copy, and
+  surfaced the gated constitution override in prompts.
+- Suppressed dead_code warnings in the unused plugin registry module and
+  fixed formatting across the command-group files. Contributed by Paulo Aboim
+  Pinto (@aboimpinto).
+- Pointed the website Community nav link at the community hub.
+
+### Security
+
+- MCP client hardening: closed an SSE-endpoint SSRF, bounded the HTTP
+  response body via Content-Length instead of a streaming read, bounded stdio
+  line reads to prevent OOM denial of service, fixed a dead timeout, and
+  removed an unbounded buffer.
+- Made execpolicy deny/trust rules segment-aware, closing a command-chaining
+  bypass.
+- Closed repo-law and safety-floor bypasses found by adversarial review:
+  protected invariants are now enforced as mechanism, the destroyer gap in
+  the safety floor is closed, a catalog-present tool with no execution path
+  now fails closed, `web_run` open/click is classified as destructive, and
+  the allow-list gained wildcard and case handling.
+- Refused symlinked rules directories to prevent workspace escape via
+  discovered rules. Contributed by maple (@yekern).
+- Bounded Fleet sub-agent worker output so fanout cannot exhaust TUI memory
+  (#3882), and preserved event headroom for progress. Contributed in part by
+  @cyq1017.
+- Added an untrusted constitution-draft gate with authoring provenance so
+  model-drafted constitutions require explicit human ratification.
 
 ### Removed
 
 - Removed unused model-registry helpers. Harvested from #3872 by @cyq1017.
 - Removed unused request-tuning metadata. Harvested from #3871 by @cyq1017.
+- Removed dead fleet task helpers (#3894 by @cyq1017), the unused
+  approval-cache container (#3845) and localization QA metadata (both by
+  @nightt5879), the dormant tab collaboration subsystem (#3838), the legacy
+  flash auto-router (#3839), the stale project_doc loader (#3840), ignored
+  mock LLM placeholders (#3841), dead model-catalog helpers (#3842), the
+  unused execpolicy amend module, and dead MCP/client retry helpers.
+- Retired the deprecated `WHALE.md` context fallback (#3798).
 
 ## [0.8.66] - 2026-06-29
 
@@ -2626,7 +2744,8 @@ overflow report and `/theme` picker edge-wrapping patch in #1814.
 
 Older releases (v0.8.39 and earlier) are archived in [docs/CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).
 
-[Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.8.66...HEAD
+[Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.8.67...HEAD
+[0.8.67]: https://github.com/Hmbown/CodeWhale/compare/v0.8.66...v0.8.67
 [0.8.66]: https://github.com/Hmbown/CodeWhale/compare/v0.8.65...v0.8.66
 [0.8.65]: https://github.com/Hmbown/CodeWhale/compare/v0.8.64...v0.8.65
 [0.8.64]: https://github.com/Hmbown/CodeWhale/compare/v0.8.63...v0.8.64

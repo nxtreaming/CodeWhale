@@ -2038,8 +2038,10 @@ fn setup_runtime_preset_apply_persists_settings_config_and_state() {
     app.config_path = Some(config_path.clone());
     let mut config = Config::default();
     let preset = crate::tui::setup::SetupRuntimePreset::AskFirst;
-    let mut state = codewhale_config::SetupState::default();
-    state.runtime_posture_source = codewhale_config::RuntimePostureSource::Confirmed;
+    let mut state = codewhale_config::SetupState {
+        runtime_posture_source: codewhale_config::RuntimePostureSource::Confirmed,
+        ..Default::default()
+    };
     state.set_step(
         codewhale_config::SetupStep::TrustSandbox,
         codewhale_config::StepEntry::new(

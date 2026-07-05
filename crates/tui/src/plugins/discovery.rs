@@ -19,26 +19,6 @@ pub fn default_overrides_path() -> PathBuf {
     default_user_plugins_dir().join(OVERRIDES_FILE)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::TempDir;
-
-    #[test]
-    fn default_user_plugins_dir_uses_explicit_codewhale_home() {
-        let _env_lock = crate::test_support::lock_test_env();
-        let tmp = TempDir::new().expect("tempdir");
-        let home = tmp.path().join("codewhale-home");
-        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.as_os_str());
-
-        assert_eq!(default_user_plugins_dir(), home.join("plugins"));
-        assert_eq!(
-            default_overrides_path(),
-            home.join("plugins").join(OVERRIDES_FILE)
-        );
-    }
-}
-
 /// Read the persisted enable/disable overrides. Missing or malformed files
 /// yield an empty map — the user simply gets the default enablement.
 pub fn load_overrides(path: &Path) -> HashMap<String, bool> {
@@ -120,5 +100,25 @@ fn discover_from_dir(dir: &Path, registry: &mut PluginRegistry, builtin: bool) {
                 tracing::warn!("Failed to load plugin from {}: {}", path.display(), e);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn default_user_plugins_dir_uses_explicit_codewhale_home() {
+        let _env_lock = crate::test_support::lock_test_env();
+        let tmp = TempDir::new().expect("tempdir");
+        let home = tmp.path().join("codewhale-home");
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.as_os_str());
+
+        assert_eq!(default_user_plugins_dir(), home.join("plugins"));
+        assert_eq!(
+            default_overrides_path(),
+            home.join("plugins").join(OVERRIDES_FILE)
+        );
     }
 }

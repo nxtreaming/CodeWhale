@@ -114,10 +114,8 @@ impl Skill {
                     || normalized.ends_with("-tw")
                     || normalized.ends_with("-hk")
                     || normalized.ends_with("-mo"));
-            if !traditional_chinese {
-                if let Some(desc) = self.localized_descriptions.get(primary) {
-                    return desc;
-                }
+            if !traditional_chinese && let Some(desc) = self.localized_descriptions.get(primary) {
+                return desc;
             }
         }
         &self.description

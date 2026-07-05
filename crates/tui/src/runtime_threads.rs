@@ -2605,6 +2605,10 @@ impl RuntimeThreadManager {
                 rlm_sessions: crate::rlm::session::new_shared_rlm_session_store(),
             },
             subagent_model_overrides: cfg.subagent_model_overrides(),
+            fleet_roster: Arc::new(crate::fleet::roster::FleetRoster::load(
+                &cfg.fleet_config(),
+                &thread.workspace,
+            )),
             subagent_api_timeout: std::time::Duration::from_secs(
                 cfg.subagent_api_timeout_secs_for_provider(provider),
             ),

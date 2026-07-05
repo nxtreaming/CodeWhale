@@ -37,7 +37,7 @@ use codewhale_config::{
 mod fleet_draft;
 mod model_draft;
 
-pub(crate) use fleet_draft::draft_fleet_profile_with_model;
+pub(crate) use fleet_draft::{draft_fleet_profile_with_model, workspace_fingerprint};
 pub(crate) use model_draft::draft_constitution_with_model;
 
 /// Target lane for the once-per-version constitution checkpoint. The workspace

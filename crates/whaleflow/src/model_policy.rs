@@ -16,7 +16,6 @@ pub enum ModelRole {
     Teacher,
     Student,
     JsonExtractor,
-    StarlarkRepair,
 }
 
 impl From<AgentType> for ModelRole {

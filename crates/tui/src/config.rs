@@ -1,7 +1,6 @@
 //! Configuration loading and defaults for codewhale.
 
 use std::collections::HashMap;
-use std::fmt::Write;
 use std::fs;
 #[cfg(unix)]
 use std::io::Write as _;
@@ -3957,6 +3956,13 @@ impl Config {
         overrides
     }
 
+    /// Parsed `[fleet]` table, or defaults when the table is absent
+    /// (#fleet-roster cutover (v0.8.67)).
+    #[must_use]
+    pub fn fleet_config(&self) -> codewhale_config::FleetConfigToml {
+        self.fleet.clone().unwrap_or_default()
+    }
+
     /// Return the configured DeepSeek reasoning-effort tier, if any.
     #[must_use]
     pub fn reasoning_effort(&self) -> Option<&str> {
@@ -4124,35 +4130,15 @@ pub(crate) fn save_workspace_trust(workspace: &Path) -> Result<PathBuf> {
         .context("Failed to resolve config path: home directory not found.")?;
     ensure_parent_dir(&config_path)?;
 
-    let mut doc = if config_path.exists() {
-        let raw = fs::read_to_string(&config_path)?;
-        toml::from_str::<toml::Value>(&raw)
-            .with_context(|| format!("Failed to parse config at {}", config_path.display()))?
-    } else {
-        toml::Value::Table(toml::value::Table::new())
-    };
-
-    let root = doc
-        .as_table_mut()
-        .context("Config root must be a TOML table.")?;
-    let projects = root
-        .entry("projects".to_string())
-        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()))
-        .as_table_mut()
-        .context("`projects` must be a table.")?;
-    let project = projects
-        .entry(workspace_config_key(workspace))
-        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()))
-        .as_table_mut()
-        .context("Project entry must be a table.")?;
-    project.insert(
-        "trust_level".to_string(),
-        toml::Value::String("trusted".to_string()),
-    );
-
-    let serialized = toml::to_string_pretty(&doc).context("failed to serialize updated config")?;
-    write_config_file_secure(&config_path, &serialized)
-        .with_context(|| format!("Failed to write config to {}", config_path.display()))?;
+    let project_key = workspace_config_key(workspace);
+    crate::config_persistence::mutate_config_document(&config_path, |doc| {
+        crate::config_persistence::set_document_value(
+            doc,
+            &["projects", project_key.as_str(), "trust_level"],
+            "trusted",
+        )
+    })
+    .with_context(|| format!("Failed to write config to {}", config_path.display()))?;
     Ok(config_path)
 }
 
@@ -6014,47 +6000,28 @@ pub fn save_api_key(api_key: &str) -> Result<SavedCredential> {
 
 /// Write the `api_key` slot directly to `config.toml`.
 fn save_api_key_to_config_file(api_key: &str) -> Result<PathBuf> {
-    fn is_api_key_assignment(line: &str) -> bool {
-        let trimmed = line.trim_start();
-        trimmed
-            .strip_prefix("api_key")
-            .is_some_and(|rest| rest.trim_start().starts_with('='))
-    }
-
     let config_path = default_config_path()
         .context("Failed to resolve config path: home directory not found.")?;
 
     ensure_parent_dir(&config_path)?;
 
-    let key_to_write = api_key.to_string();
-
-    let content = if config_path.exists() {
-        // Read existing config and update the api_key line
-        let existing = fs::read_to_string(&config_path)?;
-        if existing.contains("api_key") {
-            // Replace existing api_key line
-            let mut result = String::new();
-            for line in existing.lines() {
-                if is_api_key_assignment(line) {
-                    let _ = writeln!(result, "api_key = \"{key_to_write}\"");
-                } else {
-                    result.push_str(line);
-                    result.push('\n');
-                }
-            }
-            result
-        } else {
-            // Prepend api_key to existing config
-            format!("api_key = \"{key_to_write}\"\n{existing}")
-        }
+    if config_path.exists() {
+        // TOML-aware upsert. The old line scan keyed off
+        // `existing.contains("api_key")`, so a comment that merely mentioned
+        // api_key made it skip the insert entirely; editing the document
+        // replaces or inserts the real key and keeps user comments.
+        crate::config_persistence::mutate_config_document(&config_path, |doc| {
+            crate::config_persistence::set_document_value(doc, &["api_key"], api_key)
+        })
+        .with_context(|| format!("Failed to write config to {}", config_path.display()))?;
     } else {
         // Create new minimal config
-        format!(
+        let content = format!(
             r#"# codewhale Configuration
 # Get your API key from https://platform.deepseek.com
 # Or set DEEPSEEK_API_KEY environment variable
 
-api_key = "{key_to_write}"
+api_key = "{api_key}"
 
 # Base URL (default: https://api.deepseek.com/beta)
 # Set https://api.deepseek.com to opt out of beta features.
@@ -6068,11 +6035,11 @@ default_text_model = "{DEFAULT_TEXT_MODEL}"
 # Shift+Tab in the TUI cycles between off / high / max.
 reasoning_effort = "max"
 "#
-        )
-    };
+        );
+        crate::config_persistence::write_config_toml_atomic(&config_path, &content)
+            .with_context(|| format!("Failed to write config to {}", config_path.display()))?;
+    }
 
-    write_config_file_secure(&config_path, &content)
-        .with_context(|| format!("Failed to write config to {}", config_path.display()))?;
     log_sensitive_event(
         "credential.save",
         json!({
@@ -6310,39 +6277,16 @@ pub fn save_api_key_for(provider: ApiProvider, api_key: &str) -> Result<PathBuf>
     ensure_parent_dir(&config_path)?;
 
     let key_inside = provider_config_key(provider).context("provider api key table")?;
-    let table_name = format!("providers.{key_inside}");
-
-    // Parse existing TOML (or start fresh) so we can edit the right table
-    // without disturbing other sections.
-    let mut doc: toml::Value = if config_path.exists() {
-        let raw = fs::read_to_string(&config_path)?;
-        toml::from_str(&raw)
-            .with_context(|| format!("Failed to parse config at {}", config_path.display()))?
-    } else {
-        toml::Value::Table(toml::value::Table::new())
-    };
-
-    let table = doc
-        .as_table_mut()
-        .context("Config root must be a TOML table.")?;
-    let providers = table
-        .entry("providers".to_string())
-        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()))
-        .as_table_mut()
-        .context("`providers` must be a table.")?;
-    let entry = providers
-        .entry(key_inside.to_string())
-        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()))
-        .as_table_mut()
-        .with_context(|| format!("`{table_name}` must be a table."))?;
-    entry.insert(
-        "api_key".to_string(),
-        toml::Value::String(api_key.to_string()),
-    );
-
-    let serialized = toml::to_string_pretty(&doc).context("failed to serialize updated config")?;
-    write_config_file_secure(&config_path, &serialized)
-        .with_context(|| format!("Failed to write config to {}", config_path.display()))?;
+    // Edit the `[providers.<name>]` table in place so unrelated sections,
+    // comments, and formatting survive the write.
+    crate::config_persistence::mutate_config_document(&config_path, |doc| {
+        crate::config_persistence::set_document_value(
+            doc,
+            &["providers", key_inside, "api_key"],
+            api_key,
+        )
+    })
+    .with_context(|| format!("Failed to write config to {}", config_path.display()))?;
     log_sensitive_event(
         "credential.save",
         json!({
@@ -6624,9 +6568,10 @@ pub fn kimi_cli_credentials_present() -> bool {
 /// Clear the API key from config-file storage.
 ///
 /// `/logout` calls this to wipe credentials so the next request can't
-/// silently use a stale config key (#343). The function strips the legacy
-/// root `api_key = ...` line *and* every `api_key` line nested in a
-/// `[providers.<name>]` table.
+/// silently use a stale config key (#343). The function removes the legacy
+/// root `api_key` entry *and* every `api_key` entry nested in a
+/// `[providers.<name>]` table, leaving keys like `api_key_env`, comments,
+/// and formatting untouched.
 ///
 /// Environment variables (`DEEPSEEK_API_KEY`, etc.) are intentionally
 /// **not** unset — they are managed by the user's shell and outside the
@@ -6634,9 +6579,9 @@ pub fn kimi_cli_credentials_present() -> bool {
 /// (Path 0) ensures a freshly-entered key still wins over a stale env
 /// var that lingers from a previous session.
 pub fn clear_api_key() -> Result<()> {
-    // Strip api_key lines from config.toml, including provider-scoped nested
-    // entries. Clearing a config file must not trigger platform credential
-    // prompts.
+    // Strip api_key entries from config.toml, including provider-scoped
+    // nested entries. Clearing a config file must not trigger platform
+    // credential prompts.
     let config_path = default_config_path()
         .context("Failed to resolve config path: home directory not found.")?;
 
@@ -6644,25 +6589,11 @@ pub fn clear_api_key() -> Result<()> {
         return Ok(());
     }
 
-    let existing = fs::read_to_string(&config_path)?;
-    let mut result = String::new();
-
-    for line in existing.lines() {
-        // Match `api_key`, `api_key =`, `  api_key=`, etc. — anywhere it
-        // appears as the leading non-whitespace token.
-        let trimmed = line.trim_start();
-        if trimmed.strip_prefix("api_key").is_some_and(|rest| {
-            let rest = rest.trim_start();
-            rest.is_empty() || rest.starts_with('=')
-        }) {
-            continue;
-        }
-        result.push_str(line);
-        result.push('\n');
-    }
-
-    write_config_file_secure(&config_path, &result)
-        .with_context(|| format!("Failed to write config to {}", config_path.display()))?;
+    crate::config_persistence::mutate_config_document(&config_path, |doc| {
+        crate::config_persistence::remove_document_key_recursive(doc.as_table_mut(), "api_key");
+        Ok(())
+    })
+    .with_context(|| format!("Failed to write config to {}", config_path.display()))?;
     log_sensitive_event(
         "credential.clear",
         json!({
@@ -6676,8 +6607,9 @@ pub fn clear_api_key() -> Result<()> {
 }
 
 /// Clear only the active provider's API key from the config file.
-/// Unlike `clear_api_key()` which strips ALL api_key lines, this
-/// removes only the key for the specified provider section.
+/// Unlike `clear_api_key()` which strips ALL api_key entries, this
+/// removes only the key for the specified provider section (plus the
+/// legacy root `api_key` when the provider is DeepSeek).
 pub fn clear_active_provider_api_key(provider: &str) -> Result<()> {
     let config_path = default_config_path()
         .context("Failed to resolve config path: home directory not found.")?;
@@ -6686,46 +6618,15 @@ pub fn clear_active_provider_api_key(provider: &str) -> Result<()> {
         return Ok(());
     }
 
-    let existing = fs::read_to_string(&config_path)?;
-    let mut result = String::new();
-    let target_section = format!("[providers.{provider}]");
-    let mut in_target_section = false;
-
-    for line in existing.lines() {
-        let trimmed = line.trim();
-
-        // Track which [providers.X] section we're in.
-        if trimmed.starts_with("[providers.") {
-            in_target_section = trimmed == target_section;
-        } else if trimmed.starts_with('[') {
-            in_target_section = false;
+    crate::config_persistence::mutate_config_document(&config_path, |doc| {
+        // The root-level api_key is the legacy DeepSeek slot.
+        if provider == "deepseek" {
+            crate::config_persistence::unset_document_value(doc, &["api_key"])?;
         }
-
-        // For the root section (before any [headers]), clear api_key
-        // only if the provider is "deepseek" (root-level key).
-        let is_root_key = !in_target_section
-            && provider == "deepseek"
-            && trimmed.strip_prefix("api_key").is_some_and(|rest| {
-                let rest = rest.trim_start();
-                rest.is_empty() || rest.starts_with('=')
-            });
-
-        // For a provider section, clear api_key if we're in the target section.
-        let is_provider_key = in_target_section
-            && trimmed.strip_prefix("api_key").is_some_and(|rest| {
-                let rest = rest.trim_start();
-                rest.is_empty() || rest.starts_with('=')
-            });
-
-        if is_root_key || is_provider_key {
-            continue;
-        }
-        result.push_str(line);
-        result.push('\n');
-    }
-
-    write_config_file_secure(&config_path, &result)
-        .with_context(|| format!("Failed to write config to {}", config_path.display()))?;
+        crate::config_persistence::unset_document_value(doc, &["providers", provider, "api_key"])?;
+        Ok(())
+    })
+    .with_context(|| format!("Failed to write config to {}", config_path.display()))?;
     log_sensitive_event(
         "credential.clear",
         json!({

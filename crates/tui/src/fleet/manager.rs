@@ -36,6 +36,10 @@ pub struct FleetManager {
     ledger: FleetLedger,
     stale_after: Duration,
     exec_config: codewhale_config::FleetExecConfig,
+    /// `[fleet]` table used to build the agent roster for dispatch
+    /// (#fleet-roster cutover (v0.8.67)). Defaults keep built-in + workspace
+    /// members resolvable even when the caller has no parsed config.
+    fleet_config: codewhale_config::FleetConfigToml,
     /// Optional sub-agent manager for headless worker execution.
     /// When set, fleet workers spawn real sub-agents; when None,
     /// the manager falls back to local simulation.
@@ -173,6 +177,7 @@ impl FleetManager {
             ledger,
             stale_after: Duration::from_secs(DEFAULT_STALE_AFTER_SECONDS),
             exec_config: codewhale_config::FleetExecConfig::default(),
+            fleet_config: codewhale_config::FleetConfigToml::default(),
             sub_agent_manager: None,
         })
     }
@@ -186,6 +191,19 @@ impl FleetManager {
     pub fn with_exec_config(mut self, exec_config: codewhale_config::FleetExecConfig) -> Self {
         self.exec_config = exec_config;
         self
+    }
+
+    /// Apply the parsed `[fleet]` table so `[fleet.profiles]` members join
+    /// the dispatch roster (#fleet-roster cutover (v0.8.67)).
+    pub fn with_fleet_config(mut self, fleet_config: codewhale_config::FleetConfigToml) -> Self {
+        self.fleet_config = fleet_config;
+        self
+    }
+
+    /// Merged agent roster (built-ins + `[fleet.profiles]` + workspace files)
+    /// used everywhere a task references an `agent_profile` id.
+    fn agent_roster(&self) -> crate::fleet::roster::FleetRoster {
+        crate::fleet::roster::FleetRoster::load(&self.fleet_config, &self.workspace)
     }
 
     /// Attach a sub-agent manager so fleet workers can spawn real headless agents.
@@ -221,8 +239,8 @@ impl FleetManager {
         max_workers: usize,
     ) -> Result<FleetRunReport> {
         validate_task_spec_document(&doc)?;
-        let agent_profiles = super::profile::load_workspace_agent_profiles(&self.workspace)?;
-        worker_runtime::validate_task_agent_profiles(&doc.tasks, &agent_profiles)?;
+        let roster = self.agent_roster();
+        worker_runtime::validate_task_agent_profiles(&doc.tasks, roster.members())?;
         let max_workers = max_workers.clamp(1, 128);
         let run_id = FleetRunId::from(format!(
             "fleet-{}",
@@ -700,7 +718,7 @@ impl FleetManager {
                     capabilities: vec![],
                     max_concurrent_tasks: Some(1),
                 });
-            let agent_profiles = super::profile::load_workspace_agent_profiles(&self.workspace)?;
+            let roster = self.agent_roster();
             let worker = worker_runtime::fleet_task_to_worker_spec_with_profiles(
                 worker_id,
                 &entry.run_id.0,
@@ -708,7 +726,7 @@ impl FleetManager {
                 &worker_spec,
                 "auto",
                 &self.workspace,
-                &agent_profiles,
+                roster.members(),
                 None,
             )?;
             Some(worker_runtime::apply_exec_hardening(
@@ -775,7 +793,7 @@ impl FleetManager {
             .get(&run_id.0)
             .cloned()
             .ok_or_else(|| anyhow!("fleet run {} does not exist", run_id.0))?;
-        let agent_profiles = super::profile::load_workspace_agent_profiles(&self.workspace)?;
+        let roster = self.agent_roster();
         let mut started = 0usize;
         for task in active_tasks_for_run(&state, run_id) {
             let Some(worker_id) = task.leased_to.as_deref() else {
@@ -803,7 +821,7 @@ impl FleetManager {
                 &task_spec,
                 &self.exec_config,
                 model,
-                &agent_profiles,
+                roster.members(),
             )?;
             let cwd = resolve_task_cwd(&self.workspace, &task_spec);
             match executor.start_worker_on_host(worker_id, &worker_spec.host, command, Some(cwd)) {
@@ -955,15 +973,13 @@ impl FleetManager {
 
     /// Resolve the route snapshot to persist on a task's receipt (#3154).
     ///
-    /// Loads workspace agent profiles so role/loadout intent composes the same
+    /// Loads the merged agent roster so role/loadout intent composes the same
     /// way as the worker-spec path, then mints a secret-free route candidate via
     /// the hermetic resolver bridge. Returns `None` (never a fabricated route)
-    /// when profiles or resolution are unavailable.
+    /// when resolution is unavailable.
     fn resolve_task_route(&self, task_spec: &FleetTaskSpec) -> Option<FleetResolvedRoute> {
-        let agent_profiles = super::profile::load_workspace_agent_profiles(&self.workspace)
-            .ok()
-            .unwrap_or_default();
-        worker_runtime::resolve_fleet_route(task_spec, &agent_profiles)
+        let roster = self.agent_roster();
+        worker_runtime::resolve_fleet_route(task_spec, roster.members())
     }
 
     fn task_artifacts_for_receipt(

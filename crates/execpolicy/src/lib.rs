@@ -439,21 +439,21 @@ impl ExecPolicyEngine {
             for seg in &segments {
                 let mut seg_ctx = ctx.clone();
                 seg_ctx.command = seg.as_str();
-                if let Some(rule) = self.matching_ask_rule(&seg_ctx) {
-                    if rule.action == PermissionAction::Deny {
-                        return Ok(ExecPolicyDecision {
-                            allow: false,
-                            requires_approval: false,
-                            matched_rule: Some(rule.label()),
-                            matched_action: Some(PermissionAction::Deny),
-                            requirement: ExecApprovalRequirement::Forbidden {
-                                reason: format!(
-                                    "Permission rule '{}' explicitly denies a chained segment of this invocation.",
-                                    rule.label()
-                                ),
-                            },
-                        });
-                    }
+                if let Some(rule) = self.matching_ask_rule(&seg_ctx)
+                    && rule.action == PermissionAction::Deny
+                {
+                    return Ok(ExecPolicyDecision {
+                        allow: false,
+                        requires_approval: false,
+                        matched_rule: Some(rule.label()),
+                        matched_action: Some(PermissionAction::Deny),
+                        requirement: ExecApprovalRequirement::Forbidden {
+                            reason: format!(
+                                "Permission rule '{}' explicitly denies a chained segment of this invocation.",
+                                rule.label()
+                            ),
+                        },
+                    });
                 }
             }
         }

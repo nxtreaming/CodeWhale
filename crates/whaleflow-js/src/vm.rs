@@ -1,0 +1,602 @@
+//! The sandboxed QuickJS VM that executes WhaleFlow scripts.
+//!
+//! Threading model (design §2.2): `rquickjs` contexts and every `'js` value
+//! are `!Send`, so each run gets a dedicated OS thread with its own
+//! current-thread tokio reactor. Host functions do no heavy work inline —
+//! only `Send` data (JSON strings, [`TaskRequest`]s, oneshot replies) crosses
+//! to the driver; conversion back into JS values happens on the VM thread
+//! after the await resolves.
+//!
+//! Sandbox: the context registers only standard ECMAScript intrinsics plus
+//! the WhaleFlow globals (`task`, `parallel`, `pipeline`, `log`, `phase`,
+//! `budget`, `args`). There is no module loader, no fs/net/process access,
+//! and `Date`/`Math.random` are overridden to throw so recorded runs stay
+//! deterministic for replay.
+
+use std::cell::Cell;
+use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use rquickjs::function::{Async, Func};
+use rquickjs::{AsyncContext, AsyncRuntime, CatchResultExt, CaughtError, Ctx, Promise, Value};
+use serde::Deserialize;
+use tokio::sync::{oneshot, watch};
+
+use crate::driver::{ProgressEvent, TaskCompletion, TaskRequest, WorkflowDriver};
+use crate::error::WhaleflowJsError;
+use crate::schema::{compile_schema, decode_reply};
+use crate::{PARALLEL_MAX_ITEMS, WHALEFLOW_LIFETIME_CAP, normalize_profile};
+
+/// Resource limits applied to the QuickJS runtime before any script runs.
+///
+/// There is deliberately no wall-clock timeout here: cancellation (dropping
+/// the run future, or the driver's cancel cascade) is the deadline mechanism.
+#[derive(Debug, Clone, Copy)]
+pub struct VmLimits {
+    /// QuickJS heap ceiling in bytes (default 64 MiB).
+    pub memory_limit_bytes: usize,
+    /// Maximum interpreter stack in bytes (default 1 MiB).
+    pub max_stack_bytes: usize,
+}
+
+impl Default for VmLimits {
+    fn default() -> Self {
+        Self {
+            memory_limit_bytes: 64 * 1024 * 1024,
+            max_stack_bytes: 1024 * 1024,
+        }
+    }
+}
+
+/// Executes WhaleFlow scripts, one isolated QuickJS runtime per run.
+///
+/// Every [`WhaleflowVm::run_script`] call spins up a fresh interpreter on a
+/// dedicated thread, so runs share nothing (globals, heap, interned atoms)
+/// and a wedged script can never stall a sibling run.
+#[derive(Debug, Clone, Default)]
+pub struct WhaleflowVm {
+    limits: VmLimits,
+}
+
+impl WhaleflowVm {
+    /// A VM with the default [`VmLimits`].
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A VM with explicit resource limits.
+    pub fn with_limits(limits: VmLimits) -> Self {
+        Self { limits }
+    }
+
+    /// Run one WhaleFlow script to completion.
+    ///
+    /// * `source` is the script body; it is wrapped in an async function, so
+    ///   top-level `await` and `return` both work. The returned value is the
+    ///   script's `return` value, JSON-encoded (`undefined` becomes `null`).
+    /// * `args` is exposed verbatim to the script as the `args` global.
+    /// * `driver` executes `task()` spawns and receives progress events. A
+    ///   driver instance is scoped to exactly one run: `cancel_all` is always
+    ///   invoked at run teardown (success, script error, or cancellation), so
+    ///   stray children never outlive the script that spawned them.
+    ///
+    /// Cancellation cascade (design §9): dropping the returned future cancels
+    /// the run — the interrupt handler aborts executing JS, pending `task()`
+    /// awaits resolve to errors, and `driver.cancel_all()` is invoked
+    /// immediately from the dropping thread.
+    pub async fn run_script(
+        &self,
+        source: &str,
+        args: serde_json::Value,
+        driver: Arc<dyn WorkflowDriver>,
+    ) -> Result<serde_json::Value, WhaleflowJsError> {
+        let args_json = serde_json::to_string(&args)
+            .map_err(|err| WhaleflowJsError::InvalidArgs(err.to_string()))?;
+        let cancel = CancelHandle::new();
+        let (result_tx, result_rx) = oneshot::channel();
+        let mut guard = RunGuard {
+            cancel: cancel.clone(),
+            driver: driver.clone(),
+            armed: true,
+        };
+
+        let limits = self.limits;
+        let source = source.to_string();
+        let thread_driver = driver.clone();
+        let thread_cancel = cancel.clone();
+        let spawned = std::thread::Builder::new()
+            .name("whaleflow-js-vm".to_string())
+            .spawn(move || {
+                let outcome = vm_thread_main(
+                    source,
+                    args_json,
+                    thread_driver.clone(),
+                    thread_cancel,
+                    limits,
+                );
+                // Run teardown: this driver is scoped to one run, so any task
+                // still in flight is unreachable now — cancel the cascade.
+                thread_driver.cancel_all();
+                let _ = result_tx.send(outcome);
+            });
+        if let Err(err) = spawned {
+            guard.armed = false;
+            return Err(WhaleflowJsError::VmInit(format!(
+                "failed to spawn VM thread: {err}"
+            )));
+        }
+
+        match result_rx.await {
+            Ok(outcome) => {
+                // The VM thread has already torn down and cancelled children.
+                guard.armed = false;
+                outcome
+            }
+            // VM thread panicked before reporting; leave the guard armed so
+            // its drop (right now, at return) cancels outstanding tasks.
+            Err(_) => Err(WhaleflowJsError::VmTerminated(
+                "VM thread exited without reporting a result".to_string(),
+            )),
+        }
+    }
+}
+
+/// Cooperative cancel signal shared by the run future (guard side) and the VM
+/// thread. The atomic flag feeds the QuickJS interrupt handler (sync, called
+/// mid-bytecode); the watch channel wakes host futures parked on driver
+/// completions.
+#[derive(Clone)]
+struct CancelHandle {
+    flag: Arc<AtomicBool>,
+    tx: Arc<watch::Sender<bool>>,
+}
+
+impl CancelHandle {
+    fn new() -> Self {
+        let (tx, _rx) = watch::channel(false);
+        Self {
+            flag: Arc::new(AtomicBool::new(false)),
+            tx: Arc::new(tx),
+        }
+    }
+
+    fn cancel(&self) {
+        self.flag.store(true, Ordering::SeqCst);
+        self.tx.send_replace(true);
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.flag.load(Ordering::SeqCst)
+    }
+
+    async fn cancelled(&self) {
+        let mut rx = self.tx.subscribe();
+        let _ = rx.wait_for(|cancelled| *cancelled).await;
+    }
+
+    fn flag_arc(&self) -> Arc<AtomicBool> {
+        self.flag.clone()
+    }
+}
+
+/// Fires the cancel cascade if the caller drops the run future before the VM
+/// reports a result.
+struct RunGuard {
+    cancel: CancelHandle,
+    driver: Arc<dyn WorkflowDriver>,
+    armed: bool,
+}
+
+impl Drop for RunGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.cancel.cancel();
+            self.driver.cancel_all();
+        }
+    }
+}
+
+fn vm_thread_main(
+    source: String,
+    args_json: String,
+    driver: Arc<dyn WorkflowDriver>,
+    cancel: CancelHandle,
+    limits: VmLimits,
+) -> Result<serde_json::Value, WhaleflowJsError> {
+    let reactor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| WhaleflowJsError::VmInit(format!("failed to build VM reactor: {err}")))?;
+    reactor.block_on(run_in_vm(source, args_json, driver, cancel, limits))
+}
+
+async fn run_in_vm(
+    source: String,
+    args_json: String,
+    driver: Arc<dyn WorkflowDriver>,
+    cancel: CancelHandle,
+    limits: VmLimits,
+) -> Result<serde_json::Value, WhaleflowJsError> {
+    let runtime = AsyncRuntime::new().map_err(|err| WhaleflowJsError::VmInit(err.to_string()))?;
+    runtime.set_memory_limit(limits.memory_limit_bytes).await;
+    runtime.set_max_stack_size(limits.max_stack_bytes).await;
+    let interrupt_flag = cancel.flag_arc();
+    runtime
+        .set_interrupt_handler(Some(Box::new(move || {
+            interrupt_flag.load(Ordering::Relaxed)
+        })))
+        .await;
+    let context = AsyncContext::full(&runtime)
+        .await
+        .map_err(|err| WhaleflowJsError::VmInit(err.to_string()))?;
+
+    context
+        .async_with(async |ctx| run_in_ctx(ctx, source, args_json, driver, cancel).await)
+        .await
+}
+
+async fn run_in_ctx(
+    ctx: Ctx<'_>,
+    source: String,
+    args_json: String,
+    driver: Arc<dyn WorkflowDriver>,
+    cancel: CancelHandle,
+) -> Result<serde_json::Value, WhaleflowJsError> {
+    install_host(&ctx, driver, cancel.clone(), &args_json)?;
+    ctx.eval::<(), _>(prelude())
+        .catch(&ctx)
+        .map_err(|err| WhaleflowJsError::VmInit(format!("prelude failed: {err}")))?;
+
+    let wrapped = format!("(async () => {{\n{source}\n}})()");
+    let promise = ctx
+        .eval::<Promise, _>(wrapped)
+        .catch(&ctx)
+        .map_err(|err| script_error(&cancel, err))?;
+    let value = promise
+        .into_future::<Value>()
+        .await
+        .catch(&ctx)
+        .map_err(|err| script_error(&cancel, err))?;
+    js_value_to_json(&ctx, value)
+}
+
+fn script_error(cancel: &CancelHandle, err: CaughtError<'_>) -> WhaleflowJsError {
+    if cancel.is_cancelled() {
+        WhaleflowJsError::Cancelled
+    } else {
+        WhaleflowJsError::Script(err.to_string())
+    }
+}
+
+fn js_value_to_json<'js>(
+    ctx: &Ctx<'js>,
+    value: Value<'js>,
+) -> Result<serde_json::Value, WhaleflowJsError> {
+    if value.is_undefined() {
+        return Ok(serde_json::Value::Null);
+    }
+    let text = ctx
+        .json_stringify(value)
+        .map_err(|err| WhaleflowJsError::ResultEncoding(err.to_string()))?;
+    match text {
+        None => Ok(serde_json::Value::Null),
+        Some(text) => {
+            let text = text
+                .to_string()
+                .map_err(|err| WhaleflowJsError::ResultEncoding(err.to_string()))?;
+            serde_json::from_str(&text)
+                .map_err(|err| WhaleflowJsError::ResultEncoding(err.to_string()))
+        }
+    }
+}
+
+fn install_host(
+    ctx: &Ctx<'_>,
+    driver: Arc<dyn WorkflowDriver>,
+    cancel: CancelHandle,
+    args_json: &str,
+) -> Result<(), WhaleflowJsError> {
+    let globals = ctx.globals();
+
+    let args_value: Value = ctx
+        .json_parse(args_json)
+        .map_err(|err| WhaleflowJsError::InvalidArgs(err.to_string()))?;
+    globals.set("args", args_value).map_err(init_err)?;
+
+    // Per-run lifetime counter (design §4.3): counts spawn *attempts*, and the
+    // check + increment happen with no await in between so a parallel burst
+    // cannot slip past the cap on the single-threaded VM.
+    let spawned = Rc::new(Cell::new(0u64));
+
+    let task_driver = driver.clone();
+    let task_cancel = cancel.clone();
+    globals
+        .set(
+            "__whaleflow_task",
+            Func::from(Async(move |opts_json: String| {
+                let driver = task_driver.clone();
+                let cancel = task_cancel.clone();
+                let spawned = spawned.clone();
+                async move { task_host(opts_json, driver, cancel, spawned).await }
+            })),
+        )
+        .map_err(init_err)?;
+
+    let log_driver = driver.clone();
+    globals
+        .set(
+            "__whaleflow_log",
+            Func::from(move |message: String| {
+                log_driver.progress(ProgressEvent::Log { message });
+            }),
+        )
+        .map_err(init_err)?;
+
+    let phase_driver = driver.clone();
+    globals
+        .set(
+            "__whaleflow_phase",
+            Func::from(move |title: String| {
+                phase_driver.progress(ProgressEvent::Phase { title });
+            }),
+        )
+        .map_err(init_err)?;
+
+    // Budget reads are live driver snapshots (design §5.2). NaN encodes
+    // "no ceiling" for `total`; the prelude maps it to `null`.
+    let total_driver = driver.clone();
+    globals
+        .set(
+            "__whaleflow_budget_total",
+            Func::from(move || -> f64 {
+                match total_driver.budget().total {
+                    Some(total) => total as f64,
+                    None => f64::NAN,
+                }
+            }),
+        )
+        .map_err(init_err)?;
+
+    let spent_driver = driver.clone();
+    globals
+        .set(
+            "__whaleflow_budget_spent",
+            Func::from(move || -> f64 { spent_driver.budget().spent as f64 }),
+        )
+        .map_err(init_err)?;
+
+    globals
+        .set(
+            "__whaleflow_budget_remaining",
+            Func::from(move || -> f64 {
+                match driver.budget().remaining() {
+                    Some(remaining) => remaining as f64,
+                    None => f64::INFINITY,
+                }
+            }),
+        )
+        .map_err(init_err)?;
+
+    Ok(())
+}
+
+fn init_err(err: rquickjs::Error) -> WhaleflowJsError {
+    WhaleflowJsError::VmInit(err.to_string())
+}
+
+/// The `task()` host call. Everything that can go wrong is reported through
+/// the JSON envelope (`{"error": ...}`) so the prelude re-throws it as a real
+/// JS `Error` with a script-side stack.
+async fn task_host(
+    opts_json: String,
+    driver: Arc<dyn WorkflowDriver>,
+    cancel: CancelHandle,
+    spawned: Rc<Cell<u64>>,
+) -> String {
+    let outcome = task_host_inner(opts_json, driver, cancel, spawned).await;
+    let envelope = match outcome {
+        Ok(value) => serde_json::json!({ "value": value }),
+        Err(message) => serde_json::json!({ "error": message }),
+    };
+    envelope.to_string()
+}
+
+async fn task_host_inner(
+    opts_json: String,
+    driver: Arc<dyn WorkflowDriver>,
+    cancel: CancelHandle,
+    spawned: Rc<Cell<u64>>,
+) -> Result<serde_json::Value, String> {
+    let request = parse_task_options(&opts_json)?;
+    // Compile the schema before spawning so a malformed one fails fast
+    // instead of burning a subagent.
+    let validator = request
+        .response_schema
+        .as_ref()
+        .map(compile_schema)
+        .transpose()?;
+
+    // Lifetime backstop (design §4.3) — checked and bumped before any await.
+    if spawned.get() >= WHALEFLOW_LIFETIME_CAP {
+        return Err(format!(
+            "task(): WhaleFlow lifetime agent cap ({WHALEFLOW_LIFETIME_CAP}) reached for this run"
+        ));
+    }
+    // Fast-fail budget gate. The authoritative reservation lives in the
+    // driver (design §5.3); this only stops obviously-doomed spawns early.
+    let snapshot = driver.budget();
+    if snapshot.exhausted() {
+        return Err(format!(
+            "task(): budget exhausted ({} of {} tokens spent)",
+            snapshot.spent,
+            snapshot.total.unwrap_or(0)
+        ));
+    }
+    if cancel.is_cancelled() {
+        return Err("task(): run cancelled".to_string());
+    }
+    spawned.set(spawned.get() + 1);
+
+    let spawned_task = driver
+        .spawn_task(request)
+        .await
+        .map_err(|err| err.to_string())?;
+    let completion = tokio::select! {
+        _ = cancel.cancelled() => return Err("task(): run cancelled".to_string()),
+        completion = spawned_task.completion => completion
+            .map_err(|_| "task(): driver dropped the completion channel".to_string())?,
+    };
+
+    match completion {
+        TaskCompletion::Completed { text } => match &validator {
+            None => Ok(serde_json::Value::String(text)),
+            Some(validator) => decode_reply(&text, validator),
+        },
+        TaskCompletion::Failed { message } => Err(format!("task(): subagent failed: {message}")),
+        TaskCompletion::Cancelled => Err("task(): subagent cancelled".to_string()),
+        TaskCompletion::BudgetExhausted { message } => {
+            Err(format!("task(): budget exhausted: {message}"))
+        }
+    }
+}
+
+/// JS-facing option names for `task()` (design §3.3). Unknown fields are
+/// rejected so a typo (`responseschema`) fails loudly instead of being
+/// silently dropped.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TaskOptions {
+    #[serde(alias = "prompt")]
+    description: Option<String>,
+    #[serde(alias = "type")]
+    subagent_type: Option<String>,
+    profile: Option<String>,
+    model: Option<String>,
+    model_strength: Option<String>,
+    thinking: Option<String>,
+    #[serde(default)]
+    worktree: bool,
+    allowed_tools: Option<Vec<String>>,
+    max_depth: Option<u32>,
+    token_budget: Option<u64>,
+    response_schema: Option<serde_json::Value>,
+    label: Option<String>,
+    phase: Option<String>,
+}
+
+fn parse_task_options(opts_json: &str) -> Result<TaskRequest, String> {
+    let options: TaskOptions =
+        serde_json::from_str(opts_json).map_err(|err| format!("task(): invalid options: {err}"))?;
+    let description = options
+        .description
+        .filter(|description| !description.trim().is_empty())
+        .ok_or_else(|| "task(): 'description' (or 'prompt') is required".to_string())?;
+    let profile = options
+        .profile
+        .as_deref()
+        .map(normalize_profile)
+        .transpose()
+        .map_err(|err| format!("task(): {err}"))?;
+    Ok(TaskRequest {
+        description,
+        subagent_type: options.subagent_type,
+        profile,
+        model: options.model,
+        model_strength: options.model_strength,
+        thinking: options.thinking,
+        worktree: options.worktree,
+        allowed_tools: options.allowed_tools,
+        max_depth: options.max_depth,
+        token_budget: options.token_budget,
+        response_schema: options.response_schema,
+        label: options.label,
+        phase: options.phase,
+    })
+}
+
+/// The JS prelude injected before every script: determinism bans, the
+/// `task`/`parallel`/`pipeline`/`log`/`phase` stdlib (design §7), and the
+/// `budget` global.
+fn prelude() -> String {
+    PRELUDE_TEMPLATE.replace("__MAX_ITEMS__", &PARALLEL_MAX_ITEMS.to_string())
+}
+
+const PRELUDE_TEMPLATE: &str = r#""use strict";
+(() => {
+  const banned = (name) => () => {
+    throw new Error(name + " is unavailable in WhaleFlow scripts: runs must be deterministic for record/replay");
+  };
+  const BannedDate = function Date() {
+    throw new Error("new Date()/Date() is unavailable in WhaleFlow scripts: runs must be deterministic for record/replay");
+  };
+  BannedDate.now = banned("Date.now()");
+  BannedDate.parse = banned("Date.parse()");
+  BannedDate.UTC = banned("Date.UTC()");
+  globalThis.Date = BannedDate;
+  Math.random = banned("Math.random()");
+
+  const MAX_ITEMS = __MAX_ITEMS__;
+
+  globalThis.task = async (opts) => {
+    if (opts === null || typeof opts !== "object") {
+      throw new TypeError("task(): expected an options object");
+    }
+    const envelope = JSON.parse(await __whaleflow_task(JSON.stringify(opts)));
+    if (envelope.error !== undefined) {
+      throw new Error(envelope.error);
+    }
+    return envelope.value;
+  };
+
+  globalThis.parallel = (thunks) => {
+    if (!Array.isArray(thunks)) {
+      throw new TypeError("parallel(): expected an array of thunks");
+    }
+    if (thunks.length > MAX_ITEMS) {
+      throw new Error("parallel(): max " + MAX_ITEMS + " items per call");
+    }
+    return Promise.all(thunks.map((thunk) => {
+      try {
+        return Promise.resolve(typeof thunk === "function" ? thunk() : thunk).catch(() => null);
+      } catch {
+        return null;
+      }
+    }));
+  };
+
+  globalThis.pipeline = (items, ...stages) => {
+    if (!Array.isArray(items)) {
+      throw new TypeError("pipeline(): expected an array of items");
+    }
+    if (items.length > MAX_ITEMS) {
+      throw new Error("pipeline(): max " + MAX_ITEMS + " items per call");
+    }
+    return Promise.all(items.map(async (item, index) => {
+      let value = item;
+      for (const stage of stages) {
+        try {
+          value = await stage(value, item, index);
+        } catch {
+          return null;
+        }
+      }
+      return value;
+    }));
+  };
+
+  globalThis.log = (message) => {
+    __whaleflow_log(typeof message === "string" ? message : (JSON.stringify(message) ?? String(message)));
+  };
+  globalThis.phase = (title) => {
+    __whaleflow_phase(String(title));
+  };
+
+  const total = __whaleflow_budget_total();
+  globalThis.budget = Object.freeze({
+    total: Number.isNaN(total) ? null : total,
+    spent: () => __whaleflow_budget_spent(),
+    remaining: () => __whaleflow_budget_remaining(),
+  });
+})();
+"#;

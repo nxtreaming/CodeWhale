@@ -67,6 +67,30 @@ pub fn agent(_app: &mut App, arg: Option<&str>) -> CommandResult {
     )
 }
 
+struct AgentControlAction {
+    action: &'static str,
+    agent_id: String,
+}
+
+fn parse_agent_control_action(arg: Option<&str>) -> Option<AgentControlAction> {
+    let arg = arg?.trim();
+    let (action, rest) = arg.split_once(char::is_whitespace)?;
+    let action = match action {
+        "status" | "inspect" => "status",
+        "peek" | "progress" => "peek",
+        "cancel" | "stop" | "abort" => "cancel",
+        _ => return None,
+    };
+    let agent_id = rest.trim();
+    if agent_id.is_empty() || agent_id.contains(char::is_whitespace) {
+        return None;
+    }
+    Some(AgentControlAction {
+        action,
+        agent_id: agent_id.to_string(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,28 +142,4 @@ mod tests {
         };
         assert_eq!(agent_id, "agent_123");
     }
-}
-
-struct AgentControlAction {
-    action: &'static str,
-    agent_id: String,
-}
-
-fn parse_agent_control_action(arg: Option<&str>) -> Option<AgentControlAction> {
-    let arg = arg?.trim();
-    let (action, rest) = arg.split_once(char::is_whitespace)?;
-    let action = match action {
-        "status" | "inspect" => "status",
-        "peek" | "progress" => "peek",
-        "cancel" | "stop" | "abort" => "cancel",
-        _ => return None,
-    };
-    let agent_id = rest.trim();
-    if agent_id.is_empty() || agent_id.contains(char::is_whitespace) {
-        return None;
-    }
-    Some(AgentControlAction {
-        action,
-        agent_id: agent_id.to_string(),
-    })
 }

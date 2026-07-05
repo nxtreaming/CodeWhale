@@ -251,16 +251,16 @@ impl AutoReviewRule {
     }
 
     fn matches(&self, ctx: &AutoReviewContext<'_>) -> bool {
-        if let Some(tool_name) = self.tool_name.as_deref() {
-            if tool_name != ctx.tool_name {
-                return false;
-            }
+        if let Some(tool_name) = self.tool_name.as_deref()
+            && tool_name != ctx.tool_name
+        {
+            return false;
         }
 
-        if let Some(action_kind) = self.action_kind {
-            if action_kind != ctx.action_kind {
-                return false;
-            }
+        if let Some(action_kind) = self.action_kind
+            && action_kind != ctx.action_kind
+        {
+            return false;
         }
 
         if let Some(text) = self.text_contains.as_deref() {
@@ -465,11 +465,12 @@ fn effective_command_tokens<'a>(tokens: &'a [&'a str]) -> &'a [&'a str] {
     while i < tokens.len() {
         let raw = unquote_token(tokens[i]);
         // Leading env assignment: VAR=value (no slash before the '=').
-        if let Some(eq) = raw.find('=') {
-            if eq > 0 && !raw[..eq].contains('/') {
-                i += 1;
-                continue;
-            }
+        if let Some(eq) = raw.find('=')
+            && eq > 0
+            && !raw[..eq].contains('/')
+        {
+            i += 1;
+            continue;
         }
         let base = raw
             .trim_start_matches("./")

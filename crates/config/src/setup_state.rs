@@ -668,9 +668,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join(SETUP_STATE_FILE_NAME);
 
-        let mut state = SetupState::default();
-        state.constitution_choice = ConstitutionChoice::GuidedCustom;
-        state.constitution_authoring = Some(ConstitutionAuthoring::ModelDrafted);
+        let state = SetupState {
+            constitution_choice: ConstitutionChoice::GuidedCustom,
+            constitution_authoring: Some(ConstitutionAuthoring::ModelDrafted),
+            ..Default::default()
+        };
         state.save_to(&path).unwrap();
 
         let loaded = SetupState::load_from(&path).expect("record should load");

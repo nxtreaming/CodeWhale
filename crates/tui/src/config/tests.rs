@@ -2542,6 +2542,298 @@ api_key = "old-openrouter-key"
     Ok(())
 }
 
+/// Finding #20 golden: a comment that merely mentions `api_key` used to
+/// defeat the insert (the old `existing.contains("api_key")` scan treated it
+/// as an existing assignment and never wrote the key). The TOML-aware path
+/// must insert the real key and keep the comment.
+#[test]
+fn save_api_key_inserts_key_when_only_a_comment_mentions_it() -> Result<()> {
+    let _lock = lock_test_env();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let temp_root = env::temp_dir().join(format!(
+        "codewhale-tui-api-key-comment-{}-{}",
+        std::process::id(),
+        nanos
+    ));
+    fs::create_dir_all(&temp_root)?;
+    let _guard = EnvGuard::new(&temp_root);
+
+    let config_path = temp_root.join(".deepseek").join("config.toml");
+    fs::create_dir_all(config_path.parent().unwrap())?;
+    fs::write(
+        &config_path,
+        "# api_key = \"sk-placeholder\" (uncomment to set manually)\n\
+         default_text_model = \"deepseek-v4-flash\"\n",
+    )?;
+
+    save_api_key("fresh-key")?;
+
+    let after = fs::read_to_string(&config_path)?;
+    assert!(
+        after.contains("# api_key = \"sk-placeholder\""),
+        "comment must survive: {after}"
+    );
+    assert!(
+        after.contains("default_text_model = \"deepseek-v4-flash\""),
+        "unrelated key must survive: {after}"
+    );
+    let parsed: toml::Value = toml::from_str(&after)?;
+    assert_eq!(
+        parsed.get("api_key").and_then(toml::Value::as_str),
+        Some("fresh-key"),
+        "real key must be inserted despite the comment: {after}"
+    );
+    Ok(())
+}
+
+/// Replacing an existing root api_key must keep surrounding comments,
+/// including the trailing comment on the api_key line itself.
+#[test]
+fn save_api_key_replaces_existing_key_preserving_comments() -> Result<()> {
+    let _lock = lock_test_env();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let temp_root = env::temp_dir().join(format!(
+        "codewhale-tui-api-key-replace-{}-{}",
+        std::process::id(),
+        nanos
+    ));
+    fs::create_dir_all(&temp_root)?;
+    let _guard = EnvGuard::new(&temp_root);
+
+    let config_path = temp_root.join(".deepseek").join("config.toml");
+    fs::create_dir_all(config_path.parent().unwrap())?;
+    fs::write(
+        &config_path,
+        r#"# top note
+api_key = "old-key" # keep secret
+model = "deepseek-v4-pro"
+
+# provider note
+[providers.openrouter]
+base_url = "https://openrouter.ai/api/v1"
+"#,
+    )?;
+
+    save_api_key("new-key")?;
+
+    let after = fs::read_to_string(&config_path)?;
+    assert!(
+        after.contains("api_key = \"new-key\" # keep secret"),
+        "value must be replaced in place with its comment: {after}"
+    );
+    assert!(!after.contains("old-key"), "{after}");
+    assert!(after.contains("# top note"), "{after}");
+    assert!(after.contains("# provider note"), "{after}");
+    Ok(())
+}
+
+/// Provider-scoped key saves used to round-trip through `toml::Value`
+/// pretty-printing, which dropped every comment in the file.
+#[test]
+fn save_api_key_for_preserves_comments_in_provider_tables() -> Result<()> {
+    let _lock = lock_test_env();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let temp_root = env::temp_dir().join(format!(
+        "codewhale-tui-provider-key-comments-{}-{}",
+        std::process::id(),
+        nanos
+    ));
+    fs::create_dir_all(&temp_root)?;
+    let _guard = EnvGuard::new(&temp_root);
+
+    let config_path = temp_root.join(".deepseek").join("config.toml");
+    fs::create_dir_all(config_path.parent().unwrap())?;
+    fs::write(
+        &config_path,
+        r#"# root note
+model = "deepseek-v4-pro"
+
+# openrouter note
+[providers.openrouter]
+base_url = "https://openrouter.ai/api/v1" # pinned
+"#,
+    )?;
+
+    save_api_key_for(ApiProvider::Openrouter, "or-key")?;
+
+    let after = fs::read_to_string(&config_path)?;
+    assert!(after.contains("# root note"), "{after}");
+    assert!(after.contains("# openrouter note"), "{after}");
+    assert!(
+        after.contains("base_url = \"https://openrouter.ai/api/v1\" # pinned"),
+        "inline comment must survive: {after}"
+    );
+    let parsed: toml::Value = toml::from_str(&after)?;
+    assert_eq!(
+        parsed
+            .get("providers")
+            .and_then(|providers| providers.get("openrouter"))
+            .and_then(|entry| entry.get("api_key"))
+            .and_then(toml::Value::as_str),
+        Some("or-key"),
+        "{after}"
+    );
+    Ok(())
+}
+
+/// Clearing credentials must not disturb comments, `api_key_env`, or
+/// provider tables with quoted names.
+#[test]
+fn clear_api_key_preserves_comments_and_unrelated_keys() -> Result<()> {
+    let _lock = lock_test_env();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let temp_root = env::temp_dir().join(format!(
+        "codewhale-tui-clear-comments-{}-{}",
+        std::process::id(),
+        nanos
+    ));
+    fs::create_dir_all(&temp_root)?;
+    let _guard = EnvGuard::new(&temp_root);
+
+    let config_path = temp_root.join(".deepseek").join("config.toml");
+    fs::create_dir_all(config_path.parent().unwrap())?;
+    fs::write(
+        &config_path,
+        r#"# root note
+api_key = "old-root-key"
+api_key_env = "MY_KEY_ENV"
+model = "deepseek-v4-pro"
+
+# provider note
+[providers."quoted.provider"]
+api_key = "old-quoted-key"
+base_url = "https://quoted.example/v1"
+"#,
+    )?;
+
+    clear_api_key()?;
+
+    let after = fs::read_to_string(&config_path)?;
+    assert!(!after.contains("old-root-key"), "{after}");
+    assert!(
+        !after.contains("old-quoted-key"),
+        "quoted provider table key must be stripped: {after}"
+    );
+    assert!(
+        after.contains("api_key_env = \"MY_KEY_ENV\""),
+        "api_key_env must not be stripped: {after}"
+    );
+    assert!(after.contains("# root note"), "{after}");
+    assert!(after.contains("# provider note"), "{after}");
+    assert!(after.contains("model = \"deepseek-v4-pro\""), "{after}");
+    assert!(
+        after.contains("base_url = \"https://quoted.example/v1\""),
+        "{after}"
+    );
+    Ok(())
+}
+
+/// The old line matcher compared against the literal `[providers.<name>]`
+/// header, so a quoted header (`[providers."openrouter"]`) was never
+/// matched and the key survived a targeted clear.
+#[test]
+fn clear_active_provider_api_key_handles_quoted_table_headers() -> Result<()> {
+    let _lock = lock_test_env();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let temp_root = env::temp_dir().join(format!(
+        "codewhale-tui-clear-quoted-{}-{}",
+        std::process::id(),
+        nanos
+    ));
+    fs::create_dir_all(&temp_root)?;
+    let _guard = EnvGuard::new(&temp_root);
+
+    let config_path = temp_root.join(".deepseek").join("config.toml");
+    fs::create_dir_all(config_path.parent().unwrap())?;
+    fs::write(
+        &config_path,
+        r#"api_key = "root-key"
+
+[providers."openrouter"]
+api_key = "old-openrouter-key"
+base_url = "https://openrouter.ai/api/v1"
+"#,
+    )?;
+
+    clear_active_provider_api_key("openrouter")?;
+
+    let after = fs::read_to_string(&config_path)?;
+    assert!(
+        !after.contains("old-openrouter-key"),
+        "quoted provider header must be matched: {after}"
+    );
+    assert!(
+        after.contains("api_key = \"root-key\""),
+        "root key belongs to deepseek and must survive: {after}"
+    );
+    assert!(
+        after.contains("base_url = \"https://openrouter.ai/api/v1\""),
+        "{after}"
+    );
+    Ok(())
+}
+
+/// Finding #19: workspace-trust saves used to round-trip through
+/// `toml::to_string_pretty`, destroying comments in the whole file.
+#[test]
+fn save_workspace_trust_preserves_comments() -> Result<()> {
+    let _lock = lock_test_env();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let temp_root = env::temp_dir().join(format!(
+        "codewhale-tui-trust-comments-{}-{}",
+        std::process::id(),
+        nanos
+    ));
+    fs::create_dir_all(&temp_root)?;
+    let _guard = EnvGuard::new(&temp_root);
+    let workspace = temp_root.join("project");
+    fs::create_dir_all(&workspace)?;
+
+    let config_path = temp_root.join(".deepseek").join("config.toml");
+    fs::create_dir_all(config_path.parent().unwrap())?;
+    fs::write(
+        &config_path,
+        r#"# top note
+model = "deepseek-v4-pro"
+
+# projects note
+[projects."/existing/workspace"]
+trust_level = "trusted" # granted earlier
+"#,
+    )?;
+
+    save_workspace_trust(&workspace)?;
+
+    let after = fs::read_to_string(&config_path)?;
+    assert!(after.contains("# top note"), "{after}");
+    assert!(after.contains("# projects note"), "{after}");
+    assert!(after.contains("# granted earlier"), "{after}");
+    assert!(
+        after.contains("[projects.\"/existing/workspace\"]"),
+        "existing project entry must survive: {after}"
+    );
+    assert!(is_workspace_trusted(&workspace));
+    Ok(())
+}
+
 /// Regression for #343: explicit in-memory `api_key` (non-empty,
 /// non-sentinel) wins over env/config so a freshly-typed onboarding
 /// key takes effect immediately.

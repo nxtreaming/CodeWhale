@@ -340,7 +340,7 @@ fn effective_fleet_model(
 }
 
 /// Map a fleet role name to a `SubAgentType`. Unknown roles default to `General`.
-fn fleet_role_to_agent_type(role: Option<&str>) -> SubAgentType {
+pub(crate) fn fleet_role_to_agent_type(role: Option<&str>) -> SubAgentType {
     match role {
         Some("smoke-runner") => SubAgentType::Verifier,
         Some("scout") => SubAgentType::Explore,
@@ -350,11 +350,29 @@ fn fleet_role_to_agent_type(role: Option<&str>) -> SubAgentType {
         Some("verifier") | Some("tester") => SubAgentType::Verifier,
         Some("planner") => SubAgentType::Plan,
         Some("explorer") => SubAgentType::Explore,
+        // Coordination happens through delegation, which needs the full
+        // General surface (#fleet-roster cutover (v0.8.67)).
+        Some("manager") | Some("coordinator") => SubAgentType::General,
+        // Synthesis is read-only, no shell: it must never fall through to
+        // General's full-write posture (#fleet-roster cutover (v0.8.67)).
+        Some("synthesizer") | Some("summarizer") | Some("reducer") => SubAgentType::Plan,
         Some("general") | None => SubAgentType::General,
         Some(other) => {
             // Try parsing as a SubAgentType directly
             SubAgentType::from_str(other).unwrap_or(SubAgentType::General)
         }
+    }
+}
+
+/// Runtime agent type for a roster member: role name first, falling back to
+/// the org-chart slot name when the role name is empty (#fleet-roster cutover
+/// (v0.8.67)).
+pub(crate) fn roster_member_agent_type(member: &AgentProfile) -> SubAgentType {
+    let role_name = member.profile.role.name.trim();
+    if role_name.is_empty() {
+        fleet_role_to_agent_type(Some(member.profile.slot.as_str()))
+    } else {
+        fleet_role_to_agent_type(Some(role_name))
     }
 }
 
@@ -412,7 +430,7 @@ fn non_empty_trimmed(value: &str) -> Option<&str> {
     (!trimmed.is_empty()).then_some(trimmed)
 }
 
-fn fleet_model_route_for_loadout(
+pub(crate) fn fleet_model_route_for_loadout(
     model: &str,
     loadout: &codewhale_config::FleetLoadout,
 ) -> ModelRoute {
@@ -570,6 +588,7 @@ mod tests {
                 delegation: codewhale_config::FleetDelegationHints::default(),
             },
             source: std::path::PathBuf::from(format!("{id}.toml")),
+            origin: crate::fleet::roster::ProfileOrigin::Workspace,
         }
     }
 
@@ -608,6 +627,55 @@ mod tests {
     #[test]
     fn fleet_role_none_maps_to_general() {
         assert_eq!(fleet_role_to_agent_type(None), SubAgentType::General);
+    }
+
+    #[test]
+    fn fleet_role_manager_and_coordinator_map_to_general() {
+        assert_eq!(
+            fleet_role_to_agent_type(Some("manager")),
+            SubAgentType::General
+        );
+        assert_eq!(
+            fleet_role_to_agent_type(Some("coordinator")),
+            SubAgentType::General
+        );
+    }
+
+    #[test]
+    fn fleet_role_synthesizer_family_maps_to_read_only_plan() {
+        // A synthesizer must never fall through to General's full-write
+        // posture; Plan is read-only with no shell.
+        for role in ["synthesizer", "summarizer", "reducer"] {
+            assert_eq!(
+                fleet_role_to_agent_type(Some(role)),
+                SubAgentType::Plan,
+                "role {role}"
+            );
+        }
+    }
+
+    #[test]
+    fn roster_member_agent_type_uses_role_then_slot() {
+        let member = agent_profile(
+            "synthesizer",
+            "synthesizer",
+            None,
+            codewhale_config::FleetLoadout::Fast,
+        );
+        assert_eq!(roster_member_agent_type(&member), SubAgentType::Plan);
+
+        let mut slot_only = agent_profile(
+            "custom-summarizer",
+            "summarizer",
+            None,
+            codewhale_config::FleetLoadout::Inherit,
+        );
+        slot_only.profile.role.name = String::new();
+        assert_eq!(
+            slot_only.profile.slot,
+            codewhale_config::FleetSlot::Summarizer
+        );
+        assert_eq!(roster_member_agent_type(&slot_only), SubAgentType::Plan);
     }
 
     #[test]

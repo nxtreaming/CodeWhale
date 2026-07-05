@@ -330,6 +330,11 @@ pub struct EngineConfig {
     pub runtime_services: RuntimeToolServices,
     /// Per-role/type sub-agent model overrides already resolved from config.
     pub subagent_model_overrides: HashMap<String, String>,
+    /// Merged fleet roster (built-ins + `[fleet.profiles]` + workspace agent
+    /// files) shared by model-spawned sub-agents and fleet dispatch
+    /// (#fleet-roster cutover (v0.8.67)). Defaults to built-ins only; the
+    /// engine-config construction sites load the full roster once per session.
+    pub fleet_roster: std::sync::Arc<crate::fleet::roster::FleetRoster>,
     /// Whether the user-memory feature is enabled (#489). When `true` the
     /// engine reads `memory_path` on each prompt assembly and prepends a
     /// `<user_memory>` block to the system prompt.
@@ -450,6 +455,7 @@ impl Default for EngineConfig {
             lsp_config: None,
             runtime_services: RuntimeToolServices::default(),
             subagent_model_overrides: HashMap::new(),
+            fleet_roster: std::sync::Arc::new(crate::fleet::roster::FleetRoster::built_ins_only()),
             memory_enabled: false,
             moraine_fallback: false,
             memory_path: PathBuf::from("./memory.md"),
@@ -1457,7 +1463,8 @@ impl Engine {
                             Some(self.tx_event.clone()),
                             Arc::clone(&self.subagent_manager),
                         )
-                        .with_role_models(self.config.subagent_model_overrides.clone())
+                        .with_role_models(self.subagent_role_models())
+                        .with_fleet_roster(self.config.fleet_roster.clone())
                         .with_auto_model(self.session.auto_model)
                         .with_reasoning_effort(
                             self.session.reasoning_effort.clone(),
@@ -2537,7 +2544,8 @@ impl Engine {
                     Some(self.tx_event.clone()),
                     Arc::clone(&self.subagent_manager),
                 )
-                .with_role_models(self.config.subagent_model_overrides.clone())
+                .with_role_models(self.subagent_role_models())
+                .with_fleet_roster(self.config.fleet_roster.clone())
                 .with_auto_model(self.session.auto_model)
                 .with_reasoning_effort(
                     self.session.reasoning_effort.clone(),
@@ -2704,39 +2712,39 @@ impl Engine {
         // blocked, the user pauses/clears, or an optional budget is exhausted.
         // There is no continuation cap. A Failed or Interrupted turn does NOT
         // continue — Esc cancels the loop by interrupting the turn.
-        if status == TurnOutcomeStatus::Completed {
-            if let Some(continuation) = self.goal_continuation_if_active() {
-                // Re-dispatch with the same route/mode/approval settings as
-                // the prior turn. The non-Copy values were moved into
-                // `self.config` / `self.session` earlier in this function, so
-                // we clone them back out here.
-                let _ = self
-                    .tx_op
-                    .send(Op::SendMessage {
-                        content: continuation,
-                        mode,
-                        provider,
-                        model: self.session.model.clone(),
-                        goal_objective: None,
-                        goal_token_budget: None,
-                        goal_status: GoalStatus::Active,
-                        reasoning_effort: self.session.reasoning_effort.clone(),
-                        reasoning_effort_auto,
-                        auto_model,
-                        allow_shell,
-                        trust_mode,
-                        auto_approve,
-                        approval_mode,
-                        translation_enabled,
-                        show_thinking,
-                        allowed_tools: self.config.allowed_tools.clone(),
-                        dynamic_tools: dynamic_tools.clone(),
-                        hook_executor: self.config.hook_executor.clone(),
-                        verbosity: self.config.verbosity.clone(),
-                        provenance: UserInputProvenance::Runtime,
-                    })
-                    .await;
-            }
+        if status == TurnOutcomeStatus::Completed
+            && let Some(continuation) = self.goal_continuation_if_active()
+        {
+            // Re-dispatch with the same route/mode/approval settings as
+            // the prior turn. The non-Copy values were moved into
+            // `self.config` / `self.session` earlier in this function, so
+            // we clone them back out here.
+            let _ = self
+                .tx_op
+                .send(Op::SendMessage {
+                    content: continuation,
+                    mode,
+                    provider,
+                    model: self.session.model.clone(),
+                    goal_objective: None,
+                    goal_token_budget: None,
+                    goal_status: GoalStatus::Active,
+                    reasoning_effort: self.session.reasoning_effort.clone(),
+                    reasoning_effort_auto,
+                    auto_model,
+                    allow_shell,
+                    trust_mode,
+                    auto_approve,
+                    approval_mode,
+                    translation_enabled,
+                    show_thinking,
+                    allowed_tools: self.config.allowed_tools.clone(),
+                    dynamic_tools: dynamic_tools.clone(),
+                    hook_executor: self.config.hook_executor.clone(),
+                    verbosity: self.config.verbosity.clone(),
+                    provenance: UserInputProvenance::Runtime,
+                })
+                .await;
         }
     }
 
@@ -3057,6 +3065,20 @@ impl Engine {
         self.emit_compaction_failed(id, true, message.clone()).await;
         let _ = self.tx_event.send(Event::status(message)).await;
         false
+    }
+
+    /// Role/type model map for sub-agent runtimes: roster member pins first,
+    /// then explicit `[subagents]` overrides on top so explicit config wins
+    /// (#fleet-roster cutover (v0.8.67)).
+    fn subagent_role_models(&self) -> HashMap<String, String> {
+        let mut models = self.config.fleet_roster.model_overrides();
+        models.extend(
+            self.config
+                .subagent_model_overrides
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone())),
+        );
+        models
     }
 
     fn build_tool_context(&self, mode: AppMode, auto_approve: bool) -> ToolContext {

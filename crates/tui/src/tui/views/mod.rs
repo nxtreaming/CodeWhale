@@ -23,6 +23,7 @@ use crate::tui::approval::{ElevationOption, ReviewDecision};
 use crate::tui::history::{HistoryCell, SubAgentCell, summarize_tool_output};
 use crate::tui::widgets::agent_card::AgentLifecycle;
 
+pub mod fleet_roster;
 pub mod fleet_setup;
 pub mod mode_picker;
 pub mod status_picker;
@@ -43,6 +44,7 @@ pub enum ModalKind {
     ModelPicker,
     ProviderPicker,
     ModePicker,
+    FleetRoster,
     FleetSetup,
     HotbarSetup,
     SetupWizard,
@@ -661,6 +663,10 @@ pub enum ViewEvent {
         model_class: String,
         locale: crate::localization::Locale,
     },
+    /// Emitted by the `/fleet` roster view (`s` / Enter) to hand off to the
+    /// setup wizard for authoring or overriding a roster member. The roster
+    /// view itself never writes anything.
+    FleetRosterOpenSetupRequested,
     /// Emitted by the fleet setup Review step after the user previewed a
     /// model-drafted profile and pressed the explicit ratify key. The host
     /// renders TOML deterministically from the validated draft and persists

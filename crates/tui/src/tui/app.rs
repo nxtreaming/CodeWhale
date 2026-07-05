@@ -6026,6 +6026,8 @@ pub enum AppAction {
     OpenFeedbackPicker,
     /// Open the `/theme` picker modal with live preview of every preset.
     OpenThemePicker,
+    /// Open the `/fleet` roster — the saved-party view of the agent team.
+    OpenFleetRoster,
     /// Open the `/fleet` setup and loadout planner.
     OpenFleetSetup,
     /// Open the `/hotbar` setup wizard.

@@ -13,6 +13,8 @@ pub use codewhale_config::{
     FleetDelegationHints, FleetLoadout, FleetProfile, FleetProfilePermissions, FleetRole, FleetSlot,
 };
 
+pub use super::roster::ProfileOrigin;
+
 pub const WORKSPACE_AGENT_PROFILE_DIR: &str = ".codewhale/agents";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,6 +24,10 @@ pub struct AgentProfile {
     pub description: Option<String>,
     pub profile: FleetProfile,
     pub source: PathBuf,
+    /// Roster layer this profile came from (#fleet-roster cutover (v0.8.67)).
+    /// File-based loading in this module always yields `Workspace`; the
+    /// roster stamps `BuiltIn` / `Config` for the other layers.
+    pub origin: ProfileOrigin,
 }
 
 #[derive(Debug, Deserialize)]
@@ -183,6 +189,7 @@ fn agent_profile_from_toml(path: &Path, parsed: AgentProfileToml) -> Result<Agen
         description,
         profile,
         source: path.to_path_buf(),
+        origin: ProfileOrigin::Workspace,
     })
 }
 

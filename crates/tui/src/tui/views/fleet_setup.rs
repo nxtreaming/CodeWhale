@@ -140,6 +140,10 @@ pub struct FleetSetupSnapshot {
     token_budget: Option<u64>,
     api_timeout_secs: u64,
     heartbeat_timeout_secs: u64,
+    /// Lowercased roster member ids with their origin labels (built-in /
+    /// config / project), so the wizard can say when a chosen role would
+    /// override an existing roster member.
+    roster_members: Vec<(String, String)>,
 }
 
 impl FleetSetupSnapshot {
@@ -160,6 +164,12 @@ impl FleetSetupSnapshot {
             .map(|fleet| fleet.exec.max_spawn_depth)
             .unwrap_or_else(|| codewhale_config::FleetExecConfig::default().max_spawn_depth)
             .min(codewhale_config::MAX_SPAWN_DEPTH_CEILING);
+        let roster_members =
+            crate::fleet::roster::FleetRoster::load(&config.fleet_config(), &app.workspace)
+                .members()
+                .iter()
+                .map(|member| (member.id.to_lowercase(), member.origin.to_string()))
+                .collect();
 
         Self {
             workspace: app.workspace.clone(),
@@ -178,6 +188,7 @@ impl FleetSetupSnapshot {
             api_timeout_secs: config.subagent_api_timeout_secs_for_provider(app.api_provider),
             heartbeat_timeout_secs: config
                 .subagent_heartbeat_timeout_secs_for_provider(app.api_provider),
+            roster_members,
         }
     }
 }
@@ -258,6 +269,18 @@ impl FleetSetupView {
     /// The planner role chosen (drives the profile file name and `role_hint`).
     fn selected_role(&self) -> &'static str {
         ROLES[self.role_idx.min(ROLES.len() - 1)].label
+    }
+
+    /// Copy note when the chosen role would override an existing roster
+    /// member of the same id (e.g. "overrides built-in reviewer"). A saved
+    /// profile shadows lower roster layers rather than adding a new member.
+    fn roster_override_note(&self) -> Option<String> {
+        let role = self.selected_role().to_lowercase();
+        self.snapshot
+            .roster_members
+            .iter()
+            .find(|(id, _)| *id == role)
+            .map(|(id, origin)| format!("Overrides the {origin} '{id}' roster member."))
     }
 
     /// The model class chosen, mapped to a profile schema `model_class_hint`.
@@ -497,16 +520,16 @@ impl ModalView for FleetSetupView {
         self.render_header(chunks[0], buf);
 
         match self.step {
-            Step::Role => render_choice_step(
-                chunks[1],
-                buf,
-                &ROLES,
-                self.role_idx,
-                &[
+            Step::Role => {
+                let mut context = vec![
                     "Fleet runs sub-agents that delegate work. Pick the role this".to_string(),
                     "team member should play. It becomes the profile role_hint.".to_string(),
-                ],
-            ),
+                ];
+                if let Some(note) = self.roster_override_note() {
+                    context.push(note);
+                }
+                render_choice_step(chunks[1], buf, &ROLES, self.role_idx, &context)
+            }
             Step::Model => render_choice_step(
                 chunks[1],
                 buf,
@@ -586,7 +609,10 @@ impl FleetSetupView {
         section(
             &mut lines,
             "Role",
-            format!("{} — {}", role.label, role.summary),
+            match self.roster_override_note() {
+                Some(note) => format!("{} — {} · {note}", role.label, role.summary),
+                None => format!("{} — {}", role.label, role.summary),
+            },
         );
         section(
             &mut lines,
@@ -860,6 +886,11 @@ mod tests {
             token_budget: Some(100_000),
             api_timeout_secs: 120,
             heartbeat_timeout_secs: 300,
+            roster_members: crate::fleet::roster::FleetRoster::built_ins_only()
+                .members()
+                .iter()
+                .map(|member| (member.id.to_lowercase(), member.origin.to_string()))
+                .collect(),
         }
     }
 
@@ -1009,6 +1040,56 @@ mod tests {
             }
             other => panic!("expected profile prompt insertion, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn role_and_review_steps_note_roster_overrides() {
+        // "reviewer" (index 4) collides with the built-in roster member; the
+        // role step context and review Role section must both say so.
+        let mut view = FleetSetupView::from_snapshot(snapshot());
+        for _ in 0..4 {
+            view.handle_key(key(KeyCode::Down));
+        }
+        assert_eq!(view.selected_role(), "reviewer");
+        assert_eq!(
+            view.roster_override_note().as_deref(),
+            Some("Overrides the built-in 'reviewer' roster member.")
+        );
+
+        let role_step = render_through_stack(
+            || {
+                let mut v = FleetSetupView::from_snapshot(snapshot());
+                for _ in 0..4 {
+                    v.handle_key(key(KeyCode::Down));
+                }
+                v
+            },
+            120,
+            40,
+        )
+        .join("\n");
+        assert!(role_step.contains("Overrides the built-in 'reviewer'"), "{role_step}");
+
+        let review = render_through_stack(
+            || {
+                let mut v = FleetSetupView::from_snapshot(snapshot());
+                for _ in 0..4 {
+                    v.handle_key(key(KeyCode::Down));
+                }
+                v.step = Step::Review;
+                v
+            },
+            120,
+            40,
+        )
+        .join("\n");
+        assert!(review.contains("Overrides the built-in 'reviewer'"), "{review}");
+
+        // "main" matches no roster member: no override note anywhere.
+        let mut main_view = FleetSetupView::from_snapshot(snapshot());
+        main_view.handle_key(key(KeyCode::Down));
+        assert_eq!(main_view.selected_role(), "main");
+        assert!(main_view.roster_override_note().is_none());
     }
 
     #[test]

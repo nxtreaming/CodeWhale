@@ -211,6 +211,7 @@ impl WorkflowReplayExecutor {
             let result = LeafResult {
                 leaf_id: leaf.id.clone(),
                 task_id: leaf.id.clone(),
+                profile: leaf.profile.clone(),
                 status: WorkflowRunStatus::ReplayDiverged,
                 usage: WorkflowUsage::default(),
                 memo_usage: WorkflowMemoUsage::default(),
@@ -524,6 +525,7 @@ mod tests {
             id: id.to_string(),
             prompt: format!("run {id}"),
             agent_type: AgentType::General,
+            profile: None,
             mode: TaskMode::ReadOnly,
             isolation: crate::IsolationMode::Shared,
             file_scope: Vec::new(),
@@ -555,6 +557,7 @@ mod tests {
         LeafResult {
             leaf_id: id.to_string(),
             task_id: id.to_string(),
+            profile: None,
             status: WorkflowRunStatus::Succeeded,
             usage: WorkflowUsage {
                 input_tokens: 10,
@@ -728,6 +731,19 @@ mod tests {
         let right_hash = compute_leaf_input_hash(&spec, &downstream, &right).unwrap();
 
         assert_eq!(left_hash, right_hash);
+    }
+
+    #[test]
+    fn leaf_input_hash_diverges_on_profile_change() {
+        let base = leaf("review");
+        let mut profiled = base.clone();
+        profiled.profile = Some("reviewer".to_string());
+        let spec = workflow(vec![WorkflowNode::Leaf(base.clone())]);
+
+        let base_hash = compute_leaf_input_hash(&spec, &base, &BTreeMap::new()).unwrap();
+        let profiled_hash = compute_leaf_input_hash(&spec, &profiled, &BTreeMap::new()).unwrap();
+
+        assert_ne!(base_hash, profiled_hash);
     }
 
     #[test]

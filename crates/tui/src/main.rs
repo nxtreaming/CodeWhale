@@ -1830,12 +1830,10 @@ async fn run_fleet_command(workspace: &Path, config: &Config, args: FleetArgs) -
             .unwrap_or_else(|| "codewhale".to_string())
     }
 
-    let exec_config = config
-        .fleet
-        .as_ref()
-        .map(|fleet| fleet.exec.clone())
-        .unwrap_or_default();
-    let manager = FleetManager::open(workspace)?.with_exec_config(exec_config);
+    let fleet_config = config.fleet_config();
+    let manager = FleetManager::open(workspace)?
+        .with_exec_config(fleet_config.exec.clone())
+        .with_fleet_config(fleet_config);
     match args.command {
         FleetCommand::Init => {
             println!("fleet ledger: {}", manager.ledger_path().display());
@@ -7595,6 +7593,10 @@ async fn run_exec_agent(
         lsp_config,
         runtime_services: crate::tools::spec::RuntimeToolServices::default(),
         subagent_model_overrides: execution_config.subagent_model_overrides(),
+        fleet_roster: std::sync::Arc::new(crate::fleet::roster::FleetRoster::load(
+            &execution_config.fleet_config(),
+            &workspace,
+        )),
         subagent_api_timeout: std::time::Duration::from_secs(
             execution_config.subagent_api_timeout_secs_for_provider(effective_provider),
         ),
@@ -8272,8 +8274,10 @@ mod doctor_setup_state_tests {
         let workspace = tmp.path().join("workspace");
         fs::create_dir_all(&workspace).expect("workspace");
 
-        let mut state = codewhale_config::SetupState::default();
-        state.constitution_source = codewhale_config::ConstitutionSource::UserGlobal;
+        let state = codewhale_config::SetupState {
+            constitution_source: codewhale_config::ConstitutionSource::UserGlobal,
+            ..Default::default()
+        };
         state.save().expect("persist setup state");
 
         let report = doctor_setup_report_json(&Config::default(), &workspace);

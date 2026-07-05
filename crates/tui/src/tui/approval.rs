@@ -307,14 +307,12 @@ impl ApprovalRequest {
             .map(|mut detail| {
                 let is_preview = detail.label == "Preview";
                 detail.label = localize_detail_label(&detail.label, locale).to_string();
-                if is_preview {
-                    if let Some(lines) = detail.shell_lines.as_mut() {
-                        for line in lines.iter_mut() {
-                            *line = localize_preview_shell_line(&self.tool_name, line, locale)
-                                .to_string();
-                        }
-                        detail.value = lines.join("\n");
+                if is_preview && let Some(lines) = detail.shell_lines.as_mut() {
+                    for line in lines.iter_mut() {
+                        *line =
+                            localize_preview_shell_line(&self.tool_name, line, locale).to_string();
                     }
+                    detail.value = lines.join("\n");
                 }
                 detail
             })
@@ -581,10 +579,10 @@ pub fn classify_risk(tool_name: &str, category: ToolCategory, params: &Value) ->
         // Shell stays destructive unless the existing command-safety analyzer
         // can prove the concrete command is read-only.
         ToolCategory::Shell => {
-            if let Some(cmd) = params.get("command").and_then(Value::as_str) {
-                if is_parallel_readonly_command(cmd) {
-                    return RiskLevel::Benign;
-                }
+            if let Some(cmd) = params.get("command").and_then(Value::as_str)
+                && is_parallel_readonly_command(cmd)
+            {
+                return RiskLevel::Benign;
             }
             RiskLevel::Destructive
         }
@@ -1024,10 +1022,8 @@ fn changes_preview_lines(changes: &[Value]) -> Option<Vec<String>> {
             .and_then(Value::as_str)
             .unwrap_or("<file>");
         let content = change.get("content").and_then(Value::as_str).unwrap_or("");
-        if idx > 0 {
-            if !push_preview_line(&mut lines, String::new(), PREVIEW_LIMIT) {
-                break;
-            }
+        if idx > 0 && !push_preview_line(&mut lines, String::new(), PREVIEW_LIMIT) {
+            break;
         }
         if !push_preview_line(&mut lines, format!("file: {path}"), PREVIEW_LIMIT) {
             break;

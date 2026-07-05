@@ -1248,10 +1248,22 @@ struct SpawnRequest {
     session_name: Option<String>,
     prompt: String,
     agent_type: SubAgentType,
+    /// True when the caller supplied `type`/`agent_type` or `role` explicitly
+    /// (vs the `General` default). A fleet `profile` only sets the agent type
+    /// when the caller did not, and conflicts are rejected only for explicit
+    /// values.
+    agent_type_explicit: bool,
+    /// Optional Fleet roster member id (trimmed, lowercased). Resolved at
+    /// spawn time against the runtime roster — parsing has no runtime access.
+    profile: Option<String>,
     assignment: SubAgentAssignment,
     allowed_tools: Option<Vec<String>>,
     model: Option<String>,
     model_strength: SubAgentModelStrength,
+    /// True when the caller supplied `model_strength` explicitly. An explicit
+    /// strength outranks a fleet profile's model pin/loadout; the parse-time
+    /// default does not.
+    model_strength_explicit: bool,
     thinking: SubAgentThinking,
     /// Optional working directory for the child. Must canonicalize to a path
     /// inside the parent's workspace. For first-class git worktree isolation,
@@ -1444,6 +1456,11 @@ pub struct SubAgentRuntime {
     pub reasoning_effort: Option<String>,
     pub reasoning_effort_auto: bool,
     pub role_models: HashMap<String, String>,
+    /// Shared fleet roster of named agent roles (#fleet-roster cutover
+    /// (v0.8.67)). Built-ins only by default; the engine installs the merged
+    /// built-in/config/workspace roster so model-spawned sub-agents and fleet
+    /// dispatch resolve the same party. Cloned into child runtimes.
+    pub fleet_roster: std::sync::Arc<crate::fleet::roster::FleetRoster>,
     pub context: ToolContext,
     pub allow_shell: bool,
     /// Native Agent-mode tool surface inherited from the parent turn. Carries
@@ -1532,6 +1549,7 @@ impl SubAgentRuntime {
             reasoning_effort: None,
             reasoning_effort_auto: false,
             role_models: HashMap::new(),
+            fleet_roster: std::sync::Arc::new(crate::fleet::roster::FleetRoster::built_ins_only()),
             context,
             allow_shell,
             agent_tool_surface_options: AgentToolSurfaceOptions::new(
@@ -1657,6 +1675,17 @@ impl SubAgentRuntime {
         self
     }
 
+    /// Install the merged fleet roster (#fleet-roster cutover (v0.8.67)).
+    /// The engine builds it once per session config; children inherit it.
+    #[must_use]
+    pub fn with_fleet_roster(
+        mut self,
+        roster: std::sync::Arc<crate::fleet::roster::FleetRoster>,
+    ) -> Self {
+        self.fleet_roster = roster;
+        self
+    }
+
     /// Preserve whether the parent session is using per-turn model routing.
     #[must_use]
     pub fn with_auto_model(mut self, auto_model: bool) -> Self {
@@ -1709,6 +1738,7 @@ impl SubAgentRuntime {
             reasoning_effort: self.reasoning_effort.clone(),
             reasoning_effort_auto: self.reasoning_effort_auto,
             role_models: self.role_models.clone(),
+            fleet_roster: self.fleet_roster.clone(),
             context: child_context,
             allow_shell: self.allow_shell,
             agent_tool_surface_options: self.agent_tool_surface_options.clone(),
@@ -2127,10 +2157,10 @@ impl SubAgentManager {
             self.persist_pending = false;
             // Synchronous disk I/O — safe because we are shutting down and no
             // callers depend on releasing the write lock quickly.
-            if let Ok(Some((path, payload))) = self.build_persist_payload() {
-                if let Err(err) = write_json_atomic(&self.workspace, &path, &payload) {
-                    tracing::warn!(target: "subagent", ?err, "failed to flush pending sub-agent state");
-                }
+            if let Ok(Some((path, payload))) = self.build_persist_payload()
+                && let Err(err) = write_json_atomic(&self.workspace, &path, &payload)
+            {
+                tracing::warn!(target: "subagent", ?err, "failed to flush pending sub-agent state");
             }
         }
     }
@@ -3022,7 +3052,7 @@ impl SubAgentManager {
     #[must_use]
     pub fn cleanup_due(&self, min_interval: Duration) -> bool {
         self.last_cleanup_at
-            .map_or(true, |last| last.elapsed() >= min_interval)
+            .is_none_or(|last| last.elapsed() >= min_interval)
     }
 
     fn update_from_result(&mut self, agent_id: &str, result: SubAgentResult) {
@@ -3590,6 +3620,7 @@ impl ToolSpec for AgentTool {
             "Start, inspect, peek at, or cancel focused child agent tasks through one surface. Use start only for independent work that benefits from a clean context. ",
             "For several independent targets, call agent separately for each target; CodeWhale runs or queues them under runtime capacity and provider rate-limit backpressure. ",
             "The child runs in the background and reports back automatically when finished; keep tiny reads/searches local. ",
+            "Pass profile to spawn a saved Fleet roster member (e.g. reviewer, scout, builder) with its role posture, model routing, and instructions. ",
             "Use action=status or action=peek with agent_id to inspect progress, and action=cancel with agent_id to stop a running child. Returns session projections with transcript_handle for UI/debug inspection."
         )
     }
@@ -3622,6 +3653,10 @@ impl ToolSpec for AgentTool {
                 "type": {
                     "type": "string",
                     "description": SUBAGENT_TYPE_DESCRIPTION
+                },
+                "profile": {
+                    "type": "string",
+                    "description": "Optional Fleet roster member to run this child as (e.g. reviewer, scout, builder, verifier, synthesizer, manager, or a custom member from .codewhale/agents/ or [fleet.profiles] config). The member supplies role posture, model routing, instruction overlay, and delegation bounds; explicit type/model/model_strength/max_depth here override the member's defaults. See /fleet."
                 },
                 "model_strength": {
                     "type": "string",
@@ -3854,7 +3889,8 @@ async fn spawn_subagent_from_input(
     manager: SharedSubAgentManager,
     runtime: SubAgentRuntime,
 ) -> Result<SubAgentResult, ToolError> {
-    let spawn_request = parse_spawn_request(&input)?;
+    let mut spawn_request = parse_spawn_request(&input)?;
+    let profile_member = apply_spawn_profile(&mut spawn_request, &runtime.fleet_roster)?;
 
     if runtime.would_exceed_depth() {
         return Err(ToolError::execution_failed(format!(
@@ -3881,10 +3917,14 @@ async fn spawn_subagent_from_input(
     let child_workspace = prepare_child_workspace(&runtime.context.workspace, &spawn_request)?;
 
     let mut child_runtime = runtime.background_runtime();
-    if let Some(max_depth) = spawn_request.max_depth {
-        child_runtime.max_spawn_depth =
-            clamp_child_max_spawn_depth(child_runtime.spawn_depth, max_depth);
-    }
+    child_runtime.max_spawn_depth = child_max_spawn_depth_for_spawn(
+        child_runtime.max_spawn_depth,
+        child_runtime.spawn_depth,
+        spawn_request.max_depth,
+        profile_member
+            .as_ref()
+            .and_then(|member| member.profile.delegation.max_spawn_depth),
+    );
     if let Some(workspace) = child_workspace {
         child_runtime.context.workspace = workspace;
     }
@@ -3900,6 +3940,8 @@ async fn spawn_subagent_from_input(
             &spawn_request.agent_type,
         )?,
     };
+    // Resolved before the prompt is moved out of the request below.
+    let requested_model_route = spawn_model_route(&spawn_request, profile_member.as_ref());
     let (effective_prompt, _resident_conflict) =
         if let Some(ref file_path) = spawn_request.resident_file {
             let abs_path = if std::path::Path::new(file_path).is_absolute() {
@@ -3935,7 +3977,7 @@ async fn spawn_subagent_from_input(
         configured_model,
         &effective_prompt,
         &spawn_request.agent_type,
-        spawn_request.model_strength.model_route(),
+        requested_model_route,
         spawn_request.thinking,
     )
     .await;
@@ -5090,77 +5132,76 @@ async fn run_subagent(
         // (both derive from `response.usage`), so the scope accounting stays
         // consistent and is never inflated by this check.
         tokens_used = tokens_used.saturating_add(usage_total_tokens(&response.usage));
-        if let Some(budget) = token_budget {
-            if tokens_used > budget {
-                record_agent_progress(
-                    runtime,
-                    &agent_id,
-                    format!(
-                        "{}: token budget exhausted ({tokens_used}/{budget})",
-                        format_step_counter(steps, max_steps)
-                    ),
-                );
-                if let Some(mb) = runtime.mailbox.as_ref() {
-                    let _ = mb.send(MailboxMessage::Cancelled {
-                        agent_id: agent_id.clone(),
-                    });
-                }
-                let status = SubAgentStatus::BudgetExhausted;
-                let duration_ms =
-                    u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
-                latest_checkpoint = Some(
-                    checkpoint_subagent_progress(
-                        runtime,
-                        &agent_id,
-                        "token_budget_exhausted",
-                        &messages,
-                        steps,
-                        true,
-                    )
-                    .await,
-                );
-                insert_subagent_full_transcript_handle(
-                    runtime,
-                    &agent_id,
-                    &agent_type,
-                    &assignment,
-                    &status,
-                    final_result.as_ref(),
-                    latest_checkpoint.as_ref(),
-                    &messages,
-                    steps,
-                    duration_ms,
-                    fork_context_enabled,
-                )
-                .await;
-                return Ok(SubAgentResult {
-                    name: agent_id.clone(),
+        if let Some(budget) = token_budget
+            && tokens_used > budget
+        {
+            record_agent_progress(
+                runtime,
+                &agent_id,
+                format!(
+                    "{}: token budget exhausted ({tokens_used}/{budget})",
+                    format_step_counter(steps, max_steps)
+                ),
+            );
+            if let Some(mb) = runtime.mailbox.as_ref() {
+                let _ = mb.send(MailboxMessage::Cancelled {
                     agent_id: agent_id.clone(),
-                    context_mode: if fork_context_enabled {
-                        "forked"
-                    } else {
-                        "fresh"
-                    }
-                    .to_string(),
-                    fork_context: fork_context_enabled,
-                    workspace: Some(runtime.context.workspace.clone()),
-                    git_branch: current_git_branch(&runtime.context.workspace),
-                    agent_type: agent_type.clone(),
-                    assignment: assignment.clone(),
-                    model: runtime.model.clone(),
-                    nickname: None,
-                    status,
-                    worker_status: None,
-                    parent_run_id: runtime.parent_agent_id.clone(),
-                    spawn_depth: runtime.spawn_depth,
-                    result: final_result.clone(),
-                    steps_taken: steps,
-                    checkpoint: latest_checkpoint.clone(),
-                    needs_input: None,
-                    duration_ms,
-                    from_prior_session: false,
                 });
             }
+            let status = SubAgentStatus::BudgetExhausted;
+            let duration_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+            latest_checkpoint = Some(
+                checkpoint_subagent_progress(
+                    runtime,
+                    &agent_id,
+                    "token_budget_exhausted",
+                    &messages,
+                    steps,
+                    true,
+                )
+                .await,
+            );
+            insert_subagent_full_transcript_handle(
+                runtime,
+                &agent_id,
+                &agent_type,
+                &assignment,
+                &status,
+                final_result.as_ref(),
+                latest_checkpoint.as_ref(),
+                &messages,
+                steps,
+                duration_ms,
+                fork_context_enabled,
+            )
+            .await;
+            return Ok(SubAgentResult {
+                name: agent_id.clone(),
+                agent_id: agent_id.clone(),
+                context_mode: if fork_context_enabled {
+                    "forked"
+                } else {
+                    "fresh"
+                }
+                .to_string(),
+                fork_context: fork_context_enabled,
+                workspace: Some(runtime.context.workspace.clone()),
+                git_branch: current_git_branch(&runtime.context.workspace),
+                agent_type: agent_type.clone(),
+                assignment: assignment.clone(),
+                model: runtime.model.clone(),
+                nickname: None,
+                status,
+                worker_status: None,
+                parent_run_id: runtime.parent_agent_id.clone(),
+                spawn_depth: runtime.spawn_depth,
+                result: final_result.clone(),
+                steps_taken: steps,
+                checkpoint: latest_checkpoint.clone(),
+                needs_input: None,
+                duration_ms,
+                from_prior_session: false,
+            });
         }
 
         for block in &response.content {
@@ -5582,6 +5623,7 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
         ));
     }
 
+    let agent_type_explicit = parsed_type.is_some() || parsed_role_type.is_some();
     let agent_type = parsed_type
         .or(parsed_role_type)
         .unwrap_or(SubAgentType::General);
@@ -5598,6 +5640,10 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
         .and_then(normalize_role_alias)
         .or_else(|| type_input.and_then(normalize_role_alias))
         .map(str::to_string);
+
+    let profile = optional_input_str(input, &["profile", "fleet_profile", "roster_profile"])
+        .map(validate_profile_name)
+        .transpose()?;
 
     let allowed_tools = input
         .get("allowed_tools")
@@ -5623,10 +5669,11 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
         ));
     }
     let model = parse_optional_subagent_model(input, "model")?;
-    let model_strength = optional_input_str(input, &["model_strength", "modelStrength"])
+    let explicit_model_strength = optional_input_str(input, &["model_strength", "modelStrength"])
         .map(SubAgentModelStrength::parse)
-        .transpose()?
-        .unwrap_or_else(|| {
+        .transpose()?;
+    let model_strength_explicit = explicit_model_strength.is_some();
+    let model_strength = explicit_model_strength.unwrap_or_else(|| {
             // Default model strength. `type: "explore"` defaults to Faster for
             // bounded read-only lookup/search/status work — the cheap, fast
             // same-family sibling is exactly the lossy-breadth job a child
@@ -5681,10 +5728,13 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
         session_name,
         prompt: prompt.clone(),
         agent_type,
+        agent_type_explicit,
+        profile,
         assignment: SubAgentAssignment::new(prompt, role),
         allowed_tools,
         model,
         model_strength,
+        model_strength_explicit,
         thinking,
         cwd,
         worktree,
@@ -5714,6 +5764,167 @@ fn validate_session_name(name: &str) -> Result<String, ToolError> {
         ));
     }
     Ok(trimmed.to_string())
+}
+
+/// Validate and normalize the `profile` spawn parameter: a bare roster member
+/// id token (same rule as fleet model/profile tokens — visible, no
+/// whitespace, quotes, backticks, or '='), lowercased for the roster's
+/// case-insensitive lookup.
+fn validate_profile_name(value: &str) -> Result<String, ToolError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(ToolError::invalid_input("profile cannot be blank"));
+    }
+    if !trimmed
+        .chars()
+        .all(|ch| ch.is_ascii_graphic() && !matches!(ch, '"' | '\'' | '`' | '='))
+    {
+        return Err(ToolError::invalid_input(
+            "profile must be a bare roster member id without whitespace, quotes, backticks, or '='",
+        ));
+    }
+    Ok(trimmed.to_ascii_lowercase())
+}
+
+/// Resolve the `profile` spawn parameter against the fleet roster and fold
+/// the member into the request: agent type (when not explicitly given),
+/// assignment role, and the profile instruction overlay on the child prompt.
+///
+/// Runs at spawn time — `parse_spawn_request` has no runtime access. Returns
+/// the resolved member so the spawn path can apply its model routing and
+/// delegation bounds. The member's `permissions` block is intentionally NOT
+/// consumed here: it defaults to the floor (no shell, no trust, approvals on)
+/// and the child's capability posture is governed by the member's
+/// `SubAgentType` via `WorkerRuntimeProfile::for_role` — applying the block
+/// here could only widen that posture.
+fn apply_spawn_profile(
+    request: &mut SpawnRequest,
+    roster: &crate::fleet::roster::FleetRoster,
+) -> Result<Option<crate::fleet::profile::AgentProfile>, ToolError> {
+    let Some(profile_id) = request.profile.as_deref() else {
+        return Ok(None);
+    };
+    let Some(member) = roster.get(profile_id) else {
+        let available = roster
+            .members()
+            .iter()
+            .map(|member| member.id.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(ToolError::invalid_input(format!(
+            "Unknown profile '{profile_id}'. Available fleet roster members: {available}. See /fleet."
+        )));
+    };
+
+    let member_type = crate::fleet::worker_runtime::roster_member_agent_type(member);
+    if request.agent_type_explicit && request.agent_type != member_type {
+        return Err(ToolError::invalid_input(format!(
+            "profile '{}' implies type {}; conflicting explicit type '{}'",
+            member.id,
+            member_type.as_str(),
+            request.agent_type.as_str()
+        )));
+    }
+    request.agent_type = member_type;
+
+    // Surface the member's role in prompts and ledger records.
+    let role_name = member.profile.role.name.trim();
+    request.assignment.role = Some(if role_name.is_empty() {
+        member.id.clone()
+    } else {
+        role_name.to_string()
+    });
+
+    if let Some(overlay) = spawn_profile_prompt_overlay(member) {
+        request.prompt.push_str(&overlay);
+    }
+
+    Ok(Some(member.clone()))
+}
+
+/// Compact profile block appended to the child prompt, mirroring the fleet
+/// dispatcher's `fleet_task_prompt_with_profile` overlay. `None` when the
+/// member carries no description or instructions (built-ins: posture alone
+/// speaks through the type system prompt).
+fn spawn_profile_prompt_overlay(member: &crate::fleet::profile::AgentProfile) -> Option<String> {
+    let description = member.description.as_deref().map(str::trim);
+    let instructions = member.profile.role.instructions.as_deref().map(str::trim);
+    if description.is_none_or(str::is_empty) && instructions.is_none_or(str::is_empty) {
+        return None;
+    }
+    let mut overlay = String::new();
+    overlay.push_str("\n\nFleet profile: ");
+    overlay.push_str(&member.id);
+    if let Some(display_name) = member.display_name.as_deref() {
+        overlay.push_str(" (");
+        overlay.push_str(display_name);
+        overlay.push(')');
+    }
+    if let Some(description) = description.filter(|text| !text.is_empty()) {
+        overlay.push_str("\nProfile description:\n");
+        overlay.push_str(description);
+    }
+    if let Some(instructions) = instructions.filter(|text| !text.is_empty()) {
+        overlay.push_str("\nProfile instructions:\n");
+        overlay.push_str(instructions);
+    }
+    Some(overlay)
+}
+
+/// Requested model route for a spawn, honoring fleet profile precedence:
+/// explicit `model` param > explicit `model_strength` param > member model
+/// pin (Fixed) > member loadout > parse-time default. An explicit `model`
+/// still wins downstream via the configured-model path (which turns it into
+/// a Fixed route), as does a `role_models` override where one matches today.
+fn spawn_model_route(
+    request: &SpawnRequest,
+    member: Option<&crate::fleet::profile::AgentProfile>,
+) -> ModelRoute {
+    let Some(member) = member else {
+        return request.model_strength.model_route();
+    };
+    if request.model.is_some() || request.model_strength_explicit {
+        return request.model_strength.model_route();
+    }
+    if let Some(model) = member
+        .profile
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| !model.is_empty() && !model.eq_ignore_ascii_case("auto"))
+    {
+        return ModelRoute::Fixed(model.to_string());
+    }
+    match member.profile.loadout {
+        codewhale_config::FleetLoadout::Fast => ModelRoute::Faster,
+        // Inherit and the richer loadout classes (strong/balanced/...) all
+        // inherit the parent model here. The fleet dispatcher maps those
+        // classes to Auto, but in this seam Auto routes to the cheap sibling —
+        // a silent downgrade for e.g. a "strong" member. Inheriting keeps the
+        // existing non-profile default behavior.
+        _ => ModelRoute::Inherit,
+    }
+}
+
+/// Effective absolute `max_spawn_depth` for a child, combining the inherited
+/// runtime budget, the caller's `max_depth` request, and a fleet profile's
+/// `delegation.max_spawn_depth` hint. An explicit request keeps its existing
+/// semantics (may widen up to the ceiling); a profile hint only narrows —
+/// either the request (min) or the inherited budget.
+fn child_max_spawn_depth_for_spawn(
+    inherited: u32,
+    child_spawn_depth: u32,
+    requested: Option<u32>,
+    profile_hint: Option<u32>,
+) -> u32 {
+    match (requested, profile_hint) {
+        (Some(requested), hint) => {
+            let depth = hint.map_or(requested, |hint| requested.min(hint));
+            clamp_child_max_spawn_depth(child_spawn_depth, depth)
+        }
+        (None, Some(hint)) => inherited.min(clamp_child_max_spawn_depth(child_spawn_depth, hint)),
+        (None, None) => inherited,
+    }
 }
 
 fn parse_optional_bool(input: &Value, names: &[&str]) -> Option<bool> {

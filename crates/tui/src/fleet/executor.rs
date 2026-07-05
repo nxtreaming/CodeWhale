@@ -441,6 +441,7 @@ mod tests {
                 delegation: FleetDelegationHints::default(),
             },
             source: std::path::PathBuf::from(format!("{id}.toml")),
+            origin: crate::fleet::roster::ProfileOrigin::Workspace,
         }
     }
 

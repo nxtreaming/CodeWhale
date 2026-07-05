@@ -108,8 +108,10 @@ pub struct RuntimeApiState {
     mobile_enabled: bool,
     /// Shared McpPool reused for explicit live MCP discovery. Passive API
     /// calls do not initialize this pool so dashboards cannot accidentally
-    /// become a second stdio-process owner.
-    mcp_pool: Arc<Mutex<Option<McpPool>>>,
+    /// become a second stdio-process owner. The outer mutex guards only the
+    /// lazily-initialized slot; slow per-pool work (connect_all) runs under
+    /// the inner handle so it cannot block slot reads.
+    mcp_pool: Arc<Mutex<Option<Arc<Mutex<McpPool>>>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -1435,23 +1437,36 @@ async fn list_mcp_tools(
     State(state): State<RuntimeApiState>,
     Query(query): Query<McpToolsQuery>,
 ) -> Result<Json<McpToolsResponse>, ApiError> {
-    let mut pool_guard = state.mcp_pool.lock().await;
-    if query.connect && pool_guard.is_none() {
-        let mcp_config_path = state.config.read().mcp_config_path();
-        let new_pool = McpPool::from_config_path_with_workspace(&mcp_config_path, &state.workspace)
-            .map_err(|e| ApiError::internal(format!("Failed to load MCP config: {e}")))?;
-        pool_guard.replace(new_pool);
-    }
-
-    if query.connect {
-        if let Some(pool) = pool_guard.as_mut() {
-            let _errors = pool.connect_all().await;
+    // Double-checked init: hold the state-level slot mutex only long enough
+    // to grab (or lazily create) the pool handle. connect_all can stall on a
+    // slow MCP server and must not run under the slot lock.
+    let pool_handle = {
+        let mut pool_slot = state.mcp_pool.lock().await;
+        match pool_slot.as_ref() {
+            Some(pool) => Some(Arc::clone(pool)),
+            None if query.connect => {
+                let mcp_config_path = state.config.read().mcp_config_path();
+                let new_pool =
+                    McpPool::from_config_path_with_workspace(&mcp_config_path, &state.workspace)
+                        .map_err(|e| {
+                            ApiError::internal(format!("Failed to load MCP config: {e}"))
+                        })?;
+                let handle = Arc::new(Mutex::new(new_pool));
+                pool_slot.replace(Arc::clone(&handle));
+                Some(handle)
+            }
+            None => None,
         }
-    }
+    };
 
-    let Some(pool) = pool_guard.as_ref() else {
+    let Some(pool_handle) = pool_handle else {
         return Ok(Json(McpToolsResponse { tools: Vec::new() }));
     };
+
+    let mut pool = pool_handle.lock().await;
+    if query.connect {
+        let _errors = pool.connect_all().await;
+    }
 
     let mut tools = Vec::new();
     for (prefixed_name, tool) in pool.all_tools() {
@@ -1534,11 +1549,12 @@ async fn run_automation(
     State(state): State<RuntimeApiState>,
     Path(id): Path<String>,
 ) -> Result<Json<AutomationRunRecord>, ApiError> {
-    let manager = state.automations.lock().await;
-    let run = manager
-        .run_now(&id, &state.task_manager)
-        .await
-        .map_err(map_automation_err)?;
+    // run_now_shared drops the manager mutex across the task-manager await so
+    // other automation endpoints stay responsive behind a slow enqueue.
+    let run =
+        crate::automation_manager::run_now_shared(&state.automations, &id, &state.task_manager)
+            .await
+            .map_err(map_automation_err)?;
     Ok(Json(run))
 }
 

@@ -43,6 +43,26 @@ type PendingUserInputAnswers = Vec<UserInputAnswerEvent>;
 
 mod chat_completions;
 
+/// Legacy DeepSeek-era naming kept for external compatibility.
+///
+/// CodeWhale began life as a DeepSeek CLI; existing health probes, SDK
+/// harnesses, and on-disk layouts still key off these names. Every remaining
+/// legacy reference in this crate routes through this shim so a future
+/// coordinated migration touches exactly one place (repo policy: preserve
+/// legacy migration care).
+mod legacy_deepseek_compat {
+    use std::path::PathBuf;
+
+    /// Service name advertised by the HTTP and stdio health probes.
+    pub(crate) const SERVICE_NAME: &str = "deepseek-app-server";
+
+    /// Fallback hook-event log location used when no config path is
+    /// provided (legacy `.deepseek/` dot-directory layout).
+    pub(crate) fn default_events_log_path() -> PathBuf {
+        PathBuf::from(".deepseek/events.jsonl")
+    }
+}
+
 const DEFAULT_CORS_ORIGINS: &[&str] = &[
     "http://localhost",
     "http://localhost:1420",
@@ -77,14 +97,26 @@ impl std::fmt::Debug for AppServerOptions {
     }
 }
 
+/// Cached stdio→runtime bridge handle.
+///
+/// The outer [`AppState::stdio_bridge`] mutex guards only the cache slot;
+/// this inner mutex serializes traffic on one bridge (single child process
+/// plus per-thread seq bookkeeping requires ordered access).
+type SharedRuntimeBridge = Arc<Mutex<RuntimeBridge>>;
+
 #[derive(Clone)]
 struct AppState {
     config_path: Option<PathBuf>,
     config: Arc<RwLock<codewhale_config::ConfigToml>>,
-    runtime: Arc<Mutex<Runtime>>,
+    /// Read/write split mirrors [`Runtime`]'s own receivers: `&self`
+    /// operations (tool calls, status, MCP startup) share a read guard and
+    /// run concurrently; `&mut self` turns (prompt/thread) and config pushes
+    /// take the write guard because the runtime genuinely requires
+    /// exclusivity there.
+    runtime: Arc<RwLock<Runtime>>,
     registry: ModelRegistry,
     auth_token: Option<String>,
-    stdio_bridge: Arc<Mutex<Option<RuntimeBridge>>>,
+    stdio_bridge: Arc<Mutex<Option<SharedRuntimeBridge>>>,
     stdio_thread_hints: Arc<Mutex<HashMap<String, RuntimeThreadHint>>>,
     /// Answers submitted via `AppRequest::SubmitUserInput`, keyed by
     /// `request_id`. A driver polls this to resolve clarification questions
@@ -282,7 +314,7 @@ async fn healthz() -> Json<Value> {
     Json(json!({
         "status": "ok",
         "protocol": "v2",
-        "service": "deepseek-app-server"
+        "service": legacy_deepseek_compat::SERVICE_NAME
     }))
 }
 
@@ -290,7 +322,7 @@ async fn thread_handler(
     State(state): State<AppState>,
     Json(req): Json<ThreadRequest>,
 ) -> Json<ThreadResponse> {
-    let mut runtime = state.runtime.lock().await;
+    let mut runtime = state.runtime.write().await;
     match runtime.handle_thread(req).await {
         Ok(res) => Json(res),
         Err(err) => Json(ThreadResponse {
@@ -314,7 +346,7 @@ async fn prompt_handler(
     State(state): State<AppState>,
     Json(req): Json<PromptRequest>,
 ) -> Json<PromptResponse> {
-    let mut runtime = state.runtime.lock().await;
+    let mut runtime = state.runtime.write().await;
     let overrides = CliRuntimeOverrides::default();
     match runtime.handle_prompt(req, &overrides).await {
         Ok(res) => Json(res),
@@ -330,7 +362,6 @@ async fn tool_handler(
     State(state): State<AppState>,
     Json(req): Json<ToolCallRequest>,
 ) -> Json<Value> {
-    let runtime = state.runtime.lock().await;
     let cwd = req
         .cwd
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
@@ -346,6 +377,10 @@ async fn tool_handler(
             })
             .unwrap_or(codewhale_execpolicy::AskForApproval::OnRequest)
     };
+    // `invoke_tool` takes `&self`, so long-running tool executions share a
+    // read guard: they run concurrently with each other and with status
+    // reads instead of serializing every request behind one Mutex.
+    let runtime = state.runtime.read().await;
     match runtime.invoke_tool(req.call, approval_mode, &cwd).await {
         Ok(value) => Json(value),
         Err(err) => Json(json!({ "ok": false, "error": err.to_string() })),
@@ -353,12 +388,12 @@ async fn tool_handler(
 }
 
 async fn jobs_handler(State(state): State<AppState>) -> Json<AppResponse> {
-    let runtime = state.runtime.lock().await;
+    let runtime = state.runtime.read().await;
     Json(runtime.app_status())
 }
 
 async fn mcp_startup_handler(State(state): State<AppState>) -> Json<Value> {
-    let runtime = state.runtime.lock().await;
+    let runtime = state.runtime.read().await;
     let summary = runtime.mcp_startup().await;
     Json(json!({
         "ok": true,
@@ -391,7 +426,7 @@ fn build_state(config_path: Option<PathBuf>, auth_token: Option<String>) -> Resu
     let hook_log_path = config_path
         .as_ref()
         .and_then(|p| p.parent().map(|parent| parent.join("events.jsonl")))
-        .unwrap_or_else(|| PathBuf::from(".deepseek/events.jsonl"));
+        .unwrap_or_else(legacy_deepseek_compat::default_events_log_path);
     hooks.add_sink(Arc::new(JsonlHookSink::new(hook_log_path)));
 
     if let Some(socket_path) = config
@@ -416,7 +451,7 @@ fn build_state(config_path: Option<PathBuf>, auth_token: Option<String>) -> Resu
     Ok(AppState {
         config_path,
         config: Arc::new(RwLock::new(config)),
-        runtime: Arc::new(Mutex::new(runtime)),
+        runtime: Arc::new(RwLock::new(runtime)),
         registry,
         auth_token,
         stdio_bridge: Arc::new(Mutex::new(None)),
@@ -597,7 +632,7 @@ async fn handle_thread_request(
     state: &AppState,
     req: ThreadRequest,
 ) -> std::result::Result<ThreadResponse, JsonRpcError> {
-    let mut runtime = state.runtime.lock().await;
+    let mut runtime = state.runtime.write().await;
     runtime
         .handle_thread(req)
         .await
@@ -608,7 +643,7 @@ async fn handle_prompt_request(
     state: &AppState,
     req: PromptRequest,
 ) -> std::result::Result<PromptResponse, JsonRpcError> {
-    let mut runtime = state.runtime.lock().await;
+    let mut runtime = state.runtime.write().await;
     runtime
         .handle_prompt(req, &CliRuntimeOverrides::default())
         .await
@@ -624,16 +659,12 @@ async fn handle_stdio_thread_message<W: AsyncWrite + Unpin>(
         let hints = state.stdio_thread_hints.lock().await;
         hints.get(&parsed.thread_id).cloned()
     };
-    let mut bridge_slot = state.stdio_bridge.lock().await;
-    if bridge_slot.is_none() {
-        let bridge = RuntimeBridge::start(state.config_path.as_deref())
-            .await
-            .map_err(|err| JsonRpcError::internal(err.to_string()))?;
-        *bridge_slot = Some(bridge);
-    }
-    let bridge = bridge_slot
-        .as_mut()
-        .ok_or_else(|| JsonRpcError::internal("failed to initialize runtime bridge"))?;
+    let bridge = acquire_stdio_bridge(state).await?;
+    // The inner bridge lock is held for the whole turn: one child process
+    // serves all threads and per-thread seq tracking requires ordered
+    // access. The cache slot itself stays unlocked, so config updates and
+    // bridge invalidation are never queued behind a streaming turn.
+    let mut bridge = bridge.lock().await;
     let runtime_thread_id = bridge
         .ensure_runtime_thread(&parsed.thread_id, hint)
         .await
@@ -659,6 +690,32 @@ async fn record_stdio_thread_hint(state: &AppState, response: &ThreadResponse) {
     );
 }
 
+/// Fetch the cached stdio→runtime bridge, spawning one on first use.
+///
+/// The cache-slot lock is held only for the lookup/insert — never across
+/// the child spawn or any request traffic — so [`invalidate_stdio_bridge`]
+/// and other slot users are never blocked behind a slow bridge operation.
+async fn acquire_stdio_bridge(
+    state: &AppState,
+) -> std::result::Result<SharedRuntimeBridge, JsonRpcError> {
+    if let Some(bridge) = state.stdio_bridge.lock().await.as_ref() {
+        return Ok(bridge.clone());
+    }
+    let bridge = Arc::new(Mutex::new(
+        RuntimeBridge::start(state.config_path.as_deref())
+            .await
+            .map_err(|err| JsonRpcError::internal(err.to_string()))?,
+    ));
+    let mut slot = state.stdio_bridge.lock().await;
+    // Prefer a bridge cached by a concurrent caller while we were spawning;
+    // dropping our unused one kills the extra child via `Drop`.
+    Ok(slot.get_or_insert_with(|| bridge.clone()).clone())
+}
+
+/// Drop the cached runtime bridge so the next stdio thread message spawns a
+/// fresh child that re-reads the persisted config. An in-flight message
+/// keeps its own [`SharedRuntimeBridge`] clone and finishes against the old
+/// child, which is killed when the last clone drops.
 async fn invalidate_stdio_bridge(state: &AppState) {
     let mut bridge = state.stdio_bridge.lock().await;
     *bridge = None;
@@ -1075,7 +1132,7 @@ async fn dispatch_stdio_request_with_writer<W: AsyncWrite + Unpin>(
         "healthz" | "app/healthz" => StdioDispatchResult {
             result: json!({
                 "status": "ok",
-                "service": "deepseek-app-server",
+                "service": legacy_deepseek_compat::SERVICE_NAME,
                 "transport": "stdio"
             }),
             should_exit: false,
@@ -1403,29 +1460,14 @@ async fn process_app_request(
             }
         }
         AppRequest::ConfigSet { key, value } => {
-            let mut cfg = state.config.write().await;
-            let result = cfg.set_value(&key, &value);
+            let (result, snapshot) = {
+                let mut cfg = state.config.write().await;
+                let result = cfg.set_value(&key, &value);
+                (result, cfg.clone())
+            };
             let ok = result.is_ok();
             let message = result.err().map(|e| e.to_string());
-            let snapshot = cfg.clone();
-            drop(cfg);
-            // Clone for the runtime before persist consumes `snapshot`.
-            let runtime_snapshot = snapshot.clone();
-            if let Err(e) = persist_config(state, snapshot).await {
-                tracing::error!("Failed to persist config after set: {e}");
-            }
-            // Sync the updated config into the live Runtime so
-            // the next turn picks up the change without a restart.
-            // Only `config.toml` is touched here; `permissions.toml`
-            // (and therefore `exec_policy`) is intentionally left alone
-            // — use `ConfigReload` to pick up external permission edits.
-            let mut runtime = state.runtime.lock().await;
-            runtime.update_config(runtime_snapshot);
-            drop(runtime);
-            // Invalidate the cached stdio bridge child so the next
-            // request spawns a fresh runtime that picks up the
-            // persisted config from disk.
-            invalidate_stdio_bridge(state).await;
+            apply_config_update(state, snapshot, None, true).await;
             AppResponse {
                 ok,
                 data: json!({ "key": key, "value": value, "error": message }),
@@ -1433,29 +1475,14 @@ async fn process_app_request(
             }
         }
         AppRequest::ConfigUnset { key } => {
-            let mut cfg = state.config.write().await;
-            let result = cfg.unset_value(&key);
+            let (result, snapshot) = {
+                let mut cfg = state.config.write().await;
+                let result = cfg.unset_value(&key);
+                (result, cfg.clone())
+            };
             let ok = result.is_ok();
             let message = result.err().map(|e| e.to_string());
-            let snapshot = cfg.clone();
-            drop(cfg);
-            // Clone for the runtime before persist consumes `snapshot`.
-            let runtime_snapshot = snapshot.clone();
-            if let Err(e) = persist_config(state, snapshot).await {
-                tracing::error!("Failed to persist config after unset: {e}");
-            }
-            // Sync the updated config into the live Runtime so
-            // the next turn picks up the change without a restart.
-            // Only `config.toml` is touched here; `permissions.toml`
-            // (and therefore `exec_policy`) is intentionally left alone
-            // — use `ConfigReload` to pick up external permission edits.
-            let mut runtime = state.runtime.lock().await;
-            runtime.update_config(runtime_snapshot);
-            drop(runtime);
-            // Invalidate the cached stdio bridge child so the next
-            // request spawns a fresh runtime that picks up the
-            // persisted config from disk.
-            invalidate_stdio_bridge(state).await;
+            apply_config_update(state, snapshot, None, true).await;
             AppResponse {
                 ok,
                 data: json!({ "key": key, "error": message }),
@@ -1493,22 +1520,10 @@ async fn process_app_request(
             let new_config = store.config.clone();
             let new_exec_policy = store.exec_policy_engine();
 
-            // Update the shared config lock so future
-            // ConfigGet / tool_handler reads see the new values.
-            {
-                let mut cfg = state.config.write().await;
-                *cfg = new_config.clone();
-            }
-
-            // Push both the config and the (possibly changed) exec policy
-            // into the live Runtime so the next prompt / thread turn uses
-            // the reloaded state. MCP server connections are NOT refreshed
-            // here — see `Runtime::reload_config_and_policy` for the
-            // rationale and the matching TUI `mcp_restart_required` note.
-            {
-                let mut runtime = state.runtime.lock().await;
-                runtime.reload_config_and_policy(new_config, new_exec_policy);
-            }
+            // Disk is already the source of truth here, so nothing to
+            // persist; the exec policy rides along so the runtime picks up
+            // external `permissions.toml` edits too.
+            apply_config_update(state, new_config, Some(new_exec_policy), false).await;
 
             AppResponse {
                 ok: true,
@@ -1522,7 +1537,7 @@ async fn process_app_request(
             events: Vec::new(),
         },
         AppRequest::ThreadLoadedList => {
-            let mut runtime = state.runtime.lock().await;
+            let mut runtime = state.runtime.write().await;
             let response = runtime
                 .handle_thread(codewhale_protocol::ThreadRequest::List(
                     codewhale_protocol::ThreadListParams {
@@ -1572,6 +1587,44 @@ async fn process_app_request(
             }
         }
     }
+}
+
+/// Propagate a new config snapshot to every place that must observe it:
+/// optionally persist it to disk, install it in the shared `state.config`,
+/// push it into the live [`Runtime`], and invalidate the cached stdio
+/// bridge so the next stdio request spawns a fresh child that reads the
+/// new on-disk config. Shared by `ConfigSet` / `ConfigUnset` / `ConfigReload`.
+///
+/// `exec_policy` is `Some` only on the reload path, which re-reads
+/// `permissions.toml` from disk; set/unset intentionally leave the live
+/// exec policy alone (use `ConfigReload` to pick up external permission
+/// edits). `persist` is false on the reload path because disk is already
+/// the source of truth there.
+async fn apply_config_update(
+    state: &AppState,
+    snapshot: codewhale_config::ConfigToml,
+    exec_policy: Option<codewhale_execpolicy::ExecPolicyEngine>,
+    persist: bool,
+) {
+    if persist && let Err(e) = persist_config(state, snapshot.clone()).await {
+        tracing::error!("Failed to persist config update: {e}");
+    }
+    {
+        let mut cfg = state.config.write().await;
+        *cfg = snapshot.clone();
+    }
+    // Sync into the live Runtime so the next turn picks up the change
+    // without a restart. MCP server connections are NOT refreshed here —
+    // see `Runtime::reload_config_and_policy` for the rationale and the
+    // matching TUI `mcp_restart_required` note.
+    {
+        let mut runtime = state.runtime.write().await;
+        match exec_policy {
+            Some(policy) => runtime.reload_config_and_policy(snapshot, policy),
+            None => runtime.update_config(snapshot),
+        }
+    }
+    invalidate_stdio_bridge(state).await;
 }
 
 async fn persist_config(state: &AppState, config: codewhale_config::ConfigToml) -> Result<()> {
@@ -1724,7 +1777,7 @@ mod tests {
         .expect("write permissions");
 
         let state = build_state(Some(config_path), None).expect("state");
-        let runtime = state.runtime.lock().await;
+        let runtime = state.runtime.read().await;
         let decision = runtime
             .exec_policy
             .check(codewhale_execpolicy::ExecPolicyContext {
@@ -1759,7 +1812,7 @@ mod tests {
 
         // Sanity: initial runtime sees the on-disk model and has no rule.
         {
-            let runtime = state.runtime.lock().await;
+            let runtime = state.runtime.read().await;
             assert_eq!(runtime.config.model.as_deref(), Some("deepseek-chat"));
             let decision = runtime
                 .exec_policy
@@ -1805,7 +1858,7 @@ mod tests {
         }
         // The live Runtime reflects both the new model and the new rule.
         {
-            let runtime = state.runtime.lock().await;
+            let runtime = state.runtime.read().await;
             assert_eq!(runtime.config.model.as_deref(), Some("deepseek-reasoner"));
             let decision = runtime
                 .exec_policy
@@ -1853,7 +1906,7 @@ mod tests {
 
         // Live runtime sees the new model.
         {
-            let runtime = state.runtime.lock().await;
+            let runtime = state.runtime.read().await;
             assert_eq!(runtime.config.model.as_deref(), Some("deepseek-reasoner"));
             // exec_policy was empty at startup and must remain empty.
             let decision = runtime
@@ -1887,7 +1940,7 @@ mod tests {
 
         // Sanity: runtime starts with the on-disk model.
         {
-            let runtime = state.runtime.lock().await;
+            let runtime = state.runtime.read().await;
             assert_eq!(runtime.config.model.as_deref(), Some("deepseek-chat"));
         }
 
@@ -1906,7 +1959,7 @@ mod tests {
 
         // Live runtime sees the cleared model.
         {
-            let runtime = state.runtime.lock().await;
+            let runtime = state.runtime.read().await;
             assert!(runtime.config.model.is_none());
         }
         // Shared config lock agrees.
@@ -1948,13 +2001,117 @@ mod tests {
         // Live state is untouched: the early-return on load error must
         // not have clobbered runtime.config or state.config.
         {
-            let runtime = state.runtime.lock().await;
+            let runtime = state.runtime.read().await;
             assert_eq!(runtime.config.model.as_deref(), Some("deepseek-chat"));
         }
         {
             let cfg = state.config.read().await;
             assert_eq!(cfg.model.as_deref(), Some("deepseek-chat"));
         }
+    }
+
+    async fn seed_test_bridge(state: &AppState) -> SharedRuntimeBridge {
+        let bridge = Arc::new(Mutex::new(RuntimeBridge::from_base_url_for_test(
+            "http://127.0.0.1:9".to_string(),
+        )));
+        *state.stdio_bridge.lock().await = Some(bridge.clone());
+        bridge
+    }
+
+    #[tokio::test]
+    async fn config_set_invalidates_cached_stdio_bridge() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_path = tmp.path().join("config.toml");
+        fs::write(&config_path, "model = \"deepseek-chat\"\n").expect("write config");
+        let state = build_state(Some(config_path), None).expect("state");
+        seed_test_bridge(&state).await;
+
+        let response = process_app_request(
+            &state,
+            AppRequest::ConfigSet {
+                key: "model".to_string(),
+                value: "deepseek-reasoner".to_string(),
+            },
+            AppTransport::Stdio,
+        )
+        .await;
+        assert!(response.ok, "set should succeed");
+
+        // The cached bridge child must be dropped so the next stdio request
+        // spawns a fresh runtime that reads the persisted config.
+        assert!(state.stdio_bridge.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn config_reload_invalidates_cached_stdio_bridge() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_path = tmp.path().join("config.toml");
+        fs::write(&config_path, "model = \"deepseek-chat\"\n").expect("write config");
+        let state = build_state(Some(config_path), None).expect("state");
+        seed_test_bridge(&state).await;
+
+        let response =
+            process_app_request(&state, AppRequest::ConfigReload, AppTransport::Stdio).await;
+        assert!(response.ok, "reload should succeed");
+
+        assert!(state.stdio_bridge.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn stdio_bridge_invalidation_not_blocked_by_in_flight_turn() {
+        let (state, _tmp) = capability_test_state();
+        let bridge = seed_test_bridge(&state).await;
+
+        // Simulate a long streaming turn holding the inner bridge lock.
+        let _in_flight = bridge.lock().await;
+
+        // Invalidation only touches the cache slot, so it must complete
+        // without waiting for the in-flight turn to release the bridge.
+        tokio::time::timeout(Duration::from_secs(1), invalidate_stdio_bridge(&state))
+            .await
+            .expect("invalidation must not wait on bridge traffic");
+        assert!(state.stdio_bridge.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn runtime_read_paths_run_concurrently() {
+        // Tool/status/mcp handlers take read guards; two must coexist so a
+        // long-running tool call cannot serialize unrelated requests. With
+        // the old `Mutex<Runtime>` this pattern would deadlock.
+        let (state, _tmp) = capability_test_state();
+        let first = state.runtime.read().await;
+        let second = state.runtime.read().await;
+        assert!(first.app_status().ok);
+        assert!(second.app_status().ok);
+    }
+
+    #[tokio::test]
+    async fn health_probes_advertise_legacy_deepseek_service_name() {
+        // External probes still key off the DeepSeek-era service name; both
+        // transports must serve it from the single compat shim.
+        let (app, _tmp) = app_with_config(None);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/healthz")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let body = response_body_json(response).await;
+        assert_eq!(body["service"], legacy_deepseek_compat::SERVICE_NAME);
+        assert_eq!(body["service"], "deepseek-app-server");
+
+        let (state, _tmp) = capability_test_state();
+        let stdio = dispatch_stdio_request(&state, "healthz", json!({}))
+            .await
+            .expect("stdio healthz");
+        assert_eq!(
+            stdio.result["service"],
+            legacy_deepseek_compat::SERVICE_NAME
+        );
     }
 
     #[test]

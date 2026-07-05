@@ -45,7 +45,8 @@ fn compile_js_like_workflow(
     let object = extract_workflow_object(source)?;
     let authored = serde_json::from_str::<JsWorkflowSpec>(object)
         .map_err(JavascriptWorkflowError::InvalidJson)?;
-    let workflow = authored.into_workflow();
+    let mut workflow = authored.into_workflow();
+    normalize_leaf_profiles(&mut workflow.nodes);
     if workflow.goal.trim().is_empty() {
         return Err(JavascriptWorkflowError::InvalidNode(
             "workflow goal cannot be empty".to_string(),
@@ -54,6 +55,33 @@ fn compile_js_like_workflow(
     validate_workflow_nodes(&workflow.nodes)
         .map_err(|error| JavascriptWorkflowError::InvalidNode(error.to_string()))?;
     Ok(workflow)
+}
+
+// Profile names are case-insensitive roster keys; the IR stores the canonical
+// lowercase form. Invalid tokens are left as-is so validation reports them.
+fn normalize_leaf_profiles(nodes: &mut [WorkflowNode]) {
+    for node in nodes {
+        match node {
+            WorkflowNode::Leaf(spec) => {
+                if let Some(profile) = spec.profile.as_mut() {
+                    *profile = profile.trim().to_lowercase();
+                }
+            }
+            WorkflowNode::BranchSet(spec) => normalize_leaf_profiles(&mut spec.children),
+            WorkflowNode::Sequence(spec) => normalize_leaf_profiles(&mut spec.children),
+            WorkflowNode::LoopUntil(spec) => normalize_leaf_profiles(&mut spec.children),
+            WorkflowNode::Cond(spec) => {
+                normalize_leaf_profiles(&mut spec.then_nodes);
+                normalize_leaf_profiles(&mut spec.else_nodes);
+            }
+            WorkflowNode::Expand(spec) => {
+                if let Some(template) = spec.template.as_deref_mut() {
+                    normalize_leaf_profiles(std::slice::from_mut(template));
+                }
+            }
+            WorkflowNode::Reduce(_) | WorkflowNode::TeacherReview(_) => {}
+        }
+    }
 }
 
 fn reject_unsupported_constructs(source: &str) -> JavascriptWorkflowResult<()> {
@@ -483,6 +511,56 @@ export default workflow({
 
         assert_eq!(workflow.goal, "TS authored workflow");
         assert_eq!(workflow.nodes.len(), 1);
+    }
+
+    #[test]
+    fn javascript_workflow_accepts_and_normalizes_agent_profile() {
+        let source = r#"
+workflow({
+  "goal": "profile routing",
+  "nodes": [
+    { "agent": { "id": "review", "prompt": "review the diff", "profile": " Reviewer " } },
+    { "agent": { "id": "scan", "prompt": "scan safely" } }
+  ]
+});
+"#;
+
+        let workflow = compile_javascript_workflow("profile.workflow.js", source)
+            .expect("profile-carrying workflow should compile");
+
+        let WorkflowNode::Leaf(review) = &workflow.nodes[0] else {
+            panic!("first node should be a leaf");
+        };
+        assert_eq!(review.profile.as_deref(), Some("reviewer"));
+        let WorkflowNode::Leaf(scan) = &workflow.nodes[1] else {
+            panic!("second node should be a leaf");
+        };
+        assert_eq!(scan.profile, None);
+    }
+
+    #[test]
+    fn javascript_workflow_rejects_invalid_agent_profiles() {
+        for bad in [r#""""#, r#""has space""#, r#""quote\"y""#, r#""a=b""#] {
+            let source = format!(
+                r#"
+workflow({{
+  "goal": "bad profile",
+  "nodes": [
+    {{ "agent": {{ "id": "scan", "prompt": "scan safely", "profile": {bad} }} }}
+  ]
+}});
+"#
+            );
+
+            let err = compile_javascript_workflow("bad-profile.workflow.js", &source)
+                .expect_err("invalid profile should be rejected");
+
+            assert!(
+                matches!(err, JavascriptWorkflowError::InvalidNode(_)),
+                "profile {bad} should fail as an invalid node, got {err:?}"
+            );
+            assert!(err.to_string().contains("profile"));
+        }
     }
 
     #[test]

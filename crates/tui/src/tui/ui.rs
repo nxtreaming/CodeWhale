@@ -1408,6 +1408,10 @@ fn build_engine_config(app: &App, config: &Config) -> EngineConfig {
             .map(crate::config::LspConfigToml::into_runtime),
         runtime_services: app.runtime_services.clone(),
         subagent_model_overrides: config.subagent_model_overrides(),
+        fleet_roster: std::sync::Arc::new(crate::fleet::roster::FleetRoster::load(
+            &config.fleet_config(),
+            &app.workspace,
+        )),
         subagent_api_timeout: Duration::from_secs(
             config.subagent_api_timeout_secs_for_provider(provider),
         ),
@@ -2010,10 +2014,10 @@ async fn run_event_loop(
             .try_lock()
             .ok()
             .and_then(|mut guard| guard.take());
-        if let Some((draft_gen, model_label, outcome)) = fleet_draft_delivery {
-            if draft_gen == app.current_draft_gen() {
-                deliver_fleet_draft_result(app, model_label, outcome, app.ui_locale);
-            }
+        if let Some((draft_gen, model_label, outcome)) = fleet_draft_delivery
+            && draft_gen == app.current_draft_gen()
+        {
+            deliver_fleet_draft_result(app, model_label, outcome, app.ui_locale);
         }
 
         // Poll the constitution model-draft cell (same background pattern).
@@ -2022,10 +2026,10 @@ async fn run_event_loop(
             .try_lock()
             .ok()
             .and_then(|mut guard| guard.take());
-        if let Some((draft_gen, model_label, draft_locale, outcome)) = constitution_draft_delivery {
-            if draft_gen == app.current_draft_gen() {
-                deliver_constitution_draft_result(app, model_label, draft_locale, outcome);
-            }
+        if let Some((draft_gen, model_label, draft_locale, outcome)) = constitution_draft_delivery
+            && draft_gen == app.current_draft_gen()
+        {
+            deliver_constitution_draft_result(app, model_label, draft_locale, outcome);
         }
 
         // First, poll for engine events (non-blocking)
@@ -5588,6 +5592,7 @@ async fn handle_fleet_profile_model_draft(
     let cell = app.fleet_draft_cell.clone();
     let spawn_label = model_label.clone();
     let request_gen = app.next_draft_gen();
+    let workspace = app.workspace.clone();
     app.status_message = Some(match locale {
         crate::localization::Locale::ZhHans => {
             format!(
@@ -5602,6 +5607,15 @@ async fn handle_fleet_profile_model_draft(
     });
     app.needs_redraw = true;
     tokio::spawn(async move {
+        // Redacted, bounded workspace fingerprint (manifest names, test
+        // commands, branch + dirty count — no contents, secrets, or absolute
+        // paths). Computed off the event loop; the untrusted-output gate on
+        // the reply is unchanged.
+        let fingerprint = tokio::task::spawn_blocking(move || {
+            crate::tui::setup::workspace_fingerprint(&workspace)
+        })
+        .await
+        .unwrap_or_default();
         let outcome = match tokio::time::timeout(
             DRAFT_TIMEOUT,
             crate::tui::setup::draft_fleet_profile_with_model(
@@ -5610,6 +5624,7 @@ async fn handle_fleet_profile_model_draft(
                 &role,
                 &model_class,
                 locale,
+                &fingerprint,
             ),
         )
         .await
@@ -8088,6 +8103,14 @@ async fn apply_command_result(
                         .push(crate::tui::theme_picker::ThemePickerView::new(original));
                 }
             }
+            AppAction::OpenFleetRoster => {
+                if app.view_stack.top_kind() != Some(ModalKind::FleetRoster) {
+                    app.view_stack
+                        .push(crate::tui::views::fleet_roster::FleetRosterView::new(
+                            app, config,
+                        ));
+                }
+            }
             AppAction::OpenFleetSetup => {
                 if app.view_stack.top_kind() != Some(ModalKind::FleetSetup) {
                     let _ = app.next_draft_gen();
@@ -10014,6 +10037,17 @@ async fn handle_view_events(
                 locale,
             } => {
                 handle_fleet_profile_model_draft(app, config, role, model_class, locale).await;
+            }
+            ViewEvent::FleetRosterOpenSetupRequested => {
+                // The roster view hands off to the authoring wizard (same
+                // path as AppAction::OpenFleetSetup).
+                if app.view_stack.top_kind() != Some(ModalKind::FleetSetup) {
+                    let _ = app.next_draft_gen();
+                    app.view_stack
+                        .push(crate::tui::views::fleet_setup::FleetSetupView::new(
+                            app, config,
+                        ));
+                }
             }
             ViewEvent::FleetProfileDraftCommitRequested { draft } => {
                 // The TOML is rendered deterministically from the validated

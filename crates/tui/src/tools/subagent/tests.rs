@@ -1,4 +1,5 @@
 use super::*;
+use crate::fleet::roster::FleetRoster;
 use crate::tools::{AgentToolSurfaceOptions, ToolRegistryBuilder};
 use crate::worker_profile::ShellPolicy;
 use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::post};
@@ -1086,6 +1087,286 @@ fn test_parse_spawn_request_rejects_out_of_range_max_depth() {
         err.to_string()
             .contains(&format!("max_depth must be between 0 and {ceiling}"))
     );
+}
+
+fn fleet_roster_with(id: &str, profile: codewhale_config::FleetProfile) -> FleetRoster {
+    let tmp = tempdir().expect("tempdir");
+    let config = codewhale_config::FleetConfigToml {
+        profiles: std::collections::BTreeMap::from([(id.to_string(), profile)]),
+        ..Default::default()
+    };
+    FleetRoster::load(&config, tmp.path())
+}
+
+fn custom_fleet_profile(role: &str) -> codewhale_config::FleetProfile {
+    codewhale_config::FleetProfile {
+        slot: codewhale_config::FleetSlot::from_name(role),
+        role: codewhale_config::FleetRole {
+            name: role.to_string(),
+            description: None,
+            instructions: None,
+        },
+        ..Default::default()
+    }
+}
+
+#[test]
+fn test_parse_spawn_request_accepts_profile_and_normalizes() {
+    let input = json!({
+        "prompt": "review the diff",
+        "profile": "  Reviewer  "
+    });
+    let parsed = parse_spawn_request(&input).expect("spawn request should parse");
+    assert_eq!(parsed.profile.as_deref(), Some("reviewer"));
+    assert!(!parsed.agent_type_explicit);
+    assert!(!parsed.model_strength_explicit);
+
+    let parsed = parse_spawn_request(&json!({"prompt": "x", "fleet_profile": "Scout"}))
+        .expect("fleet_profile alias should parse");
+    assert_eq!(parsed.profile.as_deref(), Some("scout"));
+
+    let parsed = parse_spawn_request(&json!({"prompt": "x", "roster_profile": "BUILDER"}))
+        .expect("roster_profile alias should parse");
+    assert_eq!(parsed.profile.as_deref(), Some("builder"));
+}
+
+#[test]
+fn test_parse_spawn_request_rejects_invalid_profile_token() {
+    for bad in ["rev iewer", "rev\"iewer", "rev'iewer", "rev`iewer", "rev=er"] {
+        let err = parse_spawn_request(&json!({"prompt": "x", "profile": bad}))
+            .expect_err("invalid profile token should fail");
+        assert!(
+            err.to_string()
+                .contains("profile must be a bare roster member id"),
+            "{bad}: {err}"
+        );
+    }
+}
+
+#[test]
+fn test_apply_spawn_profile_unknown_lists_available_members() {
+    let roster = FleetRoster::built_ins_only();
+    let mut request =
+        parse_spawn_request(&json!({"prompt": "x", "profile": "warlock"})).expect("parse");
+    let err = apply_spawn_profile(&mut request, &roster).expect_err("unknown profile should fail");
+    let message = err.to_string();
+    assert!(message.contains("Unknown profile 'warlock'"), "{message}");
+    for member in [
+        "manager",
+        "scout",
+        "builder",
+        "reviewer",
+        "verifier",
+        "synthesizer",
+        "general",
+    ] {
+        assert!(message.contains(member), "missing {member}: {message}");
+    }
+}
+
+#[test]
+fn test_apply_spawn_profile_rejects_conflicting_explicit_type() {
+    let roster = FleetRoster::built_ins_only();
+    let mut request = parse_spawn_request(&json!({
+        "prompt": "x",
+        "profile": "reviewer",
+        "type": "implementer"
+    }))
+    .expect("parse");
+    let err = apply_spawn_profile(&mut request, &roster).expect_err("type conflict should fail");
+    let message = err.to_string();
+    assert!(
+        message.contains("profile 'reviewer' implies type review"),
+        "{message}"
+    );
+    assert!(
+        message.contains("conflicting explicit type 'implementer'"),
+        "{message}"
+    );
+}
+
+#[test]
+fn test_apply_spawn_profile_accepts_agreeing_explicit_type() {
+    let roster = FleetRoster::built_ins_only();
+    let mut request = parse_spawn_request(&json!({
+        "prompt": "x",
+        "profile": "reviewer",
+        "type": "review"
+    }))
+    .expect("parse");
+    let member = apply_spawn_profile(&mut request, &roster)
+        .expect("agreeing type should pass")
+        .expect("member resolved");
+    assert_eq!(member.id, "reviewer");
+    assert_eq!(request.agent_type, SubAgentType::Review);
+    assert_eq!(request.assignment.role.as_deref(), Some("reviewer"));
+}
+
+#[test]
+fn test_apply_spawn_profile_scout_yields_explore_type_and_faster_route() {
+    let roster = FleetRoster::built_ins_only();
+    let mut request = parse_spawn_request(&json!({"prompt": "map the parser", "profile": "scout"}))
+        .expect("parse");
+    let member = apply_spawn_profile(&mut request, &roster)
+        .expect("scout should resolve")
+        .expect("member resolved");
+    assert_eq!(request.agent_type, SubAgentType::Explore);
+    assert_eq!(
+        spawn_model_route(&request, Some(&member)),
+        ModelRoute::Faster,
+        "scout's fast loadout routes to the faster sibling"
+    );
+}
+
+#[test]
+fn test_apply_spawn_profile_synthesizer_yields_plan_type() {
+    let roster = FleetRoster::built_ins_only();
+    let mut request =
+        parse_spawn_request(&json!({"prompt": "merge findings", "profile": "synthesizer"}))
+            .expect("parse");
+    apply_spawn_profile(&mut request, &roster).expect("synthesizer should resolve");
+    assert_eq!(request.agent_type, SubAgentType::Plan);
+}
+
+#[test]
+fn test_spawn_model_route_profile_precedence() {
+    let mut profile = custom_fleet_profile("reviewer");
+    profile.model = Some("deepseek-v4-pro".to_string());
+    profile.loadout = codewhale_config::FleetLoadout::Fast;
+    let roster = fleet_roster_with("auditor", profile);
+    let member = roster.get("auditor").expect("member").clone();
+
+    // Member model pin beats loadout.
+    let request =
+        parse_spawn_request(&json!({"prompt": "x", "profile": "auditor"})).expect("parse");
+    assert_eq!(
+        spawn_model_route(&request, Some(&member)),
+        ModelRoute::Fixed("deepseek-v4-pro".to_string())
+    );
+
+    // Explicit model_strength beats the member model pin.
+    let request = parse_spawn_request(&json!({
+        "prompt": "x",
+        "profile": "auditor",
+        "model_strength": "same"
+    }))
+    .expect("parse");
+    assert_eq!(
+        spawn_model_route(&request, Some(&member)),
+        ModelRoute::Inherit
+    );
+
+    // Explicit model beats the member model pin: the requested route steps
+    // aside and the configured-model path fixes the explicit id.
+    let request = parse_spawn_request(&json!({
+        "prompt": "x",
+        "profile": "auditor",
+        "model": "deepseek-v4-flash"
+    }))
+    .expect("parse");
+    let requested_route = spawn_model_route(&request, Some(&member));
+    assert_eq!(
+        assignment_model_route(Some("deepseek-v4-flash"), requested_route),
+        ModelRoute::Fixed("deepseek-v4-flash".to_string())
+    );
+
+    // Without a model pin, the loadout decides: fast -> Faster, other
+    // loadouts inherit rather than auto-downgrade to the cheap sibling.
+    let mut fast = custom_fleet_profile("scout");
+    fast.loadout = codewhale_config::FleetLoadout::Fast;
+    let roster = fleet_roster_with("recon", fast);
+    let request = parse_spawn_request(&json!({"prompt": "x", "profile": "recon"})).expect("parse");
+    assert_eq!(
+        spawn_model_route(&request, roster.get("recon")),
+        ModelRoute::Faster
+    );
+
+    let mut strong = custom_fleet_profile("builder");
+    strong.loadout = codewhale_config::FleetLoadout::Strong;
+    let roster = fleet_roster_with("architect", strong);
+    assert_eq!(
+        spawn_model_route(&request, roster.get("architect")),
+        ModelRoute::Inherit
+    );
+}
+
+#[test]
+fn test_child_max_spawn_depth_profile_hint_only_narrows() {
+    // Profile hint narrows the inherited budget...
+    assert_eq!(child_max_spawn_depth_for_spawn(3, 1, None, Some(1)), 2);
+    // ...but never widens it.
+    assert_eq!(child_max_spawn_depth_for_spawn(2, 0, None, Some(6)), 2);
+    // Explicit request takes the min with the hint.
+    assert_eq!(child_max_spawn_depth_for_spawn(2, 0, Some(3), Some(1)), 1);
+    // Explicit request alone keeps its existing widen-up-to-ceiling semantics.
+    assert_eq!(child_max_spawn_depth_for_spawn(2, 0, Some(3), None), 3);
+    assert_eq!(
+        child_max_spawn_depth_for_spawn(2, 0, Some(codewhale_config::MAX_SPAWN_DEPTH_CEILING), None),
+        codewhale_config::MAX_SPAWN_DEPTH_CEILING
+    );
+    // Neither request nor hint: inherit unchanged.
+    assert_eq!(child_max_spawn_depth_for_spawn(5, 2, None, None), 5);
+}
+
+#[test]
+fn test_apply_spawn_profile_depth_hint_flows_from_member() {
+    let mut profile = custom_fleet_profile("scout");
+    profile.delegation.max_spawn_depth = Some(1);
+    let roster = fleet_roster_with("recon", profile);
+    let mut request =
+        parse_spawn_request(&json!({"prompt": "x", "profile": "recon", "max_depth": 3}))
+            .expect("parse");
+    let member = apply_spawn_profile(&mut request, &roster)
+        .expect("resolve")
+        .expect("member resolved");
+    let effective = child_max_spawn_depth_for_spawn(
+        DEFAULT_MAX_SPAWN_DEPTH,
+        1,
+        request.max_depth,
+        member.profile.delegation.max_spawn_depth,
+    );
+    assert_eq!(
+        effective, 2,
+        "hint 1 caps the requested 3 at spawn_depth 1 + 1"
+    );
+}
+
+#[test]
+fn test_apply_spawn_profile_appends_instruction_overlay() {
+    let mut profile = custom_fleet_profile("reviewer");
+    profile.role.description = Some("Security-focused reviewer.".to_string());
+    profile.role.instructions = Some("Check unsafe blocks first.".to_string());
+    let roster = fleet_roster_with("auditor", profile);
+    let mut request =
+        parse_spawn_request(&json!({"prompt": "audit the crate", "profile": "auditor"}))
+            .expect("parse");
+    apply_spawn_profile(&mut request, &roster).expect("resolve");
+    assert!(
+        request.prompt.starts_with("audit the crate"),
+        "{}",
+        request.prompt
+    );
+    assert!(
+        request.prompt.contains("Fleet profile: auditor"),
+        "{}",
+        request.prompt
+    );
+    assert!(
+        request
+            .prompt
+            .contains("Profile description:\nSecurity-focused reviewer."),
+        "{}",
+        request.prompt
+    );
+    assert!(
+        request
+            .prompt
+            .contains("Profile instructions:\nCheck unsafe blocks first."),
+        "{}",
+        request.prompt
+    );
+    // Ledger objective keeps the original task; the overlay is prompt-only.
+    assert_eq!(request.assignment.objective, "audit the crate");
 }
 
 #[tokio::test]
@@ -4070,6 +4351,7 @@ fn stub_runtime() -> SubAgentRuntime {
         reasoning_effort: None,
         reasoning_effort_auto: false,
         role_models: std::collections::HashMap::new(),
+        fleet_roster: std::sync::Arc::new(crate::fleet::roster::FleetRoster::built_ins_only()),
         context,
         allow_shell: true,
         agent_tool_surface_options: AgentToolSurfaceOptions::new(ShellPolicy::Full),
