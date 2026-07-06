@@ -1,7 +1,7 @@
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║                         CodeWhale Configuration                               ║
 # ║                                                                              ║
-# ║  Terminal coding agent for DeepSeek.                                          ║
+# ║  Terminal coding agent for any model — open models first.                ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 # See `docs/CONFIGURATION.md` for how config is loaded (profiles, env overrides, etc.).
@@ -784,8 +784,8 @@ exponential_base = 2.0
 # `[compaction]` table yet; runtime compaction budgets are chosen by the TUI
 # from the active model/context window.
 
-# Append-only Flash seams are experimental and opt-in while the v0.7.5
-# context/cache audit validates prefix-cache behavior.
+# Append-only Flash seams (layered context). Opt-in; defaults to off.
+# See `crates/tui/src/seam_manager.rs` for the implementation.
 [context]
 enabled = false
 verbatim_window_turns = 16
