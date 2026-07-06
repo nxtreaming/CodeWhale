@@ -18,10 +18,10 @@
 - **Milestone guidepost:** use the current release milestone named in the active
   handoff and list it live, e.g.
   `gh issue list --repo Hmbown/CodeWhale --milestone "<current milestone>" --state open`.
-- **Default branch is `main`.** Never commit directly to `main`; work on the
-  active integration branch or a fresh `codex/...` branch/worktree off it for
-  an isolated change. Open a PR into `main` only when a unit of work is
-  reviewable.
+- **Default branch is `main`.** Committing directly to `main` is fine for
+  release-lane work — keep each commit to one reviewable concern with a real
+  body. A fresh `codex/...` branch or worktree is still the right call for an
+  isolated or risky change, opened as a PR when that reads better for review.
 - **Always run before pushing a change:** `cargo fmt`, then the targeted tests
   for the area (`cargo test -p codewhale-tui --bin codewhale-tui --locked <filter>`,
   `cargo test -p codewhale-config`, `cargo test -p codewhale-protocol`, …). Full

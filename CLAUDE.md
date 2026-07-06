@@ -42,11 +42,10 @@ for Claude-based agents working in this repository.
   and `git branch --show-current`; recent work has landed on `main` through small
   PRs rather than a long-lived `codex/...` integration branch. This repo lives on
   multiple devices, so do not hard-code a checkout path; work in whichever local
-  checkout you have and confirm the branch before editing. Never commit directly
-  to `main`.
+  checkout you have and confirm the branch before editing.
 - Read the workspace version from `Cargo.toml`; it advances per release lane. Do
-  not tag, publish, create a GitHub Release, push release artifacts, or merge to
-  `main` without Hunter's explicit approval.
+  not tag, publish, create a GitHub Release, or push release artifacts without
+  Hunter's explicit approval.
 - Base release triage on the current GitHub release milestone named in the active
   handoff (`gh issue list --repo Hmbown/CodeWhale --milestone "<current>" --state open`)
   unless Hunter gives a newer branch/milestone.
