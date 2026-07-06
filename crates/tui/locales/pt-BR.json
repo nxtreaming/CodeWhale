@@ -500,7 +500,7 @@
     "SetupConstitutionExistingLabel": "Arquivo existente:",
     "SetupConstitutionExpertOverrideLabel": "Override especialista:",
     "SetupConstitutionGuidedHint": "1-6 ajustam o rascunho, G mostra a prévia, G novamente ratifica. É só orientação: nunca muda aprovação de runtime, sandbox, shell, rede, confiança ou permissões MCP.",
-    "SetupConstitutionGuidedAnswersHint": "As respostas guiadas são estruturadas; a prévia mostra a constitution global do usuário exatamente como será salva.",
+    "SetupConstitutionGuidedAnswersHint": "As respostas guiadas salvam só preferências globais do usuário. O núcleo de 55 linhas continua ativo; módulos de doutrina ficam em prompts de modo/futuros opt-ins.",
     "SetupConstitutionPurposeLabel": "Propósito:",
     "SetupConstitutionAutonomyLabel": "Iniciativa:",
     "SetupConstitutionEvidenceLabel": "Evidência:",

@@ -513,7 +513,7 @@
     "SetupConstitutionExistingLabel": "既存ファイル:",
     "SetupConstitutionExpertOverrideLabel": "上級者オーバーライド:",
     "SetupConstitutionGuidedHint": "1-6 で草案を調整、G でプレビュー、もう一度 G で承認します。これは指針だけであり、実行時の承認、サンドボックス、シェル、ネットワーク、信頼、MCP 権限は変更しません。",
-    "SetupConstitutionGuidedAnswersHint": "ガイド回答は構造化されています。プレビューには保存されるユーザーグローバル Constitution の正確なレンダリングが表示されます。",
+    "SetupConstitutionGuidedAnswersHint": "ガイド回答はユーザーグローバル設定だけを保存します。55行コアは有効のまま、doctrine モジュールはモードプロンプト/将来の opt-in に残ります。",
     "SetupConstitutionPurposeLabel": "目的:",
     "SetupConstitutionAutonomyLabel": "主体性:",
     "SetupConstitutionEvidenceLabel": "根拠:",

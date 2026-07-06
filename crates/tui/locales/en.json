@@ -359,7 +359,7 @@
     "SetupConstitutionExistingLabel": "Existing file:",
     "SetupConstitutionExpertOverrideLabel": "Expert override:",
     "SetupConstitutionGuidedHint": "1-6 tune the draft, G previews, G again ratifies. Guidance only: it never changes runtime approval, sandbox, shell, network, trust, or MCP permissions.",
-    "SetupConstitutionGuidedAnswersHint": "Guided answers are structured; preview shows the exact rendered user-global constitution that will be saved.",
+    "SetupConstitutionGuidedAnswersHint": "Guided answers save user-global preferences only. The 55-line core stays active; doctrine modules stay in mode prompts/future opt-ins.",
     "SetupConstitutionPurposeLabel": "Purpose:",
     "SetupConstitutionAutonomyLabel": "Initiative:",
     "SetupConstitutionEvidenceLabel": "Evidence:",

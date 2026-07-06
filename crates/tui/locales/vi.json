@@ -511,7 +511,7 @@
     "SetupConstitutionExistingLabel": "Tệp hiện có:",
     "SetupConstitutionExpertOverrideLabel": "Ghi đè chuyên gia:",
     "SetupConstitutionGuidedHint": "1-6 tinh chỉnh bản nháp, G xem trước, G lần nữa để phê chuẩn. Chỉ là hướng dẫn: không bao giờ đổi phê duyệt runtime, sandbox, shell, mạng, trust hay quyền MCP.",
-    "SetupConstitutionGuidedAnswersHint": "Câu trả lời có hướng dẫn là có cấu trúc; phần xem trước hiển thị chính xác constitution toàn cục của người dùng sẽ được lưu.",
+    "SetupConstitutionGuidedAnswersHint": "Câu trả lời hướng dẫn chỉ lưu tùy chọn toàn cục của người dùng. Lõi 55 dòng vẫn hoạt động; module học thuyết ở prompt chế độ/opt-in tương lai.",
     "SetupConstitutionPurposeLabel": "Mục đích:",
     "SetupConstitutionAutonomyLabel": "Chủ động:",
     "SetupConstitutionEvidenceLabel": "Bằng chứng:",

@@ -506,7 +506,12 @@ impl SetupRuntimeFacts {
                 })
             })
             .unwrap_or_else(|| match app.ui_locale {
+                Locale::Ja => "未指定、または組み込み基準を使用".to_string(),
                 Locale::ZhHans => "未指定或使用内置准则".to_string(),
+                Locale::ZhHant => "未指定或使用內建準則".to_string(),
+                Locale::PtBr => "não especificado ou usando o padrão embutido".to_string(),
+                Locale::Es419 => "sin especificar o usando el criterio integrado".to_string(),
+                Locale::Vi => "chưa chỉ định hoặc dùng chuẩn tích hợp".to_string(),
                 _ => "unspecified or bundled/default".to_string(),
             });
         Self {
@@ -714,7 +719,12 @@ impl SetupConstitutionFileState {
 
     fn label(self, choice: ConstitutionChoice, locale: Locale) -> &'static str {
         match locale {
+            Locale::Ja => self.ja_label(choice),
             Locale::ZhHans => self.zh_hans_label(choice),
+            Locale::ZhHant => self.zh_hant_label(choice),
+            Locale::PtBr => self.pt_br_label(choice),
+            Locale::Es419 => self.es_419_label(choice),
+            Locale::Vi => self.vi_label(choice),
             _ => self.english_label(choice),
         }
     }
@@ -754,6 +764,112 @@ impl SetupConstitutionFileState {
             Self::PathError => "无法解析 CODEWHALE_HOME 中的 constitution.json",
         }
     }
+
+    fn ja_label(self, choice: ConstitutionChoice) -> &'static str {
+        match self {
+            Self::NotChecked => "未確認",
+            Self::Missing => "constitution.json がありません。組み込み/既定の基準を使用します",
+            Self::Loaded if choice == ConstitutionChoice::GuidedCustom => {
+                "有効な constitution.json があり、選択済みです"
+            }
+            Self::Loaded if choice.is_explicit() => {
+                "有効な constitution.json はありますが、現在の記録された選択では非アクティブです"
+            }
+            Self::Loaded => "有効な constitution.json があります。プレビューまたは保存で選択します",
+            Self::Empty => "constitution.json は空です。G で再生成、U で組み込みを使用します",
+            Self::Invalid => {
+                "constitution.json が無効です。修復/再生成するか、組み込みを使用します"
+            }
+            Self::Unreadable => {
+                "constitution.json を読めません。修復/再生成するか、組み込みを使用します"
+            }
+            Self::PathError => "CODEWHALE_HOME の constitution.json を解決できません",
+        }
+    }
+
+    fn zh_hant_label(self, choice: ConstitutionChoice) -> &'static str {
+        match self {
+            Self::NotChecked => "尚未檢查",
+            Self::Missing => "未找到 constitution.json；使用內建/預設準則",
+            Self::Loaded if choice == ConstitutionChoice::GuidedCustom => {
+                "有效 constitution.json 已存在並已選取"
+            }
+            Self::Loaded if choice.is_explicit() => {
+                "有效 constitution.json 已存在，但目前記錄的選擇使其不生效"
+            }
+            Self::Loaded => "有效 constitution.json 已存在；預覽或保存引導式憲法即可選取",
+            Self::Empty => "constitution.json 為空；按 G 重新生成或按 U 使用內建",
+            Self::Invalid => "constitution.json 無效；請修復/重新生成，或使用內建",
+            Self::Unreadable => "constitution.json 無法讀取；請修復/重新生成，或使用內建",
+            Self::PathError => "無法解析 CODEWHALE_HOME 中的 constitution.json",
+        }
+    }
+
+    fn pt_br_label(self, choice: ConstitutionChoice) -> &'static str {
+        match self {
+            Self::NotChecked => "ainda não verificado",
+            Self::Missing => "constitution.json não encontrado; usa o padrão embutido",
+            Self::Loaded if choice == ConstitutionChoice::GuidedCustom => {
+                "constitution.json válido presente e selecionado"
+            }
+            Self::Loaded if choice.is_explicit() => {
+                "constitution.json válido presente, mas inativo pela escolha registrada"
+            }
+            Self::Loaded => {
+                "constitution.json válido presente; pré-visualize ou salve para selecioná-lo"
+            }
+            Self::Empty => "constitution.json vazio; use G para regenerar ou U para o embutido",
+            Self::Invalid => "constitution.json inválido; repare/regere ou use o embutido",
+            Self::Unreadable => "constitution.json ilegível; repare/regere ou use o embutido",
+            Self::PathError => "não foi possível resolver constitution.json em CODEWHALE_HOME",
+        }
+    }
+
+    fn es_419_label(self, choice: ConstitutionChoice) -> &'static str {
+        match self {
+            Self::NotChecked => "aún no revisado",
+            Self::Missing => "no se encontró constitution.json; se usa el criterio integrado",
+            Self::Loaded if choice == ConstitutionChoice::GuidedCustom => {
+                "constitution.json válido presente y seleccionado"
+            }
+            Self::Loaded if choice.is_explicit() => {
+                "constitution.json válido presente, pero inactivo por la elección registrada"
+            }
+            Self::Loaded => {
+                "constitution.json válido presente; previsualiza o guarda para seleccionarlo"
+            }
+            Self::Empty => {
+                "constitution.json está vacío; usa G para regenerar o U para el integrado"
+            }
+            Self::Invalid => "constitution.json no es válido; repara/regenera o usa el integrado",
+            Self::Unreadable => {
+                "constitution.json no se puede leer; repara/regenera o usa el integrado"
+            }
+            Self::PathError => "no se pudo resolver constitution.json en CODEWHALE_HOME",
+        }
+    }
+
+    fn vi_label(self, choice: ConstitutionChoice) -> &'static str {
+        match self {
+            Self::NotChecked => "chưa kiểm tra",
+            Self::Missing => "không tìm thấy constitution.json; dùng chuẩn tích hợp/mặc định",
+            Self::Loaded if choice == ConstitutionChoice::GuidedCustom => {
+                "constitution.json hợp lệ đã có và đã chọn"
+            }
+            Self::Loaded if choice.is_explicit() => {
+                "constitution.json hợp lệ đã có nhưng chưa hoạt động theo lựa chọn đã ghi"
+            }
+            Self::Loaded => {
+                "constitution.json hợp lệ đã có; xem trước hoặc lưu bản hướng dẫn để chọn"
+            }
+            Self::Empty => "constitution.json trống; dùng G để tạo lại hoặc U để dùng bản tích hợp",
+            Self::Invalid => "constitution.json không hợp lệ; sửa/tạo lại hoặc dùng bản tích hợp",
+            Self::Unreadable => {
+                "không đọc được constitution.json; sửa/tạo lại hoặc dùng bản tích hợp"
+            }
+            Self::PathError => "không thể xác định constitution.json trong CODEWHALE_HOME",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -787,7 +903,12 @@ impl SetupExpertOverrideState {
 
     fn label(self, locale: Locale) -> Cow<'static, str> {
         match locale {
+            Locale::Ja => self.ja_label(),
             Locale::ZhHans => self.zh_hans_label(),
+            Locale::ZhHant => self.zh_hant_label(),
+            Locale::PtBr => self.pt_br_label(),
+            Locale::Es419 => self.es_419_label(),
+            Locale::Vi => self.vi_label(),
             _ => self.english_label(),
         }
     }
@@ -822,6 +943,98 @@ impl SetupExpertOverrideState {
             Self::Unreadable => Cow::Borrowed("覆盖文件无法读取；使用内置/默认准则"),
             Self::PathError => {
                 Cow::Borrowed("无法解析 CODEWHALE_HOME 中的 prompts/constitution.md")
+            }
+        }
+    }
+
+    fn ja_label(self) -> Cow<'static, str> {
+        match self {
+            Self::NotChecked => Cow::Borrowed("未確認"),
+            Self::Missing => Cow::Borrowed("prompts/constitution.md がありません"),
+            Self::Active => {
+                Cow::Borrowed("有効です。専門家向け Markdown 上書きがオプトインされています")
+            }
+            Self::Disabled => Cow::Owned(format!(
+                "ファイルはありますが無効です。有効化には {BASE_PROMPT_OVERRIDE_OPT_IN_ENV}=1 を設定してください"
+            )),
+            Self::Empty => Cow::Borrowed("上書きファイルは空です。組み込み/既定の基準を使用します"),
+            Self::Unreadable => {
+                Cow::Borrowed("上書きファイルを読めません。組み込み/既定の基準を使用します")
+            }
+            Self::PathError => {
+                Cow::Borrowed("CODEWHALE_HOME の prompts/constitution.md を解決できません")
+            }
+        }
+    }
+
+    fn zh_hant_label(self) -> Cow<'static, str> {
+        match self {
+            Self::NotChecked => Cow::Borrowed("尚未檢查"),
+            Self::Missing => Cow::Borrowed("未找到 prompts/constitution.md"),
+            Self::Active => Cow::Borrowed("已啟用；專家 Markdown 覆寫已選擇加入"),
+            Self::Disabled => Cow::Owned(format!(
+                "已找到檔案但未啟用；設定 {BASE_PROMPT_OVERRIDE_OPT_IN_ENV}=1 後生效"
+            )),
+            Self::Empty => Cow::Borrowed("覆寫檔案為空；使用內建/預設準則"),
+            Self::Unreadable => Cow::Borrowed("覆寫檔案無法讀取；使用內建/預設準則"),
+            Self::PathError => {
+                Cow::Borrowed("無法解析 CODEWHALE_HOME 中的 prompts/constitution.md")
+            }
+        }
+    }
+
+    fn pt_br_label(self) -> Cow<'static, str> {
+        match self {
+            Self::NotChecked => Cow::Borrowed("ainda não verificado"),
+            Self::Missing => Cow::Borrowed("prompts/constitution.md não encontrado"),
+            Self::Active => Cow::Borrowed("ativo; override Markdown especialista com opt-in"),
+            Self::Disabled => Cow::Owned(format!(
+                "arquivo encontrado, mas desativado; defina {BASE_PROMPT_OVERRIDE_OPT_IN_ENV}=1 para ativar"
+            )),
+            Self::Empty => Cow::Borrowed("arquivo de override vazio; usa o padrão embutido"),
+            Self::Unreadable => {
+                Cow::Borrowed("arquivo de override ilegível; usa o padrão embutido")
+            }
+            Self::PathError => {
+                Cow::Borrowed("não foi possível resolver prompts/constitution.md em CODEWHALE_HOME")
+            }
+        }
+    }
+
+    fn es_419_label(self) -> Cow<'static, str> {
+        match self {
+            Self::NotChecked => Cow::Borrowed("aún no revisado"),
+            Self::Missing => Cow::Borrowed("no se encontró prompts/constitution.md"),
+            Self::Active => Cow::Borrowed("activo; override Markdown experto con opt-in"),
+            Self::Disabled => Cow::Owned(format!(
+                "archivo encontrado, pero desactivado; define {BASE_PROMPT_OVERRIDE_OPT_IN_ENV}=1 para activarlo"
+            )),
+            Self::Empty => Cow::Borrowed("archivo de override vacío; usa el criterio integrado"),
+            Self::Unreadable => {
+                Cow::Borrowed("archivo de override ilegible; usa el criterio integrado")
+            }
+            Self::PathError => {
+                Cow::Borrowed("no se pudo resolver prompts/constitution.md en CODEWHALE_HOME")
+            }
+        }
+    }
+
+    fn vi_label(self) -> Cow<'static, str> {
+        match self {
+            Self::NotChecked => Cow::Borrowed("chưa kiểm tra"),
+            Self::Missing => Cow::Borrowed("không tìm thấy prompts/constitution.md"),
+            Self::Active => {
+                Cow::Borrowed("đang hoạt động; override Markdown chuyên gia đã bật opt-in")
+            }
+            Self::Disabled => Cow::Owned(format!(
+                "đã tìm thấy tệp nhưng chưa bật; đặt {BASE_PROMPT_OVERRIDE_OPT_IN_ENV}=1 để kích hoạt"
+            )),
+            Self::Empty => Cow::Borrowed("tệp override trống; dùng chuẩn tích hợp/mặc định"),
+            Self::Unreadable => {
+                Cow::Borrowed("không đọc được tệp override; dùng chuẩn tích hợp/mặc định")
+            }
+            Self::PathError => {
+                Cow::Borrowed("không thể xác định prompts/constitution.md trong CODEWHALE_HOME")
             }
         }
     }
@@ -877,8 +1090,28 @@ impl GuidedConstitutionDraft {
         let mut notes = self.notes(locale);
         if let Some(note) = freeform_note.map(str::trim).filter(|note| !note.is_empty()) {
             let own_words = match locale {
+                Locale::Ja => format!(
+                    "\nユーザー自由原則：{}",
+                    bounded_freeform_note(note, MAX_NOTES_LEN)
+                ),
                 Locale::ZhHans => format!(
                     "\n用户自由原则：{}",
+                    bounded_freeform_note(note, MAX_NOTES_LEN)
+                ),
+                Locale::ZhHant => format!(
+                    "\n使用者自由原則：{}",
+                    bounded_freeform_note(note, MAX_NOTES_LEN)
+                ),
+                Locale::PtBr => format!(
+                    "\nPrincípio livre do usuário: {}",
+                    bounded_freeform_note(note, MAX_NOTES_LEN)
+                ),
+                Locale::Es419 => format!(
+                    "\nPrincipio libre del usuario: {}",
+                    bounded_freeform_note(note, MAX_NOTES_LEN)
+                ),
+                Locale::Vi => format!(
+                    "\nNguyên tắc tự do của người dùng: {}",
                     bounded_freeform_note(note, MAX_NOTES_LEN)
                 ),
                 _ => format!(
@@ -910,8 +1143,58 @@ impl GuidedConstitutionDraft {
 
     fn notes(self, locale: Locale) -> String {
         match locale {
+            Locale::Ja => format!(
+                "ガイド回答：用途={}；主体性={}；証拠={}；コミュニケーション={}；プライバシー={}；原則={}。{} 自由記入の原則は助言であり、承認、サンドボックス、Shell、ネットワーク、信頼、MCP 権限を変更しません。",
+                self.purpose.label(locale),
+                autonomy_label(self.autonomy, locale),
+                self.evidence.label(locale),
+                self.communication.label(locale),
+                self.privacy.label(locale),
+                self.principles.label(locale),
+                self.principles.note(locale)
+            ),
             Locale::ZhHans => format!(
                 "引导式答案：用途={}；主动性={}；证据={}；沟通={}；隐私={}；原则={}。{} 自由文本原则只作为建议，不会改变审批、沙箱、Shell、网络、信任或 MCP 权限。",
+                self.purpose.label(locale),
+                autonomy_label(self.autonomy, locale),
+                self.evidence.label(locale),
+                self.communication.label(locale),
+                self.privacy.label(locale),
+                self.principles.label(locale),
+                self.principles.note(locale)
+            ),
+            Locale::ZhHant => format!(
+                "引導式答案：用途={}；主動性={}；證據={}；溝通={}；隱私={}；原則={}。{} 自由文字原則只作為建議，不會改變審批、沙箱、Shell、網路、信任或 MCP 權限。",
+                self.purpose.label(locale),
+                autonomy_label(self.autonomy, locale),
+                self.evidence.label(locale),
+                self.communication.label(locale),
+                self.privacy.label(locale),
+                self.principles.label(locale),
+                self.principles.note(locale)
+            ),
+            Locale::PtBr => format!(
+                "Respostas guiadas: propósito={}; iniciativa={}; evidência={}; comunicação={}; privacidade={}; princípios={}. {} Princípios livres são orientações e não alteram aprovação, sandbox, shell, rede, confiança nem permissões MCP.",
+                self.purpose.label(locale),
+                autonomy_label(self.autonomy, locale),
+                self.evidence.label(locale),
+                self.communication.label(locale),
+                self.privacy.label(locale),
+                self.principles.label(locale),
+                self.principles.note(locale)
+            ),
+            Locale::Es419 => format!(
+                "Respuestas guiadas: propósito={}; iniciativa={}; evidencia={}; comunicación={}; privacidad={}; principios={}. {} Los principios libres son orientación y no cambian aprobación, sandbox, shell, red, confianza ni permisos MCP.",
+                self.purpose.label(locale),
+                autonomy_label(self.autonomy, locale),
+                self.evidence.label(locale),
+                self.communication.label(locale),
+                self.privacy.label(locale),
+                self.principles.label(locale),
+                self.principles.note(locale)
+            ),
+            Locale::Vi => format!(
+                "Câu trả lời hướng dẫn: mục đích={}; chủ động={}; bằng chứng={}; giao tiếp={}; riêng tư={}; nguyên tắc={}. {} Nguyên tắc tự do chỉ là hướng dẫn và không thay đổi phê duyệt, sandbox, shell, mạng, độ tin cậy hoặc quyền MCP.",
                 self.purpose.label(locale),
                 autonomy_label(self.autonomy, locale),
                 self.evidence.label(locale),
@@ -954,10 +1237,30 @@ impl GuidedPurpose {
 
     fn label(self, locale: Locale) -> &'static str {
         match (locale, self) {
+            (Locale::Ja, Self::Coding) => "コーディング作業台",
+            (Locale::Ja, Self::Research) => "調査統合",
+            (Locale::Ja, Self::Operations) => "運用支援",
+            (Locale::Ja, Self::Mixed) => "混合作業台",
             (Locale::ZhHans, Self::Coding) => "编码工作台",
             (Locale::ZhHans, Self::Research) => "研究综合",
             (Locale::ZhHans, Self::Operations) => "运维协作",
             (Locale::ZhHans, Self::Mixed) => "混合工作台",
+            (Locale::ZhHant, Self::Coding) => "編碼工作台",
+            (Locale::ZhHant, Self::Research) => "研究整合",
+            (Locale::ZhHant, Self::Operations) => "營運協作",
+            (Locale::ZhHant, Self::Mixed) => "混合工作台",
+            (Locale::PtBr, Self::Coding) => "bancada de código",
+            (Locale::PtBr, Self::Research) => "síntese de pesquisa",
+            (Locale::PtBr, Self::Operations) => "apoio operacional",
+            (Locale::PtBr, Self::Mixed) => "bancada mista",
+            (Locale::Es419, Self::Coding) => "mesa de código",
+            (Locale::Es419, Self::Research) => "síntesis de investigación",
+            (Locale::Es419, Self::Operations) => "apoyo operativo",
+            (Locale::Es419, Self::Mixed) => "mesa mixta",
+            (Locale::Vi, Self::Coding) => "bàn làm việc mã",
+            (Locale::Vi, Self::Research) => "tổng hợp nghiên cứu",
+            (Locale::Vi, Self::Operations) => "hỗ trợ vận hành",
+            (Locale::Vi, Self::Mixed) => "bàn làm việc hỗn hợp",
             (_, Self::Coding) => "coding workbench",
             (_, Self::Research) => "research synthesis",
             (_, Self::Operations) => "operations helper",
@@ -967,6 +1270,18 @@ impl GuidedPurpose {
 
     fn about(self, locale: Locale) -> &'static str {
         match (locale, self) {
+            (Locale::Ja, Self::Coding) => {
+                "CodeWhale を落ち着いた証拠重視のコーディング作業台として使いたいユーザー。"
+            }
+            (Locale::Ja, Self::Research) => {
+                "CodeWhale に最新資料、引用、慎重な調査統合を支援してほしいユーザー。"
+            }
+            (Locale::Ja, Self::Operations) => {
+                "CodeWhale に信頼できる運用支援、明確なロールバック地点、リスク説明を求めるユーザー。"
+            }
+            (Locale::Ja, Self::Mixed) => {
+                "CodeWhale をコーディング、調査、執筆、運用に柔軟に使いたいユーザー。"
+            }
             (Locale::ZhHans, Self::Coding) => "希望 CodeWhale 成为稳健、重证据的编码工作台用户。",
             (Locale::ZhHans, Self::Research) => {
                 "希望 CodeWhale 帮助梳理实时资料、引用证据并谨慎综合研究的用户。"
@@ -976,6 +1291,52 @@ impl GuidedPurpose {
             }
             (Locale::ZhHans, Self::Mixed) => {
                 "希望 CodeWhale 在编码、研究、写作和运维之间灵活切换的用户。"
+            }
+            (Locale::ZhHant, Self::Coding) => "希望 CodeWhale 成為穩健、重證據的編碼工作台使用者。",
+            (Locale::ZhHant, Self::Research) => {
+                "希望 CodeWhale 協助整理即時資料、引用證據並謹慎整合研究的使用者。"
+            }
+            (Locale::ZhHant, Self::Operations) => {
+                "希望 CodeWhale 協助可靠執行營運任務、保留回復點並明確說明風險的使用者。"
+            }
+            (Locale::ZhHant, Self::Mixed) => {
+                "希望 CodeWhale 在編碼、研究、寫作和營運之間彈性切換的使用者。"
+            }
+            (Locale::PtBr, Self::Coding) => {
+                "Usuário que quer o CodeWhale como uma bancada de código calma e guiada por evidências."
+            }
+            (Locale::PtBr, Self::Research) => {
+                "Usuário que quer pesquisa atual com citações e síntese cuidadosa."
+            }
+            (Locale::PtBr, Self::Operations) => {
+                "Usuário que quer ajuda operacional confiável, com pontos claros de reversão."
+            }
+            (Locale::PtBr, Self::Mixed) => {
+                "Usuário que quer uma bancada flexível para código, pesquisa, escrita e operações."
+            }
+            (Locale::Es419, Self::Coding) => {
+                "Usuario que quiere a CodeWhale como una mesa de código tranquila y basada en evidencia."
+            }
+            (Locale::Es419, Self::Research) => {
+                "Usuario que quiere investigación actual, citada y sintetizada con cuidado."
+            }
+            (Locale::Es419, Self::Operations) => {
+                "Usuario que quiere ayuda operativa confiable con puntos claros de reversión."
+            }
+            (Locale::Es419, Self::Mixed) => {
+                "Usuario que quiere una mesa flexible para código, investigación, escritura y operaciones."
+            }
+            (Locale::Vi, Self::Coding) => {
+                "Người dùng muốn CodeWhale là bàn làm việc mã điềm tĩnh, ưu tiên bằng chứng."
+            }
+            (Locale::Vi, Self::Research) => {
+                "Người dùng muốn nghiên cứu cập nhật, có trích dẫn và tổng hợp thận trọng."
+            }
+            (Locale::Vi, Self::Operations) => {
+                "Người dùng muốn hỗ trợ vận hành tin cậy với điểm hoàn nguyên rõ ràng."
+            }
+            (Locale::Vi, Self::Mixed) => {
+                "Người dùng muốn bàn làm việc linh hoạt cho mã, nghiên cứu, viết và vận hành."
             }
             (_, Self::Coding) => {
                 "A CodeWhale user who wants a calm, evidence-first coding workbench."
@@ -994,6 +1355,18 @@ impl GuidedPurpose {
 
     fn working_style(self, locale: Locale) -> &'static str {
         match (locale, self) {
+            (Locale::Ja, Self::Coding) => {
+                "コード変更は依頼内容、既存のリポジトリ慣習、検証可能な挙動に合わせる。"
+            }
+            (Locale::Ja, Self::Research) => {
+                "ライブ証拠と推論を分け、変わりやすい事実には出典を示す。"
+            }
+            (Locale::Ja, Self::Operations) => {
+                "ドライラン、状態確認、ロールバック説明を伴う可逆的な運用手順を優先する。"
+            }
+            (Locale::Ja, Self::Mixed) => {
+                "コーディング、調査、執筆、運用を切り替えても、安全姿勢を不用意に広げない。"
+            }
             (Locale::ZhHans, Self::Coding) => "让代码改动贴近请求、仓库模式和可验证行为。",
             (Locale::ZhHans, Self::Research) => "区分实时证据与推断，并为易变事实引用来源。",
             (Locale::ZhHans, Self::Operations) => {
@@ -1001,6 +1374,50 @@ impl GuidedPurpose {
             }
             (Locale::ZhHans, Self::Mixed) => {
                 "可在编码、研究、写作和运维之间切换，但安全姿态不随意扩大。"
+            }
+            (Locale::ZhHant, Self::Coding) => "讓程式碼改動貼近請求、倉庫模式和可驗證行為。",
+            (Locale::ZhHant, Self::Research) => "區分即時證據與推論，並為易變事實引用來源。",
+            (Locale::ZhHant, Self::Operations) => {
+                "優先使用可逆營運步驟、預演、狀態檢查和回復說明。"
+            }
+            (Locale::ZhHant, Self::Mixed) => {
+                "可在編碼、研究、寫作和營運之間切換，但安全姿態不隨意擴大。"
+            }
+            (Locale::PtBr, Self::Coding) => {
+                "Mantenha mudanças de código alinhadas ao pedido, aos padrões do repo e ao comportamento verificável."
+            }
+            (Locale::PtBr, Self::Research) => {
+                "Separe evidência ao vivo de inferência e cite fontes para fatos instáveis."
+            }
+            (Locale::PtBr, Self::Operations) => {
+                "Prefira passos operacionais reversíveis com dry-runs, checagens de estado e notas de rollback."
+            }
+            (Locale::PtBr, Self::Mixed) => {
+                "Alterne entre código, pesquisa, escrita e operações sem ampliar a postura de segurança."
+            }
+            (Locale::Es419, Self::Coding) => {
+                "Mantén los cambios de código alineados con el pedido, los patrones del repo y el comportamiento verificable."
+            }
+            (Locale::Es419, Self::Research) => {
+                "Separa evidencia en vivo de inferencia y cita fuentes para hechos inestables."
+            }
+            (Locale::Es419, Self::Operations) => {
+                "Prefiere pasos operativos reversibles con dry-runs, revisiones de estado y notas de rollback."
+            }
+            (Locale::Es419, Self::Mixed) => {
+                "Alterna entre código, investigación, escritura y operaciones sin ampliar la postura de seguridad."
+            }
+            (Locale::Vi, Self::Coding) => {
+                "Giữ thay đổi mã bám sát yêu cầu, mẫu của repo và hành vi có thể xác minh."
+            }
+            (Locale::Vi, Self::Research) => {
+                "Tách bằng chứng trực tiếp khỏi suy luận và trích nguồn cho sự kiện dễ thay đổi."
+            }
+            (Locale::Vi, Self::Operations) => {
+                "Ưu tiên bước vận hành có thể đảo ngược với dry-run, kiểm tra trạng thái và ghi chú rollback."
+            }
+            (Locale::Vi, Self::Mixed) => {
+                "Chuyển giữa mã, nghiên cứu, viết và vận hành mà không mở rộng tư thế an toàn."
             }
             (_, Self::Coding) => {
                 "Keep code changes scoped to requested behavior and existing repo patterns."
@@ -1036,9 +1453,24 @@ impl GuidedEvidence {
 
     fn label(self, locale: Locale) -> &'static str {
         match (locale, self) {
+            (Locale::Ja, Self::Assumptions) => "前提を示す",
+            (Locale::Ja, Self::TestsAndReceipts) => "テスト/証跡",
+            (Locale::Ja, Self::ReleaseReceipts) => "リリース証跡",
             (Locale::ZhHans, Self::Assumptions) => "说明假设",
             (Locale::ZhHans, Self::TestsAndReceipts) => "测试/凭据",
             (Locale::ZhHans, Self::ReleaseReceipts) => "发布凭据",
+            (Locale::ZhHant, Self::Assumptions) => "說明假設",
+            (Locale::ZhHant, Self::TestsAndReceipts) => "測試/憑據",
+            (Locale::ZhHant, Self::ReleaseReceipts) => "發布憑據",
+            (Locale::PtBr, Self::Assumptions) => "declarar premissas",
+            (Locale::PtBr, Self::TestsAndReceipts) => "testes/recibos",
+            (Locale::PtBr, Self::ReleaseReceipts) => "recibos de release",
+            (Locale::Es419, Self::Assumptions) => "declarar supuestos",
+            (Locale::Es419, Self::TestsAndReceipts) => "pruebas/recibos",
+            (Locale::Es419, Self::ReleaseReceipts) => "recibos de release",
+            (Locale::Vi, Self::Assumptions) => "nêu giả định",
+            (Locale::Vi, Self::TestsAndReceipts) => "kiểm thử/biên nhận",
+            (Locale::Vi, Self::ReleaseReceipts) => "biên nhận phát hành",
             (_, Self::Assumptions) => "assumptions",
             (_, Self::TestsAndReceipts) => "tests/receipts",
             (_, Self::ReleaseReceipts) => "release receipts",
@@ -1047,12 +1479,55 @@ impl GuidedEvidence {
 
     fn working_style(self, locale: Locale) -> &'static str {
         match (locale, self) {
+            (Locale::Ja, Self::Assumptions) => {
+                "完了を主張する前に、前提、不明点、残るリスクを要約する。"
+            }
+            (Locale::Ja, Self::TestsAndReceipts) => {
+                "不確実性を減らせるときは、コマンド、テスト、スクリーンショット、引用で具体的に検証する。"
+            }
+            (Locale::Ja, Self::ReleaseReceipts) => {
+                "重要な主張とリリース証拠には、ファイル、コマンド、スクリーンショット、CI、出典を示す。"
+            }
             (Locale::ZhHans, Self::Assumptions) => "在宣称完成前总结假设、未知和剩余风险。",
             (Locale::ZhHans, Self::TestsAndReceipts) => {
                 "在能降低不确定性时，用命令、测试、截图或引用给出具体验证。"
             }
             (Locale::ZhHans, Self::ReleaseReceipts) => {
                 "对重要结论和发布证据标注文件、命令、截图、CI 或来源。"
+            }
+            (Locale::ZhHant, Self::Assumptions) => "在宣稱完成前總結假設、未知和剩餘風險。",
+            (Locale::ZhHant, Self::TestsAndReceipts) => {
+                "在能降低不確定性時，用命令、測試、截圖或引用給出具體驗證。"
+            }
+            (Locale::ZhHant, Self::ReleaseReceipts) => {
+                "對重要結論和發布證據標註檔案、命令、截圖、CI 或來源。"
+            }
+            (Locale::PtBr, Self::Assumptions) => {
+                "Resuma premissas, desconhecidos e risco restante antes de dizer que concluiu."
+            }
+            (Locale::PtBr, Self::TestsAndReceipts) => {
+                "Use comandos, testes, screenshots ou citações quando reduzirem a incerteza."
+            }
+            (Locale::PtBr, Self::ReleaseReceipts) => {
+                "Cite arquivos, comandos, screenshots, CI ou fontes para afirmações materiais e evidência de release."
+            }
+            (Locale::Es419, Self::Assumptions) => {
+                "Resume supuestos, incógnitas y riesgo restante antes de afirmar que terminaste."
+            }
+            (Locale::Es419, Self::TestsAndReceipts) => {
+                "Usa comandos, pruebas, capturas o citas cuando reduzcan materialmente la incertidumbre."
+            }
+            (Locale::Es419, Self::ReleaseReceipts) => {
+                "Cita archivos, comandos, capturas, CI o fuentes para afirmaciones materiales y evidencia de release."
+            }
+            (Locale::Vi, Self::Assumptions) => {
+                "Tóm tắt giả định, điều chưa biết và rủi ro còn lại trước khi tuyên bố hoàn tất."
+            }
+            (Locale::Vi, Self::TestsAndReceipts) => {
+                "Dùng lệnh, kiểm thử, ảnh chụp hoặc trích dẫn khi chúng giảm đáng kể bất định."
+            }
+            (Locale::Vi, Self::ReleaseReceipts) => {
+                "Trích dẫn tệp, lệnh, ảnh chụp, CI hoặc nguồn cho tuyên bố quan trọng và bằng chứng phát hành."
             }
             (_, Self::Assumptions) => {
                 "Summarize assumptions, unknowns, and remaining risk before claiming completion."
@@ -1085,9 +1560,24 @@ impl GuidedCommunication {
 
     fn label(self, locale: Locale) -> &'static str {
         match (locale, self) {
+            (Locale::Ja, Self::Concise) => "簡潔",
+            (Locale::Ja, Self::Teaching) => "説明重視",
+            (Locale::Ja, Self::Direct) => "直接的",
             (Locale::ZhHans, Self::Concise) => "简洁",
             (Locale::ZhHans, Self::Teaching) => "教学式",
             (Locale::ZhHans, Self::Direct) => "直接",
+            (Locale::ZhHant, Self::Concise) => "簡潔",
+            (Locale::ZhHant, Self::Teaching) => "教學式",
+            (Locale::ZhHant, Self::Direct) => "直接",
+            (Locale::PtBr, Self::Concise) => "conciso",
+            (Locale::PtBr, Self::Teaching) => "didático",
+            (Locale::PtBr, Self::Direct) => "direto",
+            (Locale::Es419, Self::Concise) => "conciso",
+            (Locale::Es419, Self::Teaching) => "didáctico",
+            (Locale::Es419, Self::Direct) => "directo",
+            (Locale::Vi, Self::Concise) => "ngắn gọn",
+            (Locale::Vi, Self::Teaching) => "giảng giải",
+            (Locale::Vi, Self::Direct) => "trực tiếp",
             (_, Self::Concise) => "concise",
             (_, Self::Teaching) => "teaching",
             (_, Self::Direct) => "direct",
@@ -1096,9 +1586,46 @@ impl GuidedCommunication {
 
     fn working_style(self, locale: Locale) -> &'static str {
         match (locale, self) {
+            (Locale::Ja, Self::Concise) => "更新は簡潔にし、重要なトレードオフだけ短く説明する。",
+            (Locale::Ja, Self::Teaching) => {
+                "重要な推論とトレードオフを、ユーザーが仕組みを理解できる程度に説明する。"
+            }
+            (Locale::Ja, Self::Direct) => {
+                "阻塞、リスク、不確実性を直接述べ、装飾的な文案を避ける。"
+            }
             (Locale::ZhHans, Self::Concise) => "保持更新简洁，并只解释重要取舍。",
             (Locale::ZhHans, Self::Teaching) => "解释关键推理和取舍，让用户能理解系统。",
             (Locale::ZhHans, Self::Direct) => "直接说明阻塞、风险和不确定性，避免装饰性文案。",
+            (Locale::ZhHant, Self::Concise) => "保持更新簡潔，並只解釋重要取捨。",
+            (Locale::ZhHant, Self::Teaching) => "解釋關鍵推理和取捨，讓使用者能理解系統。",
+            (Locale::ZhHant, Self::Direct) => "直接說明阻塞、風險和不確定性，避免裝飾性文案。",
+            (Locale::PtBr, Self::Concise) => {
+                "Mantenha atualizações concisas e explique brevemente só os tradeoffs importantes."
+            }
+            (Locale::PtBr, Self::Teaching) => {
+                "Explique raciocínio e tradeoffs principais o bastante para o usuário entender o sistema."
+            }
+            (Locale::PtBr, Self::Direct) => {
+                "Seja direto sobre bloqueios, risco e incerteza; evite texto ornamental."
+            }
+            (Locale::Es419, Self::Concise) => {
+                "Mantén las actualizaciones concisas y explica brevemente solo los tradeoffs importantes."
+            }
+            (Locale::Es419, Self::Teaching) => {
+                "Explica el razonamiento y los tradeoffs clave lo suficiente para que el usuario entienda el sistema."
+            }
+            (Locale::Es419, Self::Direct) => {
+                "Sé directo sobre bloqueos, riesgo e incertidumbre; evita texto ornamental."
+            }
+            (Locale::Vi, Self::Concise) => {
+                "Giữ cập nhật ngắn gọn và chỉ giải thích ngắn các đánh đổi quan trọng."
+            }
+            (Locale::Vi, Self::Teaching) => {
+                "Giải thích suy luận và đánh đổi chính đủ để người dùng hiểu hệ thống."
+            }
+            (Locale::Vi, Self::Direct) => {
+                "Nói thẳng về điểm chặn, rủi ro và bất định; tránh câu chữ trang trí."
+            }
             (_, Self::Concise) => "Keep updates concise and explain important tradeoffs briefly.",
             (_, Self::Teaching) => {
                 "Explain key reasoning and tradeoffs enough that the user can learn the system."
@@ -1128,9 +1655,24 @@ impl GuidedPrivacy {
 
     fn label(self, locale: Locale) -> &'static str {
         match (locale, self) {
+            (Locale::Ja, Self::StandardCare) => "標準保護",
+            (Locale::Ja, Self::StrictBoundaries) => "厳格な境界",
+            (Locale::Ja, Self::ProjectLocal) => "プロジェクト内メモリ",
             (Locale::ZhHans, Self::StandardCare) => "标准保护",
             (Locale::ZhHans, Self::StrictBoundaries) => "严格边界",
             (Locale::ZhHans, Self::ProjectLocal) => "项目内记忆",
+            (Locale::ZhHant, Self::StandardCare) => "標準保護",
+            (Locale::ZhHant, Self::StrictBoundaries) => "嚴格邊界",
+            (Locale::ZhHant, Self::ProjectLocal) => "專案內記憶",
+            (Locale::PtBr, Self::StandardCare) => "cuidado padrão",
+            (Locale::PtBr, Self::StrictBoundaries) => "limites estritos",
+            (Locale::PtBr, Self::ProjectLocal) => "memória local do projeto",
+            (Locale::Es419, Self::StandardCare) => "cuidado estándar",
+            (Locale::Es419, Self::StrictBoundaries) => "límites estrictos",
+            (Locale::Es419, Self::ProjectLocal) => "memoria local del proyecto",
+            (Locale::Vi, Self::StandardCare) => "bảo vệ tiêu chuẩn",
+            (Locale::Vi, Self::StrictBoundaries) => "ranh giới nghiêm ngặt",
+            (Locale::Vi, Self::ProjectLocal) => "bộ nhớ trong dự án",
             (_, Self::StandardCare) => "standard care",
             (_, Self::StrictBoundaries) => "strict boundaries",
             (_, Self::ProjectLocal) => "project-local memory",
@@ -1139,6 +1681,15 @@ impl GuidedPrivacy {
 
     fn working_style(self, locale: Locale) -> &'static str {
         match (locale, self) {
+            (Locale::Ja, Self::StandardCare) => {
+                "秘密情報、ユーザーファイル、Git 履歴、本番システム、コスト、プライバシー、時間を保護する。"
+            }
+            (Locale::Ja, Self::StrictBoundaries) => {
+                "秘密、個人データ、認証情報、本番状態、資金、公開操作は、先に確認する境界として扱う。"
+            }
+            (Locale::Ja, Self::ProjectLocal) => {
+                "プロジェクト固有の文脈はプロジェクト内に留め、明示要求がない限りメモリへ書かない。"
+            }
             (Locale::ZhHans, Self::StandardCare) => {
                 "保护密钥、用户文件、Git 历史、生产系统、成本、隐私和时间。"
             }
@@ -1147,6 +1698,42 @@ impl GuidedPrivacy {
             }
             (Locale::ZhHans, Self::ProjectLocal) => {
                 "项目特定上下文留在项目内，除非明确要求，否则不要写入记忆。"
+            }
+            (Locale::ZhHant, Self::StandardCare) => {
+                "保護密鑰、使用者檔案、Git 歷史、生產系統、成本、隱私和時間。"
+            }
+            (Locale::ZhHant, Self::StrictBoundaries) => {
+                "把密鑰、個人資料、憑據、生產狀態、資金和發布動作視為先確認邊界。"
+            }
+            (Locale::ZhHant, Self::ProjectLocal) => {
+                "專案特定上下文留在專案內，除非明確要求，否則不要寫入記憶。"
+            }
+            (Locale::PtBr, Self::StandardCare) => {
+                "Proteja segredos, arquivos do usuário, histórico git, produção, custo, privacidade e tempo."
+            }
+            (Locale::PtBr, Self::StrictBoundaries) => {
+                "Trate segredos, dados pessoais, credenciais, estado de produção, dinheiro e publicações como limites de confirmação."
+            }
+            (Locale::PtBr, Self::ProjectLocal) => {
+                "Mantenha contexto específico do projeto no projeto; evite gravar na memória sem pedido explícito."
+            }
+            (Locale::Es419, Self::StandardCare) => {
+                "Protege secretos, archivos del usuario, historial git, producción, costo, privacidad y tiempo."
+            }
+            (Locale::Es419, Self::StrictBoundaries) => {
+                "Trata secretos, datos personales, credenciales, estado de producción, dinero y publicaciones como límites de confirmación."
+            }
+            (Locale::Es419, Self::ProjectLocal) => {
+                "Mantén el contexto específico del proyecto en el proyecto; evita llevarlo a memoria sin pedido explícito."
+            }
+            (Locale::Vi, Self::StandardCare) => {
+                "Bảo vệ bí mật, tệp người dùng, lịch sử git, hệ thống sản xuất, chi phí, riêng tư và thời gian."
+            }
+            (Locale::Vi, Self::StrictBoundaries) => {
+                "Xem bí mật, dữ liệu cá nhân, thông tin xác thực, trạng thái sản xuất, tiền và xuất bản là ranh giới cần xác nhận."
+            }
+            (Locale::Vi, Self::ProjectLocal) => {
+                "Giữ ngữ cảnh riêng của dự án trong dự án; tránh ghi vào bộ nhớ nếu không được yêu cầu rõ."
             }
             (_, Self::StandardCare) => {
                 "Protect secrets, user files, git history, production systems, cost, privacy, and time."
@@ -1162,6 +1749,15 @@ impl GuidedPrivacy {
 
     fn escalation_rule(self, locale: Locale) -> &'static str {
         match (locale, self) {
+            (Locale::Ja, Self::StandardCare) => {
+                "破壊的、高コスト、認証情報、公開、法務、セキュリティリスクのある操作の前に尋ねる。"
+            }
+            (Locale::Ja, Self::StrictBoundaries) => {
+                "機微情報の読み取りや拡散、本番システム操作、支出、公開の前に停止して尋ねる。"
+            }
+            (Locale::Ja, Self::ProjectLocal) => {
+                "プロジェクト詳細をメモリ、ワークスペース、古い引き継ぎへ持ち出す前に確認する。"
+            }
             (Locale::ZhHans, Self::StandardCare) => {
                 "遇到破坏性、高成本、凭据、发布、法律或安全风险操作时先询问。"
             }
@@ -1170,6 +1766,42 @@ impl GuidedPrivacy {
             }
             (Locale::ZhHans, Self::ProjectLocal) => {
                 "需要跨项目记忆、复制项目细节或引用旧交接时，先确认这些上下文仍适用。"
+            }
+            (Locale::ZhHant, Self::StandardCare) => {
+                "遇到破壞性、高成本、憑據、發布、法律或安全風險操作時先詢問。"
+            }
+            (Locale::ZhHant, Self::StrictBoundaries) => {
+                "在讀取或傳播敏感資訊、觸碰生產系統、花費資金或發布內容前停止並詢問。"
+            }
+            (Locale::ZhHant, Self::ProjectLocal) => {
+                "需要跨專案記憶、複製專案細節或引用舊交接時，先確認這些上下文仍適用。"
+            }
+            (Locale::PtBr, Self::StandardCare) => {
+                "Pergunte antes de ações destrutivas, caras, com credenciais, publicação, risco legal ou de segurança."
+            }
+            (Locale::PtBr, Self::StrictBoundaries) => {
+                "Pare e pergunte antes de ler ou espalhar dados sensíveis, tocar produção, gastar dinheiro ou publicar."
+            }
+            (Locale::PtBr, Self::ProjectLocal) => {
+                "Confirme antes de levar detalhes do projeto para memória, workspaces ou handoffs antigos."
+            }
+            (Locale::Es419, Self::StandardCare) => {
+                "Pregunta antes de acciones destructivas, costosas, con credenciales, publicación o riesgo legal/de seguridad."
+            }
+            (Locale::Es419, Self::StrictBoundaries) => {
+                "Detente y pregunta antes de leer o difundir datos sensibles, tocar producción, gastar dinero o publicar."
+            }
+            (Locale::Es419, Self::ProjectLocal) => {
+                "Confirma antes de llevar detalles del proyecto a memoria, workspaces o handoffs viejos."
+            }
+            (Locale::Vi, Self::StandardCare) => {
+                "Hỏi trước các thao tác phá hủy, tốn kém, liên quan thông tin xác thực, xuất bản, pháp lý hoặc bảo mật."
+            }
+            (Locale::Vi, Self::StrictBoundaries) => {
+                "Dừng và hỏi trước khi đọc/phát tán dữ liệu nhạy cảm, chạm sản xuất, chi tiền hoặc xuất bản."
+            }
+            (Locale::Vi, Self::ProjectLocal) => {
+                "Xác nhận trước khi mang chi tiết dự án sang bộ nhớ, workspace khác hoặc handoff cũ."
             }
             (_, Self::StandardCare) => {
                 "Ask before destructive, high-cost, credential, publishing, legal, or security-risk actions."
@@ -1202,9 +1834,24 @@ impl GuidedPrinciples {
 
     fn label(self, locale: Locale) -> &'static str {
         match (locale, self) {
+            (Locale::Ja, Self::ScopedChanges) => "小さく絞った変更",
+            (Locale::Ja, Self::UserVoice) => "ユーザーの声を保つ",
+            (Locale::Ja, Self::ReversibleOps) => "可逆手順",
             (Locale::ZhHans, Self::ScopedChanges) => "小范围改动",
             (Locale::ZhHans, Self::UserVoice) => "保留用户语气",
             (Locale::ZhHans, Self::ReversibleOps) => "可逆步骤",
+            (Locale::ZhHant, Self::ScopedChanges) => "小範圍改動",
+            (Locale::ZhHant, Self::UserVoice) => "保留使用者語氣",
+            (Locale::ZhHant, Self::ReversibleOps) => "可逆步驟",
+            (Locale::PtBr, Self::ScopedChanges) => "mudanças focadas",
+            (Locale::PtBr, Self::UserVoice) => "preservar voz do usuário",
+            (Locale::PtBr, Self::ReversibleOps) => "passos reversíveis",
+            (Locale::Es419, Self::ScopedChanges) => "cambios acotados",
+            (Locale::Es419, Self::UserVoice) => "preservar voz del usuario",
+            (Locale::Es419, Self::ReversibleOps) => "pasos reversibles",
+            (Locale::Vi, Self::ScopedChanges) => "thay đổi có phạm vi",
+            (Locale::Vi, Self::UserVoice) => "giữ giọng người dùng",
+            (Locale::Vi, Self::ReversibleOps) => "bước có thể đảo ngược",
             (_, Self::ScopedChanges) => "scoped changes",
             (_, Self::UserVoice) => "user voice",
             (_, Self::ReversibleOps) => "reversible steps",
@@ -1213,6 +1860,15 @@ impl GuidedPrinciples {
 
     fn note(self, locale: Locale) -> &'static str {
         match (locale, self) {
+            (Locale::Ja, Self::ScopedChanges) => {
+                "自由原則：小さくレビューしやすい変更を優先し、明示要求がない限り無関係なリファクタを避ける。"
+            }
+            (Locale::Ja, Self::UserVoice) => {
+                "自由原則：ユーザーの語調、ブランド、制約を保ち、好みを権限拡大として扱わない。"
+            }
+            (Locale::Ja, Self::ReversibleOps) => {
+                "自由原則：影響の大きい操作の前に、可逆手順、チェックポイント、ロールバック説明を選ぶ。"
+            }
             (Locale::ZhHans, Self::ScopedChanges) => {
                 "自由原则：优先采用小范围、可审查的改动；除非明确要求，不做无关重构。"
             }
@@ -1221,6 +1877,42 @@ impl GuidedPrinciples {
             }
             (Locale::ZhHans, Self::ReversibleOps) => {
                 "自由原则：先选择可逆步骤、检查点和回滚说明，再进行高影响操作。"
+            }
+            (Locale::ZhHant, Self::ScopedChanges) => {
+                "自由原則：優先採用小範圍、可審查的改動；除非明確要求，不做無關重構。"
+            }
+            (Locale::ZhHant, Self::UserVoice) => {
+                "自由原則：保留使用者的語氣、品牌和約束；不把偏好推斷成權限擴大。"
+            }
+            (Locale::ZhHant, Self::ReversibleOps) => {
+                "自由原則：先選擇可逆步驟、檢查點和回復說明，再進行高影響操作。"
+            }
+            (Locale::PtBr, Self::ScopedChanges) => {
+                "Princípio livre: prefira mudanças pequenas e revisáveis; evite refactors não relacionados sem pedido explícito."
+            }
+            (Locale::PtBr, Self::UserVoice) => {
+                "Princípio livre: preserve a voz, marca e restrições do usuário sem tratar preferências como expansão de permissão."
+            }
+            (Locale::PtBr, Self::ReversibleOps) => {
+                "Princípio livre: favoreça passos reversíveis, checkpoints e notas de rollback antes de ações de alto impacto."
+            }
+            (Locale::Es419, Self::ScopedChanges) => {
+                "Principio libre: prefiere cambios pequeños y revisables; evita refactors no relacionados sin pedido explícito."
+            }
+            (Locale::Es419, Self::UserVoice) => {
+                "Principio libre: preserva la voz, marca y restricciones del usuario sin tratar preferencias como expansión de permisos."
+            }
+            (Locale::Es419, Self::ReversibleOps) => {
+                "Principio libre: favorece pasos reversibles, checkpoints y notas de rollback antes de acciones de alto impacto."
+            }
+            (Locale::Vi, Self::ScopedChanges) => {
+                "Nguyên tắc tự do: ưu tiên thay đổi nhỏ, dễ review; tránh refactor không liên quan nếu không được yêu cầu rõ."
+            }
+            (Locale::Vi, Self::UserVoice) => {
+                "Nguyên tắc tự do: giữ giọng, thương hiệu và ràng buộc của người dùng, không xem sở thích là mở rộng quyền."
+            }
+            (Locale::Vi, Self::ReversibleOps) => {
+                "Nguyên tắc tự do: ưu tiên bước có thể đảo ngược, checkpoint và ghi chú rollback trước thao tác tác động cao."
             }
             (_, Self::ScopedChanges) => {
                 "Freeform principle: prefer small, reviewable changes and avoid unrelated refactors unless explicitly requested."
@@ -1247,9 +1939,24 @@ fn next_guided_autonomy(preference: AutonomyPreference) -> AutonomyPreference {
 
 fn autonomy_label(preference: AutonomyPreference, locale: Locale) -> &'static str {
     match (locale, preference) {
+        (Locale::Ja, AutonomyPreference::Cautious) => "慎重",
+        (Locale::Ja, AutonomyPreference::Balanced) => "バランス",
+        (Locale::Ja, AutonomyPreference::Autonomous) => "積極的",
         (Locale::ZhHans, AutonomyPreference::Cautious) => "谨慎",
         (Locale::ZhHans, AutonomyPreference::Balanced) => "平衡",
         (Locale::ZhHans, AutonomyPreference::Autonomous) => "积极主动",
+        (Locale::ZhHant, AutonomyPreference::Cautious) => "謹慎",
+        (Locale::ZhHant, AutonomyPreference::Balanced) => "平衡",
+        (Locale::ZhHant, AutonomyPreference::Autonomous) => "積極主動",
+        (Locale::PtBr, AutonomyPreference::Cautious) => "cauteloso",
+        (Locale::PtBr, AutonomyPreference::Balanced) => "equilibrado",
+        (Locale::PtBr, AutonomyPreference::Autonomous) => "ambicioso",
+        (Locale::Es419, AutonomyPreference::Cautious) => "cauteloso",
+        (Locale::Es419, AutonomyPreference::Balanced) => "equilibrado",
+        (Locale::Es419, AutonomyPreference::Autonomous) => "ambicioso",
+        (Locale::Vi, AutonomyPreference::Cautious) => "thận trọng",
+        (Locale::Vi, AutonomyPreference::Balanced) => "cân bằng",
+        (Locale::Vi, AutonomyPreference::Autonomous) => "chủ động",
         (_, AutonomyPreference::Cautious) => "cautious",
         (_, AutonomyPreference::Balanced) => "balanced",
         (_, AutonomyPreference::Autonomous) => "ambitious",
@@ -1259,6 +1966,15 @@ fn autonomy_label(preference: AutonomyPreference, locale: Locale) -> &'static st
 
 fn autonomy_priority(preference: AutonomyPreference, locale: Locale) -> &'static str {
     match (locale, preference) {
+        (Locale::Ja, AutonomyPreference::Cautious) => {
+            "ファイル編集、コマンド実行、あいまいな製品判断の前に停止して尋ねる。"
+        }
+        (Locale::Ja, AutonomyPreference::Balanced) => {
+            "明確で低リスクな作業は直接進め、危険、破壊的、あいまいな操作では先に確認する。"
+        }
+        (Locale::Ja, AutonomyPreference::Autonomous) => {
+            "安全な定型作業はまとめて進めるが、破壊的、認証情報、公開、高コスト、法務、セキュリティリスクでは停止して尋ねる。"
+        }
         (Locale::ZhHans, AutonomyPreference::Cautious) => {
             "在编辑文件、运行命令或产品选择不明确前，倾向先停下询问。"
         }
@@ -1267,6 +1983,42 @@ fn autonomy_priority(preference: AutonomyPreference, locale: Locale) -> &'static
         }
         (Locale::ZhHans, AutonomyPreference::Autonomous) => {
             "可批量处理安全的常规工作，但遇到破坏性、凭据、发布、高成本、法律或安全风险时停止询问。"
+        }
+        (Locale::ZhHant, AutonomyPreference::Cautious) => {
+            "在編輯檔案、執行命令或產品選擇不明確前，傾向先停下詢問。"
+        }
+        (Locale::ZhHant, AutonomyPreference::Balanced) => {
+            "清晰低風險任務可直接行動；遇到風險、破壞性或歧義時先確認。"
+        }
+        (Locale::ZhHant, AutonomyPreference::Autonomous) => {
+            "可批量處理安全的常規工作，但遇到破壞性、憑據、發布、高成本、法律或安全風險時停止詢問。"
+        }
+        (Locale::PtBr, AutonomyPreference::Cautious) => {
+            "Pare e pergunte antes de editar arquivos, rodar comandos ou escolher entre caminhos ambíguos de produto."
+        }
+        (Locale::PtBr, AutonomyPreference::Balanced) => {
+            "Aja diretamente em tarefas claras e de baixo risco; confirme antes de ações arriscadas, destrutivas ou ambíguas."
+        }
+        (Locale::PtBr, AutonomyPreference::Autonomous) => {
+            "Agrupe trabalho seguro de rotina, mas pare para ações destrutivas, credenciais, publicação, alto custo, legais ou de segurança."
+        }
+        (Locale::Es419, AutonomyPreference::Cautious) => {
+            "Detente y pregunta antes de editar archivos, ejecutar comandos o elegir entre caminos ambiguos de producto."
+        }
+        (Locale::Es419, AutonomyPreference::Balanced) => {
+            "Actúa directamente en tareas claras y de bajo riesgo; confirma antes de acciones riesgosas, destructivas o ambiguas."
+        }
+        (Locale::Es419, AutonomyPreference::Autonomous) => {
+            "Agrupa trabajo seguro de rutina, pero detente ante acciones destructivas, credenciales, publicación, alto costo, legales o de seguridad."
+        }
+        (Locale::Vi, AutonomyPreference::Cautious) => {
+            "Dừng và hỏi trước khi sửa tệp, chạy lệnh hoặc chọn giữa đường sản phẩm mơ hồ."
+        }
+        (Locale::Vi, AutonomyPreference::Balanced) => {
+            "Hành động trực tiếp với việc rõ, rủi ro thấp; xác nhận trước việc rủi ro, phá hủy hoặc mơ hồ."
+        }
+        (Locale::Vi, AutonomyPreference::Autonomous) => {
+            "Gộp việc thường lệ an toàn, nhưng dừng với thao tác phá hủy, thông tin xác thực, xuất bản, chi phí cao, pháp lý hoặc bảo mật."
         }
         (_, AutonomyPreference::Cautious) => {
             "Stop and ask before editing files, running commands, or choosing between ambiguous product paths."
@@ -1283,7 +2035,20 @@ fn autonomy_priority(preference: AutonomyPreference, locale: Locale) -> &'static
 
 fn authority_priority(locale: Locale) -> &'static str {
     match locale {
+        Locale::Ja => {
+            "現在のユーザー要求とライブツール証拠は、メモリ、古い引き継ぎ、推測より優先される。"
+        }
         Locale::ZhHans => "当前用户请求和实时工具证据优先于记忆、陈旧交接和猜测。",
+        Locale::ZhHant => "目前使用者請求和即時工具證據優先於記憶、陳舊交接和猜測。",
+        Locale::PtBr => {
+            "Pedidos atuais do usuário e evidência viva das ferramentas superam memória, handoffs antigos e palpites."
+        }
+        Locale::Es419 => {
+            "Las solicitudes actuales del usuario y la evidencia viva de herramientas superan memoria, handoffs viejos y suposiciones."
+        }
+        Locale::Vi => {
+            "Yêu cầu hiện tại của người dùng và bằng chứng trực tiếp từ công cụ ưu tiên hơn bộ nhớ, handoff cũ và phỏng đoán."
+        }
         _ => {
             "Current user requests and live tool evidence outrank memory, stale handoffs, and guesses."
         }
@@ -1320,12 +2085,48 @@ fn compact_freeform_preview(note: &str) -> String {
 fn freeform_note_line(locale: Locale, note: &str, editing: bool) -> Line<'static> {
     let preview = compact_freeform_preview(note);
     let text = match (locale, editing, preview.is_empty()) {
+        (Locale::Ja, true, true) => {
+            "F 自由原則：編集中 - 有界の原則を入力または貼り付け、Enter で完了".to_string()
+        }
+        (Locale::Ja, true, false) => format!("F 自由原則：編集中 - {preview}"),
+        (Locale::Ja, false, true) => "F 自由原則：F で有界の原則を入力または貼り付け".to_string(),
+        (Locale::Ja, false, false) => format!("F 自由原則：{preview}"),
         (Locale::ZhHans, true, true) => {
             "F 自由原则：正在编辑 - 输入或粘贴有界原则，Enter 完成".to_string()
         }
         (Locale::ZhHans, true, false) => format!("F 自由原则：正在编辑 - {preview}"),
         (Locale::ZhHans, false, true) => "F 自由原则：按 F 输入或粘贴自己的有界原则".to_string(),
         (Locale::ZhHans, false, false) => format!("F 自由原则：{preview}"),
+        (Locale::ZhHant, true, true) => {
+            "F 自由原則：正在編輯 - 輸入或貼上有界原則，Enter 完成".to_string()
+        }
+        (Locale::ZhHant, true, false) => format!("F 自由原則：正在編輯 - {preview}"),
+        (Locale::ZhHant, false, true) => "F 自由原則：按 F 輸入或貼上自己的有界原則".to_string(),
+        (Locale::ZhHant, false, false) => format!("F 自由原則：{preview}"),
+        (Locale::PtBr, true, true) => {
+            "F Princípio livre: editando - digite ou cole um princípio limitado, Enter para concluir".to_string()
+        }
+        (Locale::PtBr, true, false) => format!("F Princípio livre: editando - {preview}"),
+        (Locale::PtBr, false, true) => {
+            "F Princípio livre: pressione F para digitar ou colar um princípio limitado".to_string()
+        }
+        (Locale::PtBr, false, false) => format!("F Princípio livre: {preview}"),
+        (Locale::Es419, true, true) => {
+            "F Principio libre: editando - escribe o pega un principio acotado, Enter para terminar".to_string()
+        }
+        (Locale::Es419, true, false) => format!("F Principio libre: editando - {preview}"),
+        (Locale::Es419, false, true) => {
+            "F Principio libre: presiona F para escribir o pegar un principio acotado".to_string()
+        }
+        (Locale::Es419, false, false) => format!("F Principio libre: {preview}"),
+        (Locale::Vi, true, true) => {
+            "F Nguyên tắc tự do: đang sửa - nhập hoặc dán nguyên tắc có giới hạn, Enter để xong".to_string()
+        }
+        (Locale::Vi, true, false) => format!("F Nguyên tắc tự do: đang sửa - {preview}"),
+        (Locale::Vi, false, true) => {
+            "F Nguyên tắc tự do: nhấn F để nhập hoặc dán nguyên tắc có giới hạn".to_string()
+        }
+        (Locale::Vi, false, false) => format!("F Nguyên tắc tự do: {preview}"),
         (_, true, true) => {
             "F Own words: editing - type or paste a bounded principle, Enter to finish".to_string()
         }
@@ -2945,7 +3746,12 @@ enum DraftProvenance {
 
 fn ratification_preview_title(locale: Locale) -> &'static str {
     match locale {
+        Locale::Ja => "ユーザー憲法 - 批准前の草案",
         Locale::ZhHans => "用户宪法 — 批准前草案",
+        Locale::ZhHant => "使用者憲法 - 批准前草案",
+        Locale::PtBr => "Constituição do Usuário - Rascunho para Ratificação",
+        Locale::Es419 => "Constitución del Usuario - Borrador para Ratificación",
+        Locale::Vi => "Hiến pháp Người dùng - Bản nháp để phê chuẩn",
         _ => "User Constitution — Draft for Ratification",
     }
 }
@@ -2964,12 +3770,57 @@ fn constitution_ratification_text(
     let rendered = constitution
         .render_block(None)
         .unwrap_or_else(|| match locale {
+            Locale::Ja => "構造化された憲法は空です。".to_string(),
             Locale::ZhHans => "结构化宪法为空。".to_string(),
+            Locale::ZhHant => "結構化憲法為空。".to_string(),
+            Locale::PtBr => "A constituição estruturada está vazia.".to_string(),
+            Locale::Es419 => "La constitución estructurada está vacía.".to_string(),
+            Locale::Vi => "Hiến pháp có cấu trúc đang trống.".to_string(),
             _ => "The structured constitution is empty.".to_string(),
         });
     let layer_order = tr(locale, MessageId::SetupCheckpointLayerOrder);
 
     match locale {
+        Locale::Ja => {
+            let drafted_by = match provenance {
+                DraftProvenance::Model(label) => format!(
+                    "{label} があなたのガイド回答から起草し、CodeWhale が構造検証と境界制限を適用しました。"
+                ),
+                DraftProvenance::Guided => {
+                    "あなたのガイド回答から決定的に生成されました。".to_string()
+                }
+                DraftProvenance::Existing => {
+                    "既存の憲法を constitution.json から読み込み、変更せずに表示しています。"
+                        .to_string()
+                }
+            };
+            let ratify_how = match provenance {
+                DraftProvenance::Existing => {
+                    "これはすでに有効な基準です。プレビューを閉じて K を押すと、このまま保持してチェックポイントを完了します。\
+                     ファイルは変更されません。/constitution または /setup でいつでも修正できます。"
+                }
+                _ => {
+                    "確認するまで、どの内容も基準にはなりません。プレビューを閉じて G を押すと批准して保存します。\
+                     /constitution または /setup でいつでも修正できます。"
+                }
+            };
+            format!(
+                "CODEWHALE · ユーザー憲法\n{RULE}\n\n{drafted_by}\n\n\
+                 これは CodeWhale があなたと協働するための常設の基準です。優れた憲法のように、使えるほど短く、\
+                 網羅的な規則ではなく持続する原則で構成され、あなたの変化に合わせて修正できます。\
+                 すべての個別判断を裁くのではなく権限と境界を定め、セッションを越えて協働を継続させます。\
+                 ただしこれは記憶ではありません。履歴ではなく原則を保持します。\n\n\
+                 {rendered}\n\n\
+                 権限の階層\n{layer_order}\nあなたの直接の指示は常にこの文書より優先されます。\n\n\
+                 これができないこと\n\
+                 これは行動を導くものです。承認ポリシー、サンドボックス、Shell、ネットワーク、信頼、MCP 権限、\
+                 既定モード、公開、支出の権限を付与または変更することはできません。これらは実行時にあなたが管理します。\n\n\
+                 縮小コアと任意モジュール\n\
+                 組み込みの 55 行コアは引き続き有効です。この草案はユーザーグローバルの長期設定だけを保存します。\
+                 重い実行/オーケストレーション教義はモードプロンプトまたは将来の任意モジュールに属します。このプレビューはモジュールを有効化せず、設定も変更しません。\n\n\
+                 批准\n{ratify_how}"
+            )
+        }
         Locale::ZhHans => {
             let drafted_by = match provenance {
                 DraftProvenance::Model(label) => format!(
@@ -2998,7 +3849,162 @@ fn constitution_ratification_text(
                  权限层级\n{layer_order}\n你的直接指令始终高于本文件。\n\n\
                  它不能做什么\n\
                  它只提供行为指导，不能授予或更改审批策略、沙箱、Shell、网络、信任、MCP 权限、默认模式、发布或支出权限——这些始终由你在运行时掌控。\n\n\
+                 精简核心与可选模块\n\
+                 内置 55 行核心始终生效。本草案只保存你的用户全局长期偏好。执行/编排等重型教义位于模式提示词或未来的可选模块中；此预览不会启用模块或更改其配置。\n\n\
                  批准\n{ratify_how}"
+            )
+        }
+        Locale::ZhHant => {
+            let drafted_by = match provenance {
+                DraftProvenance::Model(label) => format!(
+                    "由 {label} 根據你的引導式答案起草，並已由 CodeWhale 完成結構驗證與邊界限制。"
+                ),
+                DraftProvenance::Guided => "由你的引導式答案確定性生成。".to_string(),
+                DraftProvenance::Existing => {
+                    "你現有的憲法，讀取自 constitution.json；原樣展示，未做任何修改。".to_string()
+                }
+            };
+            let ratify_how = match provenance {
+                DraftProvenance::Existing => {
+                    "這已是你現行的準則。關閉此預覽後按 K 保留並完成檢查點；\
+                     檔案不會被修改。之後可隨時用 /constitution 或 /setup 修訂。"
+                }
+                _ => {
+                    "未經你確認，任何內容都不會成為準則。關閉此預覽後按 G 批准並保存；\
+                     之後可隨時用 /constitution 或 /setup 修訂。"
+                }
+            };
+            format!(
+                "CODEWHALE · 使用者憲法\n{RULE}\n\n{drafted_by}\n\n\
+                 這是 CodeWhale 與你協作的長期準則。像優秀的憲法一樣：足夠簡短因而可用，由持久原則而非詳盡規則構成，並且可以隨你修訂。\
+                 它界定權力與邊界，而非裁決每個具體決定；它讓協作跨會話延續，但它不是記憶，它承載的是原則，而非歷史。\n\n\
+                 {rendered}\n\n\
+                 權限層級\n{layer_order}\n你的直接指令始終高於本文件。\n\n\
+                 它不能做什麼\n\
+                 它只提供行為指導，不能授予或更改審批策略、沙箱、Shell、網路、信任、MCP 權限、預設模式、發布或支出權限；這些始終由你在執行時掌控。\n\n\
+                 精簡核心與可選模組\n\
+                 內建 55 行核心始終生效。本草案只保存你的使用者全域長期偏好。執行/編排等重型教義位於模式提示詞或未來的可選模組中；此預覽不會啟用模組或更改其配置。\n\n\
+                 批准\n{ratify_how}"
+            )
+        }
+        Locale::PtBr => {
+            let drafted_by = match provenance {
+                DraftProvenance::Model(label) => format!(
+                    "Rascunhado por {label} a partir das suas respostas guiadas, depois validado por schema e limitado pelo CodeWhale."
+                ),
+                DraftProvenance::Guided => {
+                    "Renderizado deterministicamente a partir das suas respostas guiadas.".to_string()
+                }
+                DraftProvenance::Existing => {
+                    "Sua constituição existente, carregada de constitution.json, é exibida sem alterações."
+                        .to_string()
+                }
+            };
+            let ratify_how = match provenance {
+                DraftProvenance::Existing => {
+                    "Esta já é sua regra vigente. Feche a prévia e pressione K para mantê-la e concluir o checkpoint; \
+                     o arquivo não será modificado. Edite quando quiser com /constitution ou /setup."
+                }
+                _ => {
+                    "Nada vira regra até você confirmar. Feche a prévia e pressione G para ratificar e salvar. \
+                     Edite quando quiser com /constitution ou /setup."
+                }
+            };
+            format!(
+                "CODEWHALE · CONSTITUIÇÃO DO USUÁRIO\n{RULE}\n\n{drafted_by}\n\n\
+                 Esta é a regra permanente de como o CodeWhale trabalha com você. Como boas constituições, \
+                 ela é curta o bastante para ser usada, formada por princípios duráveis em vez de regras exaustivas, \
+                 e pode ser emendada conforme você muda. Ela define poderes e limites em vez de decidir cada caso, \
+                 e dá continuidade à colaboração entre sessões. Mas ela não é memória: carrega princípios, não histórico.\n\n\
+                 {rendered}\n\n\
+                 HIERARQUIA DE AUTORIDADE\n{layer_order}\nSeus pedidos diretos sempre superam este documento.\n\n\
+                 O QUE ISTO NÃO PODE FAZER\n\
+                 Isto orienta comportamento. Não pode conceder nem alterar política de aprovação, sandbox, shell, rede, \
+                 confiança, permissões MCP, modo padrão, publicação ou autoridade para gastos; isso continua sob seu controle em tempo de execução.\n\n\
+                 NÚCLEO REDUZIDO E MÓDULOS OPT-IN\n\
+                 O núcleo embutido de 55 linhas continua ativo. Este rascunho só salva suas preferências permanentes globais de usuário. \
+                 Doutrina pesada de execução ou orquestração pertence a prompts de modo ou módulos opt-in futuros; esta prévia não ativa módulos nem muda sua configuração.\n\n\
+                 RATIFICAÇÃO\n{ratify_how}"
+            )
+        }
+        Locale::Es419 => {
+            let drafted_by = match provenance {
+                DraftProvenance::Model(label) => format!(
+                    "Redactado por {label} desde tus respuestas guiadas, luego validado por schema y acotado por CodeWhale."
+                ),
+                DraftProvenance::Guided => {
+                    "Renderizado de forma determinística desde tus respuestas guiadas.".to_string()
+                }
+                DraftProvenance::Existing => {
+                    "Tu constitución existente, cargada desde constitution.json, se muestra sin cambios."
+                        .to_string()
+                }
+            };
+            let ratify_how = match provenance {
+                DraftProvenance::Existing => {
+                    "Esta ya es tu regla vigente. Cierra la vista previa y presiona K para conservarla y completar el checkpoint; \
+                     el archivo no se modifica. Puedes enmendarla cuando quieras con /constitution o /setup."
+                }
+                _ => {
+                    "Nada se vuelve regla hasta que confirmes. Cierra la vista previa y presiona G para ratificar y guardar. \
+                     Puedes enmendarla cuando quieras con /constitution o /setup."
+                }
+            };
+            format!(
+                "CODEWHALE · CONSTITUCIÓN DEL USUARIO\n{RULE}\n\n{drafted_by}\n\n\
+                 Esta es la regla permanente de cómo CodeWhale trabaja contigo. Como las buenas constituciones, \
+                 es lo bastante breve para usarse, hecha de principios duraderos en vez de reglas exhaustivas, \
+                 y enmendable a medida que cambias. Define poderes y límites en vez de decidir cada caso, \
+                 y da continuidad a la colaboración entre sesiones. Pero no es memoria: lleva principios, no historial.\n\n\
+                 {rendered}\n\n\
+                 JERARQUÍA DE AUTORIDAD\n{layer_order}\nTus pedidos directos siempre superan este documento.\n\n\
+                 LO QUE ESTO NO PUEDE HACER\n\
+                 Orienta comportamiento. No puede conceder ni cambiar política de aprobación, sandbox, shell, red, \
+                 confianza, permisos MCP, modo predeterminado, publicación o autoridad de gasto; eso sigue bajo tu control en tiempo de ejecución.\n\n\
+                 NÚCLEO REDUCIDO Y MÓDULOS OPT-IN\n\
+                 El núcleo integrado de 55 líneas sigue activo. Este borrador solo guarda tus preferencias permanentes globales de usuario. \
+                 La doctrina pesada de ejecución u orquestación pertenece a prompts de modo o módulos opt-in futuros; esta vista previa no activa módulos ni cambia su configuración.\n\n\
+                 RATIFICACIÓN\n{ratify_how}"
+            )
+        }
+        Locale::Vi => {
+            let drafted_by = match provenance {
+                DraftProvenance::Model(label) => format!(
+                    "Được {label} soạn từ câu trả lời hướng dẫn của bạn, rồi được CodeWhale kiểm tra schema và giới hạn biên."
+                ),
+                DraftProvenance::Guided => {
+                    "Được kết xuất xác định từ câu trả lời hướng dẫn của bạn.".to_string()
+                }
+                DraftProvenance::Existing => {
+                    "Hiến pháp hiện có của bạn, tải từ constitution.json, được hiển thị nguyên trạng."
+                        .to_string()
+                }
+            };
+            let ratify_how = match provenance {
+                DraftProvenance::Existing => {
+                    "Đây đã là luật hiện hành của bạn. Đóng bản xem trước rồi nhấn K để giữ nguyên và hoàn tất checkpoint; \
+                     tệp không bị sửa. Có thể chỉnh bất cứ lúc nào bằng /constitution hoặc /setup."
+                }
+                _ => {
+                    "Không có gì trở thành luật cho đến khi bạn xác nhận. Đóng bản xem trước rồi nhấn G để phê chuẩn và lưu. \
+                     Có thể chỉnh bất cứ lúc nào bằng /constitution hoặc /setup."
+                }
+            };
+            format!(
+                "CODEWHALE · HIẾN PHÁP NGƯỜI DÙNG\n{RULE}\n\n{drafted_by}\n\n\
+                 Đây là luật thường trực cho cách CodeWhale làm việc với bạn. Giống các hiến pháp tốt, \
+                 nó đủ ngắn để dùng, gồm các nguyên tắc bền vững thay vì luật lệ cạn kiệt, \
+                 và có thể sửa khi bạn thay đổi. Nó định khung quyền hạn và giới hạn thay vì quyết định từng trường hợp, \
+                 đồng thời giữ sự liên tục giữa các phiên. Nhưng nó không phải bộ nhớ: nó mang nguyên tắc, không mang lịch sử.\n\n\
+                 {rendered}\n\n\
+                 THỨ BẬC THẨM QUYỀN\n{layer_order}\nYêu cầu trực tiếp của bạn luôn cao hơn tài liệu này.\n\n\
+                 ĐIỀU NÀY KHÔNG THỂ LÀM\n\
+                 Nó hướng dẫn hành vi. Nó không thể cấp hoặc đổi chính sách phê duyệt, sandbox, shell, mạng, \
+                 độ tin cậy, quyền MCP, chế độ mặc định, xuất bản hoặc quyền chi tiêu; những thứ đó vẫn do bạn kiểm soát lúc chạy.\n\n\
+                 LÕI RÚT GỌN VÀ MÔ-ĐUN OPT-IN\n\
+                 Lõi tích hợp 55 dòng vẫn hoạt động. Bản nháp này chỉ lưu tùy chọn thường trực toàn cục của người dùng. \
+                 Giáo điều thực thi hoặc điều phối nặng thuộc về prompt chế độ hoặc mô-đun opt-in trong tương lai; bản xem trước này không bật mô-đun hoặc đổi cấu hình của chúng.\n\n\
+                 PHÊ CHUẨN\n{ratify_how}"
             )
         }
         _ => {
@@ -3039,6 +4045,11 @@ fn constitution_ratification_text(
                  It guides behavior. It cannot grant or change approval policy, sandbox, shell, \
                  network, trust, MCP permissions, default mode, publishing, or spending \
                  authority — those stay under your hand at runtime.\n\n\
+                 REDUCED CORE AND OPT-IN MODULES\n\
+                 The bundled 55-line core stays active. This draft only saves your user-global \
+                 standing preferences. Heavy execution or orchestration doctrine belongs in mode \
+                 prompts or future opt-in modules; this preview does not enable modules or change \
+                 their configuration.\n\n\
                  RATIFICATION\n{ratify_how}"
             )
         }
@@ -3048,8 +4059,23 @@ fn constitution_ratification_text(
 /// Card line inviting the user to let their configured model draft the law.
 fn model_draft_invitation_line(locale: Locale, model_label: &str) -> String {
     match locale {
+        Locale::Ja => {
+            format!("A {model_label} が起草し、あなたが批准します。確認するまで保存しません。")
+        }
         Locale::ZhHans => {
             format!("A {model_label} 起草，你批准。未经确认不会保存。")
+        }
+        Locale::ZhHant => {
+            format!("A {model_label} 起草，你批准。未經確認不會保存。")
+        }
+        Locale::PtBr => {
+            format!("A {model_label} pode rascunhar. Você ratifica. Nada salva sem você.")
+        }
+        Locale::Es419 => {
+            format!("A {model_label} puede redactarla. Tú ratificas. Nada se guarda sin ti.")
+        }
+        Locale::Vi => {
+            format!("A {model_label} có thể soạn. Bạn phê chuẩn. Không lưu gì nếu chưa có bạn.")
         }
         _ => format!("A {model_label} can draft it. You ratify it. Nothing saves without you."),
     }
@@ -3058,7 +4084,14 @@ fn model_draft_invitation_line(locale: Locale, model_label: &str) -> String {
 /// Card line offering to keep an existing valid constitution unchanged.
 fn keep_existing_invitation_line(locale: Locale) -> &'static str {
     match locale {
+        Locale::Ja => "K 既存の憲法を保持 - 確認して保持、ファイルは変更しません。",
         Locale::ZhHans => "K 保留现有宪法——先查看，再保留，文件不变。",
+        Locale::ZhHant => "K 保留現有憲法 - 先查看，再保留，檔案不變。",
+        Locale::PtBr => "K Manter constituição existente - revise, mantenha, arquivo inalterado.",
+        Locale::Es419 => {
+            "K Conservar constitución existente - revisa, conserva, archivo sin cambios."
+        }
+        Locale::Vi => "K Giữ hiến pháp hiện có - xem lại, giữ nguyên, tệp không đổi.",
         _ => "K Keep your existing constitution — review it, keep it, file unchanged.",
     }
 }
@@ -3066,8 +4099,31 @@ fn keep_existing_invitation_line(locale: Locale) -> &'static str {
 /// Card line shown while a model draft awaits ratification.
 fn model_draft_ready_line(locale: Locale, model_label: &str) -> String {
     match locale {
+        Locale::Ja => {
+            format!(
+                "{model_label} の草案が批准待ちです - G で確認して批准、1-6 で草案を破棄します。"
+            )
+        }
         Locale::ZhHans => {
             format!("{model_label} 的草案待批准——按 G 查看并批准；按 1-6 会丢弃草案。")
+        }
+        Locale::ZhHant => {
+            format!("{model_label} 的草案待批准 - 按 G 查看並批准；按 1-6 會丟棄草案。")
+        }
+        Locale::PtBr => {
+            format!(
+                "Rascunho de {model_label} aguarda ratificação - G para revisar e ratificar; 1-6 descarta."
+            )
+        }
+        Locale::Es419 => {
+            format!(
+                "El borrador de {model_label} espera ratificación - G para revisar y ratificar; 1-6 lo descarta."
+            )
+        }
+        Locale::Vi => {
+            format!(
+                "Bản nháp của {model_label} chờ phê chuẩn - G để xem và phê chuẩn; 1-6 sẽ bỏ bản nháp."
+            )
         }
         _ => format!(
             "Draft by {model_label} awaits ratification — G to review and ratify; 1-6 discards it."
@@ -3078,7 +4134,20 @@ fn model_draft_ready_line(locale: Locale, model_label: &str) -> String {
 /// Host-facing status line after a successful model draft.
 pub(crate) fn model_draft_ready_message(locale: Locale, model_label: &str) -> String {
     match locale {
+        Locale::Ja => format!(
+            "{model_label} があなたの憲法を起草しました。プレビューを確認してから G で批准してください。"
+        ),
         Locale::ZhHans => format!("{model_label} 已起草你的宪法。请查看预览，然后按 G 批准。"),
+        Locale::ZhHant => format!("{model_label} 已起草你的憲法。請查看預覽，然後按 G 批准。"),
+        Locale::PtBr => format!(
+            "{model_label} rascunhou sua constituição. Revise a prévia e pressione G para ratificar."
+        ),
+        Locale::Es419 => format!(
+            "{model_label} redactó tu constitución. Revisa la vista previa y presiona G para ratificar."
+        ),
+        Locale::Vi => format!(
+            "{model_label} đã soạn hiến pháp của bạn. Xem bản xem trước rồi nhấn G để phê chuẩn."
+        ),
         _ => format!(
             "{model_label} drafted your constitution. Review the preview, then press G to ratify."
         ),
@@ -3093,8 +4162,31 @@ pub(crate) fn model_draft_failed_message(
     reason: &str,
 ) -> String {
     match locale {
+        Locale::Ja => {
+            format!(
+                "{model_label} は起草を完了できませんでした（{reason}）。ガイド草案は有効です。G でプレビューして批准できます。"
+            )
+        }
         Locale::ZhHans => {
             format!("{model_label} 未能完成起草（{reason}）。引导式草案仍然有效——按 G 预览并批准。")
+        }
+        Locale::ZhHant => {
+            format!("{model_label} 未能完成起草（{reason}）。引導式草案仍然有效；按 G 預覽並批准。")
+        }
+        Locale::PtBr => {
+            format!(
+                "{model_label} não conseguiu rascunhar sua constituição ({reason}). O rascunho guiado continua válido; pressione G para pré-visualizar e ratificar."
+            )
+        }
+        Locale::Es419 => {
+            format!(
+                "{model_label} no pudo redactar tu constitución ({reason}). El borrador guiado sigue válido; presiona G para previsualizar y ratificar."
+            )
+        }
+        Locale::Vi => {
+            format!(
+                "{model_label} không thể soạn hiến pháp của bạn ({reason}). Bản nháp hướng dẫn vẫn hợp lệ; nhấn G để xem trước và phê chuẩn."
+            )
         }
         _ => format!(
             "{model_label} could not draft your constitution ({reason}). Your guided draft still \
@@ -3427,6 +4519,9 @@ mod tests {
         assert!(title.contains("Draft for Ratification"));
         assert!(content.contains("<codewhale_user_constitution"));
         assert!(content.contains("press G to ratify and save"));
+        assert!(content.contains("REDUCED CORE AND OPT-IN MODULES"));
+        assert!(content.contains("The bundled 55-line core stays active"));
+        assert!(content.contains("does not enable modules"));
         assert_eq!(view.state().constitution_choice, ConstitutionChoice::Unset);
 
         let action = view.handle_key(key(KeyCode::Char('g')));
@@ -3454,6 +4549,74 @@ mod tests {
         assert_eq!(state.status(SetupStep::Constitution), StepStatus::Verified);
         assert_eq!(state.runtime_posture_source, RuntimePostureSource::Unset);
         assert!(message.contains("Constitution ratified"));
+    }
+
+    #[test]
+    fn ratification_preview_explains_reduced_core_modules_for_shipped_locales() {
+        for locale in Locale::shipped() {
+            let constitution = GuidedConstitutionDraft::default().to_constitution(*locale);
+            let content =
+                constitution_ratification_text(*locale, &constitution, &DraftProvenance::Guided);
+            let (heading, module_marker, no_enable_marker, permission_marker, mcp_marker) =
+                match locale {
+                    Locale::Ja => (
+                        "縮小コア",
+                        "モジュール",
+                        "有効化せず",
+                        "承認ポリシー、サンドボックス、Shell、ネットワーク、信頼、MCP 権限",
+                        "付与または変更することはできません",
+                    ),
+                    Locale::ZhHans => (
+                        "精简核心",
+                        "模块",
+                        "不会启用",
+                        "不能授予或更改审批策略、沙箱、Shell、网络、信任、MCP 权限",
+                        "发布或支出权限",
+                    ),
+                    Locale::ZhHant => (
+                        "精簡核心",
+                        "模組",
+                        "不會啟用",
+                        "不能授予或更改審批策略、沙箱、Shell、網路、信任、MCP 權限",
+                        "發布或支出權限",
+                    ),
+                    Locale::PtBr => (
+                        "NÚCLEO REDUZIDO",
+                        "módulos",
+                        "não ativa",
+                        "Não pode conceder nem alterar política de aprovação, sandbox, shell, rede",
+                        "permissões MCP",
+                    ),
+                    Locale::Es419 => (
+                        "NÚCLEO REDUCIDO",
+                        "módulos",
+                        "no activa",
+                        "No puede conceder ni cambiar política de aprobación, sandbox, shell, red",
+                        "permisos MCP",
+                    ),
+                    Locale::Vi => (
+                        "LÕI RÚT GỌN",
+                        "mô-đun",
+                        "không bật",
+                        "không thể cấp hoặc đổi chính sách phê duyệt, sandbox, shell, mạng",
+                        "quyền MCP",
+                    ),
+                    Locale::En => (
+                        "REDUCED CORE",
+                        "modules",
+                        "does not enable",
+                        "cannot grant or change approval policy, sandbox, shell",
+                        "MCP permissions",
+                    ),
+                };
+
+            assert!(content.contains("55"), "{}", locale.tag());
+            assert!(content.contains(heading), "{}", locale.tag());
+            assert!(content.contains(module_marker), "{}", locale.tag());
+            assert!(content.contains(no_enable_marker), "{}", locale.tag());
+            assert!(content.contains(permission_marker), "{}", locale.tag());
+            assert!(content.contains(mcp_marker), "{}", locale.tag());
+        }
     }
 
     #[test]
@@ -3662,6 +4825,23 @@ mod tests {
             state.constitution_preview_hash.as_deref(),
             Some(constitution.preview_hash().as_str())
         );
+    }
+
+    #[test]
+    fn constitution_detail_lines_explain_reduced_core_and_modules_boundary() {
+        let view = SetupWizardView::new_at_with_facts(
+            SetupState::default(),
+            Locale::En,
+            SetupStep::Constitution,
+            SetupRuntimeFacts::default(),
+        );
+
+        let text = lines_to_text(view.constitution_detail_lines());
+
+        assert!(text.contains("user-global preferences only"));
+        assert!(text.contains("55-line core"));
+        assert!(text.contains("mode prompts"));
+        assert!(text.contains("future opt-ins"));
     }
 
     #[test]
@@ -4024,6 +5204,44 @@ mod tests {
         assert!(english.contains("evidence-first coding workbench"));
         assert!(zh_hans.contains("重证据"));
         assert_ne!(english, zh_hans);
+
+        let markers = [
+            (Locale::Ja, "証拠重視"),
+            (Locale::ZhHans, "重证据"),
+            (Locale::ZhHant, "重證據"),
+            (Locale::PtBr, "guiada por evidências"),
+            (Locale::Es419, "basada en evidencia"),
+            (Locale::Vi, "ưu tiên bằng chứng"),
+        ];
+        for (locale, marker) in markers {
+            let body = guided_constitution_template(locale).render_body();
+            assert!(
+                body.contains(marker),
+                "missing localized guided marker for {}",
+                locale.tag()
+            );
+            assert_ne!(
+                english,
+                body,
+                "locale {} fell back to English",
+                locale.tag()
+            );
+            assert!(
+                !body.contains("A CodeWhale user who wants"),
+                "locale {} reused English purpose copy",
+                locale.tag()
+            );
+            assert!(
+                !body.contains("Guided answers:"),
+                "locale {} reused English guided-answer notes",
+                locale.tag()
+            );
+            assert!(
+                !body.contains("Current user requests and live tool evidence"),
+                "locale {} reused English authority priority",
+                locale.tag()
+            );
+        }
     }
 
     #[test]
@@ -4051,6 +5269,47 @@ mod tests {
         assert!(zh_hans.contains("它界定权力与边界"));
         assert!(zh_hans.contains("但它不是记忆"));
         assert_ne!(english, zh_hans);
+
+        let localized_markers = [
+            (Locale::Ja, "権限の階層"),
+            (Locale::ZhHans, "精简核心与可选模块"),
+            (Locale::ZhHant, "精簡核心與可選模組"),
+            (Locale::PtBr, "NÚCLEO REDUZIDO E MÓDULOS OPT-IN"),
+            (Locale::Es419, "NÚCLEO REDUCIDO Y MÓDULOS OPT-IN"),
+            (Locale::Vi, "LÕI RÚT GỌN VÀ MÔ-ĐUN OPT-IN"),
+        ];
+        for (locale, marker) in localized_markers {
+            let content = constitution_ratification_text(
+                locale,
+                &draft.to_constitution(locale),
+                &DraftProvenance::Guided,
+            );
+            assert!(
+                content.contains(marker),
+                "missing localized ratification marker for {}",
+                locale.tag()
+            );
+            assert_ne!(
+                english,
+                content,
+                "locale {} ratification preview fell back to English",
+                locale.tag()
+            );
+            for fallback in [
+                "CODEWHALE · USER CONSTITUTION",
+                "HIERARCHY OF AUTHORITY",
+                "WHAT THIS CANNOT DO",
+                "REDUCED CORE AND OPT-IN MODULES",
+                "Rendered deterministically from your guided answers",
+                "Nothing becomes law until you confirm",
+            ] {
+                assert!(
+                    !content.contains(fallback),
+                    "locale {} reused English ratification scaffold: {fallback}",
+                    locale.tag()
+                );
+            }
+        }
     }
 
     #[test]
@@ -4103,6 +5362,40 @@ mod tests {
         assert!(zh_hans_text.contains("平衡"));
         assert!(zh_hans_text.contains("原则："));
         assert!(zh_hans_text.contains("小范围改动"));
+
+        for locale in Locale::shipped()
+            .iter()
+            .copied()
+            .filter(|locale| *locale != Locale::En)
+        {
+            let view = SetupWizardView::new(SetupState::default(), locale);
+            let text = lines_to_text(view.constitution_detail_lines());
+            assert!(
+                text.contains(GuidedPurpose::Coding.label(locale)),
+                "missing localized purpose answer for {}",
+                locale.tag()
+            );
+            assert!(
+                text.contains(autonomy_label(AutonomyPreference::Balanced, locale)),
+                "missing localized autonomy answer for {}",
+                locale.tag()
+            );
+            assert!(
+                text.contains(GuidedPrinciples::ScopedChanges.label(locale)),
+                "missing localized principle answer for {}",
+                locale.tag()
+            );
+            assert!(
+                !text.contains("Purpose:"),
+                "locale {} reused English detail label",
+                locale.tag()
+            );
+            assert!(
+                !text.contains("not checked yet"),
+                "locale {} reused English file-state detail",
+                locale.tag()
+            );
+        }
     }
 
     #[test]
