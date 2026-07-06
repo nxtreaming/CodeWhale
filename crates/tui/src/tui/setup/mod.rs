@@ -87,7 +87,7 @@ impl SetupWizardStep for StaticSetupStep {
     }
 }
 
-const STEP_SPECS: [StaticSetupStep; 7] = [
+const STEP_SPECS: [StaticSetupStep; 8] = [
     StaticSetupStep {
         id: SetupStep::Language,
         title_id: MessageId::SetupStepLanguageTitle,
@@ -122,6 +122,12 @@ const STEP_SPECS: [StaticSetupStep; 7] = [
         id: SetupStep::Hotbar,
         title_id: MessageId::SetupStepHotbarTitle,
         why_id: MessageId::SetupStepHotbarWhy,
+        required: false,
+    },
+    StaticSetupStep {
+        id: SetupStep::RemoteRuntime,
+        title_id: MessageId::SetupStepRemoteRuntimeTitle,
+        why_id: MessageId::SetupStepRemoteRuntimeWhy,
         required: false,
     },
     StaticSetupStep {
@@ -185,6 +191,11 @@ struct SetupRuntimeFacts {
     hotbar_bindings_result: String,
     hotbar_actions_result: String,
     hotbar_result: String,
+    remote_clouds_result: String,
+    remote_bridges_result: String,
+    remote_providers_result: String,
+    remote_mode_result: String,
+    remote_result: String,
     default_mode: String,
     approval_policy_value: String,
     project_override_warning: Option<String>,
@@ -221,6 +232,11 @@ impl Default for SetupRuntimeFacts {
             hotbar_bindings_result: "Hotbar config not loaded".to_string(),
             hotbar_actions_result: "Hotbar actions not loaded".to_string(),
             hotbar_result: "hotbar not loaded".to_string(),
+            remote_clouds_result: "remote cloud registry not loaded".to_string(),
+            remote_bridges_result: "remote bridge registry not loaded".to_string(),
+            remote_providers_result: "provider registry not loaded".to_string(),
+            remote_mode_result: "remote setup mode not loaded".to_string(),
+            remote_result: "remote runtime not loaded".to_string(),
             default_mode: "agent".to_string(),
             approval_policy_value: "on-request".to_string(),
             project_override_warning: None,
@@ -389,6 +405,41 @@ impl SetupRuntimeFacts {
             "state={hotbar_state}, configured_slots={configured_hotbar_slots}, active_slots={active_hotbar_slots}, actions={}, warnings={hotbar_warning_count}",
             app.hotbar_actions.len()
         );
+        let remote_cloud_slugs = crate::remote_setup::registry::CLOUD_TARGETS
+            .iter()
+            .map(|cloud| cloud.slug)
+            .collect::<Vec<_>>();
+        let remote_bridge_slugs = crate::remote_setup::registry::BRIDGES
+            .iter()
+            .map(|bridge| bridge.slug)
+            .collect::<Vec<_>>();
+        let remote_provider_count = codewhale_config::ProviderKind::all().len();
+        let remote_clouds_result = format!(
+            "{} cloud targets: {}",
+            remote_cloud_slugs.len(),
+            remote_cloud_slugs.join(", ")
+        );
+        let remote_bridges_result = format!(
+            "{} chat bridges: {}",
+            remote_bridge_slugs.len(),
+            remote_bridge_slugs.join(", ")
+        );
+        let remote_providers_result = format!(
+            "{remote_provider_count} providers from the provider registry; active route {} / {}",
+            app.api_provider.as_str(),
+            app.model
+        );
+        let remote_mode_result = format!(
+            "generate-only bundle; --apply not implemented; default port {}, workers {}",
+            crate::remote_setup::bundle::DEFAULT_PORT,
+            crate::remote_setup::bundle::DEFAULT_WORKERS
+        );
+        let remote_result = format!(
+            "clouds={}, bridges={}, providers={}, mode=generate_only, apply=not_implemented",
+            remote_cloud_slugs.len(),
+            remote_bridge_slugs.len(),
+            remote_provider_count
+        );
         let constitution_autonomy = UserConstitution::load()
             .ok()
             .and_then(|load| {
@@ -426,6 +477,11 @@ impl SetupRuntimeFacts {
             hotbar_bindings_result,
             hotbar_actions_result,
             hotbar_result,
+            remote_clouds_result,
+            remote_bridges_result,
+            remote_providers_result,
+            remote_mode_result,
+            remote_result,
             default_mode: app.mode.as_setting().to_string(),
             approval_policy_value: config
                 .approval_policy
@@ -1413,6 +1469,28 @@ impl SetupWizardView {
         })
     }
 
+    fn preview_remote_runtime_on_ramp(&self) -> ViewAction {
+        ViewAction::Emit(ViewEvent::OpenTextPager {
+            title: tr(self.locale, MessageId::SetupRemotePreviewTitle).to_string(),
+            content: remote_runtime_on_ramp_text(self.locale, &self.facts),
+        })
+    }
+
+    fn commit_remote_runtime_review(&mut self) -> ViewAction {
+        let mut state = self.state.clone();
+        state.set_step(
+            SetupStep::RemoteRuntime,
+            StepEntry::new(StepStatus::Verified, false, CONSTITUTION_CHECKPOINT_VERSION)
+                .with_result(self.facts.remote_result.clone()),
+        );
+        self.state = state.clone();
+        self.move_next();
+        ViewAction::Emit(ViewEvent::SetupStateCommitRequested {
+            state,
+            message: tr(self.locale, MessageId::SetupRemoteReviewed).to_string(),
+        })
+    }
+
     fn select_runtime_preset(&mut self, key: char) -> ViewAction {
         if let Some(preset) = SetupRuntimePreset::from_key(key)
             && preset != self.runtime_preset
@@ -1765,6 +1843,9 @@ impl ModalView for SetupWizardView {
             KeyCode::Char('s') => {
                 self.commit_selected_status(StepStatus::Skipped, MessageId::SetupStepSkipped, true)
             }
+            KeyCode::Char('r') if self.selected_step() == SetupStep::RemoteRuntime => {
+                self.preview_remote_runtime_on_ramp()
+            }
             KeyCode::Char('r') => self.commit_selected_status(
                 StepStatus::NeedsAction,
                 MessageId::SetupStepRetryRecorded,
@@ -1832,6 +1913,9 @@ impl ModalView for SetupWizardView {
             }
             KeyCode::Enter if self.selected_step() == SetupStep::Hotbar => {
                 self.commit_hotbar_review()
+            }
+            KeyCode::Enter if self.selected_step() == SetupStep::RemoteRuntime => {
+                self.commit_remote_runtime_review()
             }
             KeyCode::Enter if self.selected_step() == SetupStep::Verification => {
                 self.commit_setup_report()
@@ -1940,6 +2024,11 @@ impl ModalView for SetupWizardView {
                 "H",
                 tr(self.locale, MessageId::SetupActionHotbar).to_string(),
             ));
+        } else if self.selected_step() == SetupStep::RemoteRuntime {
+            hints.push(ActionHint::new(
+                "R",
+                tr(self.locale, MessageId::SetupActionRemote).to_string(),
+            ));
         } else if self.selected_step() == SetupStep::TrustSandbox {
             hints.push(ActionHint::new(
                 "1-3",
@@ -2034,6 +2123,7 @@ impl SetupWizardView {
             SetupStep::Constitution => self.constitution_detail_lines(),
             SetupStep::OperateFleet => self.operate_fleet_detail_lines(),
             SetupStep::Hotbar => self.hotbar_detail_lines(),
+            SetupStep::RemoteRuntime => self.remote_runtime_detail_lines(),
             SetupStep::Verification => self.verification_detail_lines(),
             _ => Vec::new(),
         }
@@ -2257,6 +2347,31 @@ impl SetupWizardView {
             ),
             Line::from(Span::styled(
                 tr(self.locale, MessageId::SetupHotbarReviewHint).to_string(),
+                Style::default().fg(palette::TEXT_MUTED),
+            )),
+        ]
+    }
+
+    fn remote_runtime_detail_lines(&self) -> Vec<Line<'static>> {
+        vec![
+            self.detail_row(
+                MessageId::SetupRemoteCloudsLabel,
+                &self.facts.remote_clouds_result,
+            ),
+            self.detail_row(
+                MessageId::SetupRemoteBridgesLabel,
+                &self.facts.remote_bridges_result,
+            ),
+            self.detail_row(
+                MessageId::SetupRemoteProvidersLabel,
+                &self.facts.remote_providers_result,
+            ),
+            self.detail_row(
+                MessageId::SetupRemoteModeLabel,
+                &self.facts.remote_mode_result,
+            ),
+            Line::from(Span::styled(
+                tr(self.locale, MessageId::SetupRemoteReviewHint).to_string(),
                 Style::default().fg(palette::TEXT_MUTED),
             )),
         ]
@@ -2538,6 +2653,138 @@ fn setup_report_result(state: &SetupState, facts: &SetupRuntimeFacts) -> String 
         facts.runtime_result,
         facts.operate_result
     )
+}
+
+fn remote_runtime_on_ramp_text(locale: Locale, facts: &SetupRuntimeFacts) -> String {
+    let command = "codewhale remote-setup --generate-only --cloud lighthouse --bridge telegram --provider deepseek --out ./codewhale-deploy/lighthouse-telegram";
+    match locale {
+        Locale::Ja => format!(
+            "Remote Runtime On-Ramp\n\n\
+             /setup はリモートランタイムの事実だけを表示します。デプロイバンドルの生成、認証情報の書き込み、クラウド CLI の呼び出し、`remote-setup` の実行は行いません。\n\n\
+             現在の事実:\n\
+             - クラウド: {}\n\
+             - ブリッジ: {}\n\
+             - プロバイダー: {}\n\
+             - モード: {}\n\n\
+             デプロイバンドルを生成する場合は、通常の端末で明示的に実行してください:\n\n\
+             ```sh\n\
+             {command}\n\
+             ```\n\n\
+             生成された RUNBOOK には人間が確認するホスト手順が含まれます。`--apply` は未実装です。自動デプロイとして扱わないでください。",
+            facts.remote_clouds_result,
+            facts.remote_bridges_result,
+            facts.remote_providers_result,
+            facts.remote_mode_result
+        ),
+        Locale::ZhHans => format!(
+            "Remote Runtime On-Ramp\n\n\
+             /setup 只展示远程运行时事实，不会生成部署包、写入凭据、调用云 CLI 或运行 `remote-setup`。\n\n\
+             当前事实：\n\
+             - 云目标：{}\n\
+             - 聊天桥：{}\n\
+             - 服务商：{}\n\
+             - 模式：{}\n\n\
+             生成部署包时，请在普通终端显式运行：\n\n\
+             ```sh\n\
+             {command}\n\
+             ```\n\n\
+             生成的 RUNBOOK 会包含需要人工复核的主机步骤。`--apply` 仍未实现；不要把它当成自动部署。",
+            facts.remote_clouds_result,
+            facts.remote_bridges_result,
+            facts.remote_providers_result,
+            facts.remote_mode_result
+        ),
+        Locale::ZhHant => format!(
+            "Remote Runtime On-Ramp\n\n\
+             /setup 只顯示遠端執行時事實，不會生成部署包、寫入憑證、呼叫雲端 CLI 或執行 `remote-setup`。\n\n\
+             目前事實：\n\
+             - 雲端：{}\n\
+             - 橋接：{}\n\
+             - 供應商：{}\n\
+             - 模式：{}\n\n\
+             生成部署包時，請在一般終端明確執行：\n\n\
+             ```sh\n\
+             {command}\n\
+             ```\n\n\
+             生成的 RUNBOOK 會包含需要人工複核的主機步驟。`--apply` 仍未實作；不要把它當成自動部署。",
+            facts.remote_clouds_result,
+            facts.remote_bridges_result,
+            facts.remote_providers_result,
+            facts.remote_mode_result
+        ),
+        Locale::PtBr => format!(
+            "Remote Runtime On-Ramp\n\n\
+             /setup apenas mostra fatos do runtime remoto. Ele não gera bundles, grava credenciais, chama CLIs de cloud nem executa `remote-setup`.\n\n\
+             Fatos atuais:\n\
+             - Clouds: {}\n\
+             - Pontes: {}\n\
+             - Provedores: {}\n\
+             - Modo: {}\n\n\
+             Para gerar um bundle de deploy, execute explicitamente em um terminal normal:\n\n\
+             ```sh\n\
+             {command}\n\
+             ```\n\n\
+             O RUNBOOK gerado contém os passos de host para revisão humana. `--apply` continua não implementado; não trate isso como auto-deploy.",
+            facts.remote_clouds_result,
+            facts.remote_bridges_result,
+            facts.remote_providers_result,
+            facts.remote_mode_result
+        ),
+        Locale::Es419 => format!(
+            "Remote Runtime On-Ramp\n\n\
+             /setup solo muestra datos del runtime remoto. No genera bundles, no escribe credenciales, no llama CLIs de cloud ni ejecuta `remote-setup`.\n\n\
+             Datos actuales:\n\
+             - Clouds: {}\n\
+             - Puentes: {}\n\
+             - Proveedores: {}\n\
+             - Modo: {}\n\n\
+             Para generar un bundle de deploy, ejecútalo explícitamente en una terminal normal:\n\n\
+             ```sh\n\
+             {command}\n\
+             ```\n\n\
+             El RUNBOOK generado contiene pasos de host para revisión humana. `--apply` sigue sin implementarse; no lo trates como auto-deploy.",
+            facts.remote_clouds_result,
+            facts.remote_bridges_result,
+            facts.remote_providers_result,
+            facts.remote_mode_result
+        ),
+        Locale::Vi => format!(
+            "Remote Runtime On-Ramp\n\n\
+             /setup chỉ hiển thị thông tin runtime từ xa. Nó không tạo bundle, ghi thông tin xác thực, gọi CLI cloud hay chạy `remote-setup`.\n\n\
+             Thông tin hiện tại:\n\
+             - Cloud: {}\n\
+             - Cầu nối: {}\n\
+             - Nhà cung cấp: {}\n\
+             - Chế độ: {}\n\n\
+             Để tạo bundle deploy, hãy chạy rõ ràng trong terminal thông thường:\n\n\
+             ```sh\n\
+             {command}\n\
+             ```\n\n\
+             RUNBOOK được tạo chứa các bước host để con người xem xét. `--apply` vẫn chưa được triển khai; đừng coi đây là auto-deploy.",
+            facts.remote_clouds_result,
+            facts.remote_bridges_result,
+            facts.remote_providers_result,
+            facts.remote_mode_result
+        ),
+        Locale::En => format!(
+            "Remote Runtime On-Ramp\n\n\
+             /setup only shows remote-runtime facts. It does not generate bundles, write credentials, call cloud CLIs, or run `remote-setup`.\n\n\
+             Current facts:\n\
+             - Clouds: {}\n\
+             - Bridges: {}\n\
+             - Providers: {}\n\
+             - Mode: {}\n\n\
+             To generate a deploy bundle, run this explicitly in a normal terminal:\n\n\
+             ```sh\n\
+             {command}\n\
+             ```\n\n\
+             The generated RUNBOOK contains the host steps for human review. `--apply` remains unimplemented; do not treat it as auto-deploy.",
+            facts.remote_clouds_result,
+            facts.remote_bridges_result,
+            facts.remote_providers_result,
+            facts.remote_mode_result
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -2904,6 +3151,7 @@ mod tests {
                 SetupStep::Constitution,
                 SetupStep::OperateFleet,
                 SetupStep::Hotbar,
+                SetupStep::RemoteRuntime,
                 SetupStep::Verification,
             ]
         );
@@ -3166,6 +3414,66 @@ mod tests {
             action,
             ViewAction::EmitAndClose(ViewEvent::SetupOpenHotbarRequested)
         ));
+    }
+
+    #[test]
+    fn remote_runtime_step_previews_generate_only_on_ramp() {
+        let facts = SetupRuntimeFacts {
+            remote_clouds_result: "3 cloud targets: lighthouse, azure, digitalocean".to_string(),
+            remote_bridges_result: "2 chat bridges: feishu, telegram".to_string(),
+            remote_providers_result:
+                "12 providers from the provider registry; active route deepseek / deepseek-chat"
+                    .to_string(),
+            remote_mode_result:
+                "generate-only bundle; --apply not implemented; default port 7878, workers 2"
+                    .to_string(),
+            ..SetupRuntimeFacts::default()
+        };
+        let mut view = SetupWizardView::new_at_with_facts(
+            SetupState::default(),
+            Locale::En,
+            SetupStep::RemoteRuntime,
+            facts,
+        );
+
+        let action = view.handle_key(key(KeyCode::Char('r')));
+
+        let ViewAction::Emit(ViewEvent::OpenTextPager { title, content }) = action else {
+            panic!("expected remote on-ramp pager");
+        };
+        assert_eq!(title, "Remote runtime on-ramp");
+        assert!(content.contains("does not generate bundles"));
+        assert!(content.contains("codewhale remote-setup --generate-only"));
+        assert!(content.contains("`--apply` remains unimplemented"));
+    }
+
+    #[test]
+    fn remote_runtime_on_ramp_is_localized_for_shipped_locales() {
+        let facts = SetupRuntimeFacts {
+            remote_clouds_result: "3 cloud targets: lighthouse, azure, digitalocean".to_string(),
+            remote_bridges_result: "2 chat bridges: feishu, telegram".to_string(),
+            remote_providers_result:
+                "12 providers from the provider registry; active route deepseek / deepseek-chat"
+                    .to_string(),
+            remote_mode_result:
+                "generate-only bundle; --apply not implemented; default port 7878, workers 2"
+                    .to_string(),
+            ..SetupRuntimeFacts::default()
+        };
+        let english = remote_runtime_on_ramp_text(Locale::En, &facts);
+
+        for locale in Locale::shipped() {
+            let content = remote_runtime_on_ramp_text(*locale, &facts);
+            assert!(
+                content.contains("codewhale remote-setup --generate-only"),
+                "{}",
+                locale.tag()
+            );
+            assert!(content.contains("`--apply`"), "{}", locale.tag());
+            if *locale != Locale::En {
+                assert_ne!(content, english, "{}", locale.tag());
+            }
+        }
     }
 
     #[test]
@@ -4333,6 +4641,74 @@ mod tests {
                 .is_some_and(|result| result.contains("state=customized"))
         );
         assert!(message.contains("Hotbar setup state recorded"));
+        assert_eq!(view.selected_step(), SetupStep::RemoteRuntime);
+    }
+
+    #[test]
+    fn remote_runtime_detail_lines_show_read_only_registry_facts() {
+        let facts = SetupRuntimeFacts {
+            remote_clouds_result: "3 cloud targets: lighthouse, azure, digitalocean".to_string(),
+            remote_bridges_result: "2 chat bridges: feishu, telegram".to_string(),
+            remote_providers_result:
+                "12 providers from the provider registry; active route deepseek / deepseek-chat"
+                    .to_string(),
+            remote_mode_result:
+                "generate-only bundle; --apply not implemented; default port 7878, workers 2"
+                    .to_string(),
+            ..SetupRuntimeFacts::default()
+        };
+        let view = SetupWizardView::new_at_with_facts(
+            SetupState::default(),
+            Locale::En,
+            SetupStep::RemoteRuntime,
+            facts,
+        );
+
+        let text = lines_to_text(view.remote_runtime_detail_lines());
+
+        assert!(text.contains("Cloud targets:"));
+        assert!(text.contains("lighthouse"));
+        assert!(text.contains("Chat bridges:"));
+        assert!(text.contains("feishu"));
+        assert!(text.contains("Remote mode:"));
+        assert!(text.contains("--apply not implemented"));
+        assert!(text.contains("without generating a bundle"));
+    }
+
+    #[test]
+    fn remote_runtime_review_records_optional_snapshot() {
+        let facts = SetupRuntimeFacts {
+            remote_result:
+                "clouds=3, bridges=2, providers=12, mode=generate_only, apply=not_implemented"
+                    .to_string(),
+            ..SetupRuntimeFacts::default()
+        };
+        let mut view = SetupWizardView::new_at_with_facts(
+            SetupState::default(),
+            Locale::En,
+            SetupStep::RemoteRuntime,
+            facts,
+        );
+
+        let action = view.handle_key(key(KeyCode::Enter));
+
+        let ViewAction::Emit(ViewEvent::SetupStateCommitRequested { state, message }) = action
+        else {
+            panic!("expected setup-state commit event");
+        };
+        assert_eq!(state.status(SetupStep::RemoteRuntime), StepStatus::Verified);
+        let entry = state
+            .steps
+            .get(&SetupStep::RemoteRuntime)
+            .expect("remote setup entry");
+        assert!(!entry.required);
+        assert!(
+            entry
+                .result
+                .as_deref()
+                .is_some_and(|result| result.contains("mode=generate_only"))
+        );
+        assert!(message.contains("Remote runtime on-ramp recorded"));
         assert_eq!(view.selected_step(), SetupStep::Verification);
     }
 

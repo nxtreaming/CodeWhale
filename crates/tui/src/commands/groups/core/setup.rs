@@ -54,6 +54,12 @@ impl RegisterCommand for SetupCmd {
                     step: SetupStep::Hotbar,
                 })
             }
+            Some(
+                "remote" | "remote-runtime" | "remote_runtime" | "cloud" | "bridge" | "mobile"
+                | "phone",
+            ) => CommandResult::action(AppAction::OpenSetupWizardAt {
+                step: SetupStep::RemoteRuntime,
+            }),
             Some(other) => CommandResult::error(format!(
                 "Unknown /setup target '{other}'. Try `/setup` to open the setup wizard."
             )),
@@ -138,6 +144,8 @@ mod tests {
             ("constitution", SetupStep::Constitution),
             ("hotbar", SetupStep::Hotbar),
             ("shortcuts", SetupStep::Hotbar),
+            ("remote", SetupStep::RemoteRuntime),
+            ("cloud", SetupStep::RemoteRuntime),
         ];
 
         for (arg, step) in cases {
