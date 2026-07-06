@@ -446,7 +446,7 @@
     "SetupReportNextActionLabel": "Next action:",
     "SetupReportNextActionNone": "No blocking setup action recorded.",
     "SetupReportNextActionConstitution": "Complete the constitution checkpoint or choose bundled/default.",
-    "SetupReportNextActionProvider": "Review provider/model readiness or run /provider.",
+    "SetupReportNextActionProvider": "Review provider/model readiness or run /setup provider; use /provider setup <name> for a specific provider.",
     "SetupReportNextActionRuntime": "Review runtime posture or use /config.",
     "SetupReportNextActionOperate": "Review Operate/Fleet readiness before durable multi-worker runs.",
     "SetupReportNextActionRequired": "Review the remaining required setup steps.",

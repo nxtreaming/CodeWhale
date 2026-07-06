@@ -430,7 +430,7 @@
   "SetupReportNextActionLabel": "下一步：",
   "SetupReportNextActionNone": "未记录阻塞性的设置操作。",
   "SetupReportNextActionConstitution": "完成宪法检查点，或选择内置/默认。",
-  "SetupReportNextActionProvider": "复核服务商/模型就绪状态，或运行 /provider。",
+  "SetupReportNextActionProvider": "复核服务商/模型就绪状态，或运行 /setup provider；针对特定服务商使用 /provider setup <name>。",
   "SetupReportNextActionRuntime": "复核运行姿态，或使用 /config。",
   "SetupReportNextActionOperate": "在持久多 worker 运行前复核 Operate/Fleet 就绪状态。",
   "SetupReportNextActionRequired": "复核剩余必需设置步骤。",

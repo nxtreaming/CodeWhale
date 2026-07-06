@@ -308,7 +308,7 @@
     "SetupReportNextActionLabel": "下一步：",
     "SetupReportNextActionNone": "未記錄阻塞中的設定操作。",
     "SetupReportNextActionConstitution": "完成 constitution checkpoint，或選擇內建/預設。",
-    "SetupReportNextActionProvider": "檢視供應商/模型就緒狀態，或執行 /provider。",
+    "SetupReportNextActionProvider": "檢視供應商/模型就緒狀態，或執行 /setup provider；若要指定供應商，請用 /provider setup <name>。",
     "SetupReportNextActionRuntime": "檢視執行姿態，或使用 /config。",
     "SetupReportNextActionRequired": "檢視剩餘必填設定步驟。",
     "SetupReportRecorded": "設定報告已記錄。",

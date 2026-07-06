@@ -3891,7 +3891,7 @@ fn print_doctor_setup_report(
         );
     }
     println!(
-        "  · next actions: /constitution (standing law), /setup report (readiness), /provider or /model (route), /config (runtime posture), /setup fleet (Operate/Fleet readiness), /fleet setup (explicit profile authoring), /setup hotbar (optional shortcuts), /setup tools (Tools/MCP readiness), /setup remote (remote runtime on-ramp), /setup persistence (path review)"
+        "  · next actions: /constitution (standing law), /setup report (readiness), /setup provider or /provider setup <name> (provider credentials), /model (route), /config (runtime posture), /setup fleet (Operate/Fleet readiness), /fleet setup (explicit profile authoring), /setup hotbar (optional shortcuts), /setup tools (Tools/MCP readiness), /setup remote (remote runtime on-ramp), /setup persistence (path review)"
     );
     for step in codewhale_config::SetupStep::ALL {
         let entry = state.steps.get(&step);
@@ -4213,7 +4213,7 @@ fn doctor_setup_report_json(config: &Config, workspace: &Path) -> serde_json::Va
         "next_actions": {
             "constitution": "/constitution",
             "setup_report": "/setup report",
-            "provider_model": "/provider or /model",
+            "provider_model": "/setup provider, /provider setup <name>, or /model",
             "runtime_posture": "/config",
             "operate_fleet": "/setup fleet (readiness), /fleet setup (explicit profile authoring)",
             "hotbar": "/setup hotbar",
@@ -8445,7 +8445,7 @@ mod doctor_setup_state_tests {
         assert_eq!(report["next_actions"]["setup_report"], "/setup report");
         assert_eq!(
             report["next_actions"]["provider_model"],
-            "/provider or /model"
+            "/setup provider, /provider setup <name>, or /model"
         );
         assert_eq!(report["next_actions"]["runtime_posture"], "/config");
         assert_eq!(

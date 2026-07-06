@@ -575,7 +575,7 @@
     "SetupReportNextActionLabel": "次の操作:",
     "SetupReportNextActionNone": "ブロック中のセットアップ操作は記録されていません。",
     "SetupReportNextActionConstitution": "Constitution チェックポイントを完了するか、同梱/既定を選びます。",
-    "SetupReportNextActionProvider": "プロバイダー/モデルの準備状態を確認するか、/provider を実行します。",
+    "SetupReportNextActionProvider": "プロバイダー/モデルの準備状態を確認するか、/setup provider を実行します。特定のプロバイダーには /provider setup <name> を使います。",
     "SetupReportNextActionRuntime": "実行姿勢を確認するか、/config を使います。",
     "SetupReportNextActionRequired": "残りの必須セットアップステップを確認してください。",
     "SetupReportRecorded": "セットアップレポートを記録しました。",

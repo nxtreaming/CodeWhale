@@ -562,7 +562,7 @@
     "SetupReportNextActionLabel": "Próxima ação:",
     "SetupReportNextActionNone": "Nenhuma ação bloqueante de setup registrada.",
     "SetupReportNextActionConstitution": "Complete o checkpoint da constitution ou escolha embutido/padrão.",
-    "SetupReportNextActionProvider": "Revise a prontidão de provedor/modelo ou execute /provider.",
+    "SetupReportNextActionProvider": "Revise a prontidão de provedor/modelo ou execute /setup provider; use /provider setup <name> para um provedor específico.",
     "SetupReportNextActionRuntime": "Revise a postura de runtime ou use /config.",
     "SetupReportNextActionRequired": "Revise as etapas obrigatórias de setup restantes.",
     "SetupReportRecorded": "Relatório de setup registrado.",

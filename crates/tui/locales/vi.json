@@ -573,7 +573,7 @@
     "SetupReportNextActionLabel": "Hành động tiếp theo:",
     "SetupReportNextActionNone": "Không có hành động setup đang chặn được ghi.",
     "SetupReportNextActionConstitution": "Hoàn tất checkpoint constitution hoặc chọn bản tích hợp/mặc định.",
-    "SetupReportNextActionProvider": "Xem lại mức sẵn sàng nhà cung cấp/model hoặc chạy /provider.",
+    "SetupReportNextActionProvider": "Xem lại mức sẵn sàng nhà cung cấp/model hoặc chạy /setup provider; dùng /provider setup <name> cho nhà cung cấp cụ thể.",
     "SetupReportNextActionRuntime": "Xem lại tư thế runtime hoặc dùng /config.",
     "SetupReportNextActionRequired": "Xem lại các bước setup bắt buộc còn lại.",
     "SetupReportRecorded": "Đã ghi báo cáo setup.",
