@@ -147,6 +147,20 @@ codewhale exec --allowed-tools read_file,exec_shell --max-turns 10 "fix the fail
 
 完整细节见 [CHANGELOG.md](CHANGELOG.md)。
 
+## CodeWhale for VS Code —— 图形界面前端
+
+更喜欢图形化的 IDE 体验而不是终端？[**CodeWhale for VS Code**](https://github.com/HengQuWorld/CodeWhale-VSCode) 是社区维护的 GUI 前端，把同一个 CodeWhale 引擎封装成原生 VS Code 侧边栏——聊天、斜杠命令、线程管理、实时 diff、任务管理与设置 UI，全部在编辑器内完成。
+
+GUI 通过相同的 [Runtime API](docs/RUNTIME_API.md) 与本地 `codewhale` 运行时通信，会话、provider、模式与 skills 在终端与 IDE 之间保持同步。如果你日常就在 VS Code 里工作，欢迎试用：
+
+```bash
+npm install -g codewhale        # 先安装引擎
+# 然后在 VS Code 扩展面板搜索 "CodeWhale"
+```
+
+> 本仓库 [`extensions/vscode/`](extensions/vscode/) 下的最小脚手架是独立的
+> Phase 0 只读查看器。完整的聊天体验请使用上面链接的 GUI 项目。
+
 ## 核心想法 —— 这个版本放进来的 mission idea
 
 多数编程 Agent 从加码开始：更多工具、更长上下文、更多自主性。CodeWhale
