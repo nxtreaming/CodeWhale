@@ -18,7 +18,7 @@ export interface RepoFacts {
 }
 
 export const FACTS: RepoFacts = {
-  "generatedAt": "2026-07-06T04:59:02.553Z",
+  "generatedAt": "2026-07-07T02:32:11.808Z",
   "version": "0.8.67",
   "crates": [
     "agent",
@@ -194,7 +194,7 @@ export const FACTS: RepoFacts = {
     },
     {
       "id": "longcat",
-      "label": "LongCat",
+      "label": "Meituan LongCat",
       "env": "LONGCAT_API_KEY"
     }
   ],

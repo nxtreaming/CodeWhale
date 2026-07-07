@@ -598,7 +598,7 @@ provider!(
     LongCat,
     LongCat,
     "longcat",
-    "LongCat",
+    "Meituan LongCat",
     DEFAULT_LONGCAT_BASE_URL,
     DEFAULT_LONGCAT_MODEL,
     ["LONGCAT_API_KEY"],
