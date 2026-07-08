@@ -115,6 +115,13 @@ impl PagerView {
         self.plain_lines.join("\n")
     }
 
+    /// The pager's title bar text. Used by tests to assert the raw-detail
+    /// pager is framed at leaf scope (#4105).
+    #[cfg(test)]
+    pub(crate) fn title(&self) -> &str {
+        &self.title
+    }
+
     /// Return the page height (in lines) used for paging keys.
     ///
     /// Falls back to a small constant (10) before the first render so the

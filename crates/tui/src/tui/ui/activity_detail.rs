@@ -518,10 +518,25 @@ fn activity_cell_to_text(cell: &HistoryCell, width: u16) -> String {
         .join("\n")
 }
 
+/// Empty-state hint shown when the selection has no raw leaf detail to open.
+/// `v` / `Alt+V` only ever surface the raw detail of the ONE selected
+/// tool/card/leaf, so when there is nothing leaf-level to show we point the
+/// user at Ctrl+O for the whole-turn context instead of failing silently
+/// (#4105).
+const NO_RAW_DETAIL_HINT: &str =
+    "No raw detail for this item — press Ctrl+O for the turn overview.";
+
+/// Intro line prepended to the raw tool-detail pager body so the surface reads
+/// as the raw detail of the single selected item — not the whole turn. Ctrl+O
+/// remains the whole-turn Turn Inspector (#4105).
+const RAW_DETAIL_PAGER_INTRO: &str =
+    "Raw detail for the selected item — press Ctrl+O for the whole-turn overview.";
+
 pub(super) fn open_tool_details_pager(app: &mut App) -> bool {
     let target_cell = detail_target_cell_index(app);
 
     let Some(cell_index) = target_cell else {
+        app.status_message = Some(NO_RAW_DETAIL_HINT.to_string());
         return false;
     };
     open_details_pager_for_cell(app, cell_index)
@@ -570,14 +585,18 @@ pub(crate) fn open_details_pager_for_cell(app: &mut App, cell_index: usize) -> b
         // model received against the full payload.
         let spillover_section = spillover_pager_section(app, cell_index);
 
+        // Frame the body as leaf-level raw detail for the selected item. The
+        // Tool ID / Input / Output / spillover content below is unchanged — only
+        // the leading intro line is new, so existing raw-output visibility is
+        // preserved (#4105).
         let content = if let Some(section) = spillover_section {
             format!(
-                "Tool ID: {}\nTool: {}\n\nInput:\n{}\n\nOutput:\n{}\n\n{}",
+                "{RAW_DETAIL_PAGER_INTRO}\n\nTool ID: {}\nTool: {}\n\nInput:\n{}\n\nOutput:\n{}\n\n{}",
                 detail.tool_id, detail.tool_name, input, output, section
             )
         } else {
             format!(
-                "Tool ID: {}\nTool: {}\n\nInput:\n{}\n\nOutput:\n{}",
+                "{RAW_DETAIL_PAGER_INTRO}\n\nTool ID: {}\nTool: {}\n\nInput:\n{}\n\nOutput:\n{}",
                 detail.tool_id, detail.tool_name, input, output
             )
         };
@@ -588,7 +607,7 @@ pub(crate) fn open_details_pager_for_cell(app: &mut App, cell_index: usize) -> b
             .map(|area| area.width)
             .unwrap_or(80);
         app.view_stack.push(PagerView::from_text(
-            format!("Tool: {}", detail.tool_name),
+            format!("Raw detail — {}", detail.tool_name),
             &content,
             width.saturating_sub(2),
         ));
@@ -596,7 +615,7 @@ pub(crate) fn open_details_pager_for_cell(app: &mut App, cell_index: usize) -> b
     }
 
     let Some(cell) = app.cell_at_virtual_index(cell_index) else {
-        app.status_message = Some("No details available for the selected line".to_string());
+        app.status_message = Some(NO_RAW_DETAIL_HINT.to_string());
         return false;
     };
     let title = match cell {

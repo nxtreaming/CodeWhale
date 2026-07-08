@@ -8077,6 +8077,74 @@ fn open_tool_details_pager_supports_active_virtual_tool_cell() {
 }
 
 #[test]
+fn tool_details_pager_frames_leaf_scope_and_preserves_raw_content() {
+    let mut app = create_test_app();
+    app.history = vec![HistoryCell::Tool(ToolCell::Generic(GenericToolCell {
+        name: "exec_shell".to_string(),
+        status: ToolStatus::Success,
+        input_summary: Some("command: ls".to_string()),
+        output: Some("total 0".to_string()),
+        prompts: None,
+        spillover_path: None,
+        output_summary: None,
+        is_diff: false,
+    }))];
+    app.tool_details_by_cell.insert(
+        0,
+        ToolDetailRecord {
+            tool_id: "exec-1".to_string(),
+            tool_name: "exec_shell".to_string(),
+            input: serde_json::json!({"command": "ls"}),
+            output: Some("total 0".to_string()),
+        },
+    );
+    app.resync_history_revisions();
+
+    assert!(open_details_pager_for_cell(&mut app, 0));
+
+    let mut view = app.view_stack.pop().expect("pager view");
+    let pager = view
+        .as_any_mut()
+        .downcast_mut::<PagerView>()
+        .expect("top view should be pager");
+
+    // Title reads as raw leaf detail for THIS selected item, not the whole turn.
+    assert!(
+        pager.title().starts_with("Raw detail"),
+        "title should frame leaf scope: {}",
+        pager.title()
+    );
+    assert!(
+        pager.title().contains("exec_shell"),
+        "title should name the selected tool: {}",
+        pager.title()
+    );
+
+    let body = pager.body_text();
+    // Body frames leaf scope and points to Ctrl+O for whole-turn context.
+    assert!(body.contains("Raw detail for the selected item"), "{body}");
+    assert!(body.contains("Ctrl+O"), "{body}");
+    // Existing raw input/output visibility must be preserved.
+    assert!(body.contains("Input:"), "{body}");
+    assert!(body.contains("Output:"), "{body}");
+    assert!(body.contains("total 0"), "{body}");
+    assert!(body.contains("\"command\": \"ls\""), "{body}");
+}
+
+#[test]
+fn tool_details_empty_state_points_to_turn_inspector() {
+    let mut app = create_test_app();
+    // A selection index with no raw detail record and no backing cell: the
+    // empty state should route the user to Ctrl+O for turn-level context.
+    assert!(!open_details_pager_for_cell(&mut app, 999));
+    let msg = app.status_message.clone().unwrap_or_default();
+    assert!(
+        msg.contains("Ctrl+O"),
+        "empty state should point to Ctrl+O for the turn overview: {msg}"
+    );
+}
+
+#[test]
 fn spillover_pager_section_returns_none_when_no_spillover() {
     let mut app = create_test_app();
     app.history = vec![HistoryCell::Tool(ToolCell::Generic(GenericToolCell {
