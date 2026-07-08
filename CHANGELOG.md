@@ -25,6 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   defaults when Models.dev has no rows.
 
 ### Added
+- Catalog automation: `scripts/catalog_models_dev.py` refreshes secret-free
+  Models.dev / OpenRouter listings and validates the offline seed snapshot
+  (`snapshot --check`) without ever persisting API keys (#4117).
 - `/model` picker cycles six catalog views with `A` (Configured → Catalog →
   Recent → Coding → Cheap → Long context) and richer row metadata from the
   live/bundled catalog (context, max output, tools, reasoning, price/M,
