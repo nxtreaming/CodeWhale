@@ -38,11 +38,12 @@ pub struct UiTheme {
     pub warning: Color,
     pub success: Color,
     pub info: Color,
-    // Mode badge colors (agent/yolo/plan/goal)
+    // Mode badge colors (act/yolo/plan/multitask/operate)
     pub mode_agent: Color,
     pub mode_yolo: Color,
     pub mode_plan: Color,
-    pub mode_goal: Color,
+    pub mode_multitask: Color,
+    pub mode_operate: Color,
     // Footer statusline colors
     pub status_ready: Color,
     pub status_working: Color,
@@ -124,7 +125,8 @@ pub const UI_THEME: UiTheme = UiTheme {
     mode_agent: MODE_AGENT,
     mode_yolo: MODE_YOLO,
     mode_plan: MODE_PLAN,
-    mode_goal: MODE_GOAL,
+    mode_multitask: MODE_MULTITASK,
+    mode_operate: MODE_OPERATE,
     status_ready: TEXT_MUTED,
     status_working: WHALE_INFO,
     status_warning: STATUS_WARNING,
@@ -161,13 +163,14 @@ pub const LIGHT_UI_THEME: UiTheme = UiTheme {
     error_surface: Color::Rgb(254, 229, 229),
     error_border: Color::Rgb(240, 120, 130),
     error_text: Color::Rgb(120, 20, 30),
-    warning: Color::Rgb(180, 83, 9),      // amber
-    success: Color::Rgb(21, 128, 61),     // green
-    info: Color::Rgb(53, 120, 229),       // blue
-    mode_agent: Color::Rgb(53, 120, 229), // blue
-    mode_yolo: Color::Rgb(200, 40, 60),   // red
-    mode_plan: Color::Rgb(180, 83, 9),    // amber
-    mode_goal: Color::Rgb(80, 180, 130),  // mint green
+    warning: Color::Rgb(180, 83, 9),          // amber
+    success: Color::Rgb(21, 128, 61),         // green
+    info: Color::Rgb(53, 120, 229),           // blue
+    mode_agent: Color::Rgb(53, 120, 229),     // blue
+    mode_yolo: Color::Rgb(200, 40, 60),       // red
+    mode_plan: Color::Rgb(180, 83, 9),        // amber
+    mode_multitask: Color::Rgb(80, 180, 130), // mint green
+    mode_operate: Color::Rgb(124, 58, 237),   // violet
     status_ready: LIGHT_TEXT_MUTED,
     status_working: Color::Rgb(53, 120, 229),   // blue
     status_warning: Color::Rgb(180, 83, 9),     // amber
@@ -210,7 +213,8 @@ pub const SOLARIZED_LIGHT_UI_THEME: UiTheme = UiTheme {
     mode_agent: SOLARIZED_BLUE,
     mode_yolo: SOLARIZED_RED,
     mode_plan: SOLARIZED_ORANGE,
-    mode_goal: SOLARIZED_GREEN,
+    mode_multitask: SOLARIZED_GREEN,
+    mode_operate: Color::Rgb(0x6C, 0x71, 0xC4), // solarized violet
     status_ready: SOLARIZED_CYAN,
     status_working: SOLARIZED_BLUE,
     status_warning: SOLARIZED_YELLOW,
@@ -253,7 +257,10 @@ pub const GRAYSCALE_UI_THEME: UiTheme = UiTheme {
     mode_agent: Color::Rgb(200, 200, 200),
     mode_yolo: GRAYSCALE_TEXT_BODY,
     mode_plan: GRAYSCALE_TEXT_MUTED,
-    mode_goal: GRAYSCALE_TEXT_SOFT,
+    mode_multitask: GRAYSCALE_TEXT_SOFT,
+    // Monochrome theme: pure white is the one step left above the YOLO
+    // body tone (236) that stays unmistakably distinct.
+    mode_operate: Color::Rgb(255, 255, 255),
     status_ready: GRAYSCALE_TEXT_MUTED,
     status_working: GRAYSCALE_TEXT_SOFT,
     status_warning: GRAYSCALE_TEXT_BODY,
@@ -296,7 +303,8 @@ pub const CATPPUCCIN_MOCHA_UI_THEME: UiTheme = UiTheme {
     mode_agent: Color::Rgb(0x89, 0xb4, 0xfa),      // blue
     mode_yolo: Color::Rgb(0xf3, 0x8b, 0xa8),       // red
     mode_plan: Color::Rgb(0xfa, 0xb3, 0x87),       // peach
-    mode_goal: Color::Rgb(0xa6, 0xe3, 0xa1),       // green
+    mode_multitask: Color::Rgb(0xa6, 0xe3, 0xa1),  // green
+    mode_operate: Color::Rgb(0xcb, 0xa6, 0xf7),    // mauve
     status_ready: Color::Rgb(0x7f, 0x84, 0x9c),    // overlay1
     status_working: Color::Rgb(0x74, 0xc7, 0xec),  // sapphire
     status_warning: Color::Rgb(0xf9, 0xe2, 0xaf),  // yellow
@@ -339,7 +347,8 @@ pub const TOKYO_NIGHT_UI_THEME: UiTheme = UiTheme {
     mode_agent: Color::Rgb(0x7a, 0xa2, 0xf7),      // blue
     mode_yolo: Color::Rgb(0xf7, 0x76, 0x8e),       // red
     mode_plan: Color::Rgb(0xff, 0x9e, 0x64),       // orange
-    mode_goal: Color::Rgb(0x9e, 0xce, 0x6a),       // green
+    mode_multitask: Color::Rgb(0x9e, 0xce, 0x6a),  // green
+    mode_operate: Color::Rgb(0xbb, 0x9a, 0xf7),    // purple
     status_ready: Color::Rgb(0x56, 0x5f, 0x89),    // comment
     status_working: Color::Rgb(0x7d, 0xcf, 0xff),  // cyan
     status_warning: Color::Rgb(0xe0, 0xaf, 0x68),  // yellow
@@ -382,7 +391,8 @@ pub const DRACULA_UI_THEME: UiTheme = UiTheme {
     mode_agent: Color::Rgb(0xbd, 0x93, 0xf9),      // purple
     mode_yolo: Color::Rgb(0xff, 0x55, 0x55),       // red
     mode_plan: Color::Rgb(0xff, 0xb8, 0x6c),       // orange
-    mode_goal: Color::Rgb(0x50, 0xfa, 0x7b),       // green
+    mode_multitask: Color::Rgb(0x50, 0xfa, 0x7b),  // green
+    mode_operate: Color::Rgb(0x8b, 0xe9, 0xfd),    // cyan
     status_ready: Color::Rgb(0x62, 0x72, 0xa4),    // comment
     status_working: Color::Rgb(0x8b, 0xe9, 0xfd),  // cyan
     status_warning: Color::Rgb(0xf1, 0xfa, 0x8c),  // yellow
@@ -437,7 +447,8 @@ pub const TERMINAL_UI_THEME: UiTheme = UiTheme {
     // so the mode indicator and warning chip don't collide on themes that
     // render both in the status row.
     mode_plan: Color::Magenta,
-    mode_goal: Color::Green,
+    mode_multitask: Color::Green,
+    mode_operate: Color::Cyan,
     // DarkGray gives "Ready" a low-contrast but still distinguishable hue
     // versus default body text (which is `Color::Reset` on this theme).
     status_ready: Color::DarkGray,
@@ -482,7 +493,8 @@ pub const GRUVBOX_DARK_UI_THEME: UiTheme = UiTheme {
     mode_agent: Color::Rgb(0x83, 0xa5, 0x98),      // blue
     mode_yolo: Color::Rgb(0xfb, 0x49, 0x34),       // red
     mode_plan: Color::Rgb(0xfe, 0x80, 0x19),       // orange
-    mode_goal: Color::Rgb(0x8e, 0xc0, 0x7c),       // green
+    mode_multitask: Color::Rgb(0x8e, 0xc0, 0x7c),  // green
+    mode_operate: Color::Rgb(0xd3, 0x86, 0x9b),    // purple
     status_ready: Color::Rgb(0x92, 0x83, 0x74),    // gray
     status_working: Color::Rgb(0x8e, 0xc0, 0x7c),  // aqua
     status_warning: Color::Rgb(0xfa, 0xbd, 0x2f),  // yellow
@@ -528,10 +540,11 @@ pub const CLAUDE_UI_THEME: UiTheme = UiTheme {
     success: Color::Rgb(0x5d, 0xb8, 0x72), // green
     info: Color::Rgb(0x5d, 0xb8, 0xa6),    // teal
     // Mode badges
-    mode_agent: Color::Rgb(0xcc, 0x78, 0x5c), // coral
-    mode_yolo: Color::Rgb(0xc6, 0x45, 0x45),  // red
-    mode_plan: Color::Rgb(0xe8, 0xa5, 0x5a),  // amber
-    mode_goal: Color::Rgb(0x5d, 0xb8, 0x72),  // green
+    mode_agent: Color::Rgb(0xcc, 0x78, 0x5c),     // coral
+    mode_yolo: Color::Rgb(0xc6, 0x45, 0x45),      // red
+    mode_plan: Color::Rgb(0xe8, 0xa5, 0x5a),      // amber
+    mode_multitask: Color::Rgb(0x5d, 0xb8, 0x72), // green
+    mode_operate: Color::Rgb(0x8a, 0x63, 0xd2),   // violet
     // Footer statusline
     status_ready: Color::Rgb(0xa0, 0x9d, 0x96),
     status_working: Color::Rgb(0x5d, 0xb8, 0xa6),
@@ -633,7 +646,8 @@ pub const MATRIX_UI_THEME: UiTheme = UiTheme {
     mode_agent: Color::Rgb(0, 153, 0),
     mode_yolo: Color::Rgb(255, 100, 100),
     mode_plan: Color::Rgb(255, 170, 60),
-    mode_goal: Color::Rgb(170, 255, 170),
+    mode_multitask: Color::Rgb(170, 255, 170),
+    mode_operate: Color::Rgb(100, 255, 220),
     status_ready: Color::Rgb(0, 85, 0),
     status_working: Color::Rgb(
         MATRIX_TEXT_BODY_RGB.0,
@@ -884,4 +898,35 @@ pub fn hex_rgb_string(color: Color) -> Option<String> {
         return None;
     };
     Some(format!("#{r:02x}{g:02x}{b:02x}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Dogfood A7 (#4092): every mode must be tellable apart from the footer
+    /// badge alone — Operate must never wear the YOLO red again.
+    #[test]
+    fn every_selectable_theme_keeps_mode_badges_distinct() {
+        for theme_id in SELECTABLE_THEMES {
+            let ui = theme_id.ui_theme();
+            let badges = [
+                ("act", ui.mode_agent),
+                ("yolo", ui.mode_yolo),
+                ("plan", ui.mode_plan),
+                ("multitask", ui.mode_multitask),
+                ("operate", ui.mode_operate),
+            ];
+            for (i, (name_a, color_a)) in badges.iter().enumerate() {
+                for (name_b, color_b) in badges.iter().skip(i + 1) {
+                    assert_ne!(
+                        color_a,
+                        color_b,
+                        "theme '{}' renders modes '{name_a}' and '{name_b}' with the same badge color",
+                        theme_id.name(),
+                    );
+                }
+            }
+        }
+    }
 }
