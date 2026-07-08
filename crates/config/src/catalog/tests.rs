@@ -598,3 +598,66 @@ fn bundled_asset_pricing_is_honest() {
     assert_eq!(cost.input, Some(0.98));
     assert_eq!(cost.output, Some(3.08));
 }
+
+#[test]
+fn live_offerings_normalize_models_dev_provider_aliases() {
+    // Live Models.dev ids that must map onto CodeWhale kinds (#4186/#4187).
+    let raw = r#"{
+      "models": {},
+      "providers": {
+        "moonshotai": {
+          "id": "moonshotai",
+          "models": {
+            "kimi-k2.5": {
+              "id": "kimi-k2.5",
+              "modalities": { "input": ["text"], "output": ["text"] }
+            }
+          }
+        },
+        "togetherai": {
+          "id": "togetherai",
+          "models": {
+            "deepseek-ai/DeepSeek-V4-Pro": {
+              "id": "deepseek-ai/DeepSeek-V4-Pro",
+              "modalities": { "input": ["text"], "output": ["text"] }
+            }
+          }
+        },
+        "zhipuai": {
+          "id": "zhipuai",
+          "models": {
+            "glm-5.2": {
+              "id": "glm-5.2",
+              "modalities": { "input": ["text"], "output": ["text"] }
+            }
+          }
+        },
+        "brand-new-gateway": {
+          "id": "brand-new-gateway",
+          "models": {
+            "x-1": {
+              "id": "x-1",
+              "modalities": { "input": ["text"], "output": ["text"] }
+            }
+          }
+        }
+      }
+    }"#;
+    let catalog = ModelsDevCatalog::parse_json(raw).expect("fixture parses");
+    let rows = live_offerings_from_models_dev(&catalog, "fp-models-dev", 1_700);
+
+    assert_eq!(
+        find(&rows, "moonshot", "kimi-k2.5").source,
+        CatalogSource::Live {
+            base_url_fingerprint: "fp-models-dev".into(),
+            fetched_at: 1_700,
+        }
+    );
+    find(&rows, "together", "deepseek-ai/DeepSeek-V4-Pro");
+    find(&rows, "zai", "glm-5.2");
+    // Unknown upstream providers keep their Models.dev id.
+    find(&rows, "brand-new-gateway", "x-1");
+    assert!(rows.iter().all(|r| r.provider != "moonshotai"));
+    assert!(rows.iter().all(|r| r.provider != "togetherai"));
+    assert!(rows.iter().all(|r| r.provider != "zhipuai"));
+}

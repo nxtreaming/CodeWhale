@@ -186,14 +186,62 @@ pub fn bundled_catalog_offerings() -> Vec<CatalogOffering> {
 /// [`ModelsDevCatalog::provider_offerings`]). Each row is tagged
 /// [`CatalogSource::Bundled`]. No canonical model is inferred from a prefix; the
 /// canonical link is set only from an explicit `base_model`.
+///
+/// Provider ids are kept verbatim from the Models.dev payload (the committed
+/// bundled asset already uses CodeWhale ids). Live refresh normalizes aliases
+/// via [`live_offerings_from_models_dev`].
 #[must_use]
 pub fn bundled_offerings_from_models_dev(catalog: &ModelsDevCatalog) -> Vec<CatalogOffering> {
+    offerings_from_models_dev(catalog, CatalogSource::Bundled, false)
+}
+
+/// Hydrate live [`CatalogOffering`] rows from a fetched Models.dev catalog (#4187).
+///
+/// Same text-chat filter as [`bundled_offerings_from_models_dev`], but each row is
+/// tagged [`CatalogSource::Live`] with the Models.dev URL fingerprint and fetch
+/// timestamp. Provider keys are normalized onto CodeWhale [`crate::ProviderKind`]
+/// ids when an alias match exists (`moonshotai` → `moonshot`, `togetherai` →
+/// `together`, `zhipuai` → `zai`, …); unknown Models.dev providers keep their
+/// upstream id so they stay discoverable without becoming executable routes.
+#[must_use]
+pub fn live_offerings_from_models_dev(
+    catalog: &ModelsDevCatalog,
+    base_url_fingerprint: &str,
+    fetched_at: u64,
+) -> Vec<CatalogOffering> {
+    offerings_from_models_dev(
+        catalog,
+        CatalogSource::Live {
+            base_url_fingerprint: base_url_fingerprint.to_string(),
+            fetched_at,
+        },
+        true,
+    )
+}
+
+fn offerings_from_models_dev(
+    catalog: &ModelsDevCatalog,
+    source: CatalogSource,
+    normalize_provider_ids: bool,
+) -> Vec<CatalogOffering> {
     let mut out = Vec::new();
     for (provider_key, provider) in &catalog.providers {
-        let provider_id = if provider.id.trim().is_empty() {
-            provider_key.trim().to_string()
+        let raw_id = if provider.id.trim().is_empty() {
+            provider_key.trim()
         } else {
-            provider.id.trim().to_string()
+            provider.id.trim()
+        };
+        if raw_id.is_empty() {
+            continue;
+        }
+        let provider_id = if normalize_provider_ids {
+            // Normalize Models.dev provider ids onto CodeWhale kinds when known
+            // (#4186). Unknown upstream ids are kept verbatim for catalog browsing.
+            crate::ProviderKind::parse(raw_id)
+                .map(|kind| kind.as_str().to_string())
+                .unwrap_or_else(|| raw_id.to_string())
+        } else {
+            raw_id.to_string()
         };
         for model in provider.models.values() {
             if !model.supports_text_chat() {
@@ -211,7 +259,7 @@ pub fn bundled_offerings_from_models_dev(catalog: &ModelsDevCatalog) -> Vec<Cata
                 modalities: model.modalities.clone(),
                 reasoning: model.reasoning,
                 reasoning_options: model.reasoning_options.clone(),
-                source: CatalogSource::Bundled,
+                source: source.clone(),
             });
         }
     }

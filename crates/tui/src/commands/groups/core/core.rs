@@ -122,6 +122,11 @@ pub fn exit() -> CommandResult {
 /// way to flip both knobs without memorising the docs.
 pub fn model(app: &mut App, model_name: Option<&str>) -> CommandResult {
     if let Some(name) = model_name {
+        // Manual Models.dev catalog refresh (#4187). Dispatched async so the
+        // TUI event loop is not blocked; failure keeps prior/bundled rows.
+        if name.trim().eq_ignore_ascii_case("refresh") {
+            return CommandResult::action(AppAction::RefreshModelsDevCatalog);
+        }
         if name.trim().eq_ignore_ascii_case("auto") {
             let old_model = app.model_display_label();
             let model_changed = !app.auto_model || app.model != "auto";
@@ -1279,6 +1284,17 @@ mod tests {
         let result = models(&mut app);
         assert!(result.message.is_none());
         assert!(matches!(result.action, Some(AppAction::FetchModels)));
+    }
+
+    #[test]
+    fn model_refresh_dispatches_models_dev_catalog_action() {
+        let mut app = create_test_app();
+        let result = model(&mut app, Some("refresh"));
+        assert!(result.message.is_none());
+        assert!(matches!(
+            result.action,
+            Some(AppAction::RefreshModelsDevCatalog)
+        ));
     }
 
     #[test]

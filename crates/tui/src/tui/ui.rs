@@ -8089,6 +8089,34 @@ async fn apply_command_result(
                     }
                 }
             }
+            AppAction::RefreshModelsDevCatalog => {
+                app.status_message = Some("Refreshing Models.dev catalog...".to_string());
+                let message = match crate::models_dev_live::refresh(true).await {
+                    Ok(count) => {
+                        let status = crate::models_dev_live::status();
+                        let source = if status.source_label.is_empty() {
+                            "unknown"
+                        } else {
+                            status.source_label.as_str()
+                        };
+                        format!(
+                            "Models.dev catalog refreshed: {count} offerings ({:?}, source {source})",
+                            status.freshness
+                        )
+                    }
+                    Err(err) => {
+                        let status = crate::models_dev_live::status();
+                        format!(
+                            "Models.dev refresh failed ({err}); keeping prior/bundled rows ({} offerings, {:?})",
+                            status.offering_count, status.freshness
+                        )
+                    }
+                };
+                app.add_message(HistoryCell::System {
+                    content: message.clone(),
+                });
+                app.status_message = Some(message);
+            }
             AppAction::CacheWarmup => {
                 app.status_message = Some("Warming DeepSeek cache...".to_string());
                 match run_cache_warmup(app, config).await {

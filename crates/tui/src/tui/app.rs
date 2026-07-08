@@ -6217,6 +6217,8 @@ pub enum AppAction {
     },
     ListSubAgents,
     FetchModels,
+    /// Force a Models.dev live-catalog refresh into ProviderLake (#4187).
+    RefreshModelsDevCatalog,
     CacheWarmup,
     /// Switch the active LLM backend (DeepSeek vs NVIDIA NIM) without
     /// restarting the process. The runtime rebuilds its API client from
