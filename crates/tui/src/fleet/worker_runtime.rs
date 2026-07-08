@@ -118,9 +118,15 @@ pub fn fleet_task_to_worker_spec_with_profiles(
 ///
 /// Honesty rules:
 /// - `canonical_model` stays `None` when the resolver could not pin one.
-/// - The provider comes from the resolver default (the worker profile carries
-///   no provider authority); a task-level `model` selector is forwarded as the
-///   model selector. No reasoning/pricing fields are fabricated.
+/// - The provider comes from the resolved agent profile's own explicit
+///   `provider` field when it has one (#4093) — a Fleet worker profile can be
+///   pinned to a route independent of the parent/current session provider.
+///   Absent an explicit pin, the worker profile carries no provider authority
+///   and resolution falls back to the existing default scope. Either way, the
+///   provider is NEVER inferred by sniffing a substring/prefix out of `model`
+///   (EPIC #2608: explicit config only). A task-level `model` selector is
+///   forwarded as the model selector. No reasoning/pricing fields are
+///   fabricated.
 ///
 /// Returns `None` (never a fabricated route) when resolution fails, so callers
 /// degrade gracefully without inventing detail.
@@ -140,17 +146,17 @@ pub(crate) fn resolve_fleet_route(
 
     // Task/profile model pins are visible route intent; next the session
     // route (the operator's model) applies as the run-level fallback; only
-    // then does the resolver pick the provider default. Provider authority
-    // belongs to route resolution, so we do not infer a provider here.
+    // then does the resolver pick the provider default.
     let (model_selector, model_source) =
         fleet_route_model_selector_with_source(worker_profile, agent_profile, session_model);
     let model_selector = model_selector.as_deref();
 
-    // The worker profile carries no provider authority, so resolve within the
-    // default provider scope (mirrors `ProviderKind::default()`). The resolver
-    // is fully offline/hermetic and never reads secrets, env, or config.
-    let candidate =
-        resolve_route_candidate(ApiProvider::Deepseek, model_selector, None, None, None).ok()?;
+    // Resolve within the profile's own explicit provider scope when it has
+    // one (#4093); otherwise fall back to the existing default scope (mirrors
+    // `ProviderKind::default()`). The resolver is fully offline/hermetic and
+    // never reads secrets, env, or config.
+    let provider = effective_fleet_provider(agent_profile);
+    let candidate = resolve_route_candidate(provider, model_selector, None, None, None).ok()?;
 
     Some(FleetResolvedRoute {
         provider_id: candidate.provider_id.as_str().to_string(),
@@ -416,6 +422,21 @@ fn effective_fleet_model_with_source(
         return (model.to_string(), "agent_profile.model");
     }
     (run_model.to_string(), "run.model")
+}
+
+/// The provider this task's resolved route should use (#4093).
+///
+/// Only an explicit `provider` field on the resolved agent profile ever
+/// selects a provider here — EPIC #2608 forbids inferring one by sniffing a
+/// substring/prefix out of `model`. Absent an explicit pin (no profile, or a
+/// profile that never named a provider), the worker profile carries no
+/// provider authority and resolution falls back to the existing default
+/// scope, unchanged from prior behavior.
+fn effective_fleet_provider(agent_profile: Option<&AgentProfile>) -> ApiProvider {
+    agent_profile
+        .and_then(|profile| profile.profile.provider.as_deref())
+        .and_then(ApiProvider::parse)
+        .unwrap_or(ApiProvider::Deepseek)
 }
 
 fn task_model_class_with_source(
@@ -753,6 +774,7 @@ mod tests {
                 },
                 loadout,
                 model: None,
+                provider: None,
                 permissions: codewhale_config::FleetProfilePermissions::default(),
                 delegation: codewhale_config::FleetDelegationHints::default(),
             },
@@ -1194,6 +1216,129 @@ mod tests {
             .expect("pinned route should resolve");
         assert_eq!(pinned.model_source.as_deref(), Some("agent_profile.model"));
         assert_eq!(pinned.wire_model_id, "deepseek-v4-pro");
+    }
+
+    #[test]
+    fn resolve_fleet_route_honors_explicit_profile_provider_not_the_default() {
+        // EPIC #2608 / #4093: the resolved provider must come ONLY from the
+        // profile's explicit `provider` field — never inferred from a
+        // provider-shaped substring in `model`, and never the parent/session
+        // route's provider. `deepseek-v4-flash` is deliberately DeepSeek-shaped
+        // while the profile pins `openrouter`.
+        let mut profile = agent_profile(
+            "cross-provider",
+            "scout",
+            None,
+            codewhale_config::FleetLoadout::Inherit,
+        );
+        profile.profile.model = Some("deepseek-v4-flash".to_string());
+        profile.profile.provider = Some("openrouter".to_string());
+        let task = fleet_task(
+            "route-cross-provider",
+            Some(worker_profile(
+                Some("cross-provider"),
+                None,
+                None,
+                None,
+                None,
+                vec![],
+            )),
+        );
+
+        // The "parent"/session route is a completely different provider's
+        // model, proving the resolved route does not fall back to it.
+        let route = resolve_fleet_route(&task, &[profile], Some("deepseek-v4-pro"))
+            .expect("cross-provider profile route should resolve");
+
+        assert_eq!(route.model_source.as_deref(), Some("agent_profile.model"));
+
+        // Resolving `openrouter` directly with the same selector is the
+        // ground truth for what this route SHOULD produce — comparing
+        // against it (rather than hardcoding a wire id) proves the profile's
+        // provider actually drove resolution, whatever wire id/aggregator
+        // mapping the resolver's catalog assigns.
+        let openrouter_candidate = resolve_route_candidate(
+            ApiProvider::Openrouter,
+            Some("deepseek-v4-flash"),
+            None,
+            None,
+            None,
+        )
+        .expect("openrouter should resolve the pinned model directly");
+        assert_eq!(
+            route.wire_model_id,
+            openrouter_candidate.wire_model_id.as_str()
+        );
+        assert_eq!(route.provider_id, openrouter_candidate.provider_id.as_str());
+        assert_eq!(
+            route.provider_kind,
+            openrouter_candidate.provider_kind.as_str()
+        );
+        // Differs from DeepSeek — the pre-#4093 hardcoded default AND the
+        // parent/session's provider.
+        assert_ne!(route.provider_id, "deepseek");
+    }
+
+    #[test]
+    fn cross_provider_profile_saves_reloads_and_resolves_to_its_own_provider() {
+        // Required cross-provider save/load/launch coverage for #4093: create
+        // a Fleet profile whose provider differs from the parent/session
+        // provider, save it to a real TOML file, reload it from disk through
+        // the same loader Fleet uses, then resolve its route and confirm the
+        // resolved provider+model are the SAVED ones — never the parent's.
+        let draft = crate::fleet::profile::FleetProfileDraft {
+            id: "scout-openrouter".to_string(),
+            display_name: Some("Scout".to_string()),
+            description: Some("Cross-provider scout profile.".to_string()),
+            role_hint: "scout".to_string(),
+            model_class_hint: None,
+            model: Some("deepseek-v4-flash".to_string()),
+            provider: Some("openrouter".to_string()),
+            instructions: None,
+        };
+
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join(draft.file_name()), draft.render_toml()).unwrap();
+        let profiles = crate::fleet::profile::load_agent_profiles_from_dir(dir.path())
+            .expect("rendered profile TOML loads");
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].profile.provider.as_deref(), Some("openrouter"));
+        assert_eq!(
+            profiles[0].profile.model.as_deref(),
+            Some("deepseek-v4-flash")
+        );
+
+        let task = fleet_task(
+            "route-saved-profile",
+            Some(worker_profile(
+                Some("scout-openrouter"),
+                None,
+                None,
+                None,
+                None,
+                vec![],
+            )),
+        );
+
+        // "Parent"/session route: a different provider's model entirely, so a
+        // fallback to it would be an obvious, loud test failure.
+        let route = resolve_fleet_route(&task, &profiles, Some("deepseek-v4-pro"))
+            .expect("saved cross-provider profile route should resolve");
+
+        let openrouter_candidate = resolve_route_candidate(
+            ApiProvider::Openrouter,
+            Some("deepseek-v4-flash"),
+            None,
+            None,
+            None,
+        )
+        .expect("openrouter should resolve the saved model directly");
+        assert_eq!(
+            route.wire_model_id,
+            openrouter_candidate.wire_model_id.as_str()
+        );
+        assert_eq!(route.provider_id, openrouter_candidate.provider_id.as_str());
+        assert_ne!(route.provider_id, "deepseek");
     }
 
     #[test]

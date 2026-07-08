@@ -437,6 +437,7 @@ mod tests {
                 },
                 loadout: FleetLoadout::Inherit,
                 model: None,
+                provider: None,
                 permissions: FleetProfilePermissions::default(),
                 delegation: FleetDelegationHints::default(),
             },

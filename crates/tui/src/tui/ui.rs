@@ -5782,9 +5782,14 @@ async fn handle_fleet_profile_model_draft(
 }
 
 /// Install a completed fleet-profile draft into the wizard (if it is still on
-/// top) and open its preview, or surface a failure. Called from the event
-/// loop when the background draft lands, and directly on the pre-spawn
+/// top), or surface a failure. Called from the event loop when the
+/// background draft lands, and directly on the pre-spawn
 /// provider-construction failure.
+///
+/// The preview renders inline on the wizard's own Review step — deliberately
+/// NOT in a separate pager (#4093): a standalone pager view owns its own
+/// `g`/`G` scroll bindings and would swallow the ratify keypress, forcing an
+/// Esc-then-g round trip before the user could actually save.
 fn deliver_fleet_draft_result(
     app: &mut App,
     model_label: String,
@@ -5796,19 +5801,19 @@ fn deliver_fleet_draft_result(
             if app.view_stack.top_kind() == Some(ModalKind::FleetSetup)
                 && let Some(mut boxed) = app.view_stack.pop()
             {
-                let preview = boxed
+                let installed = boxed
                     .as_any_mut()
                     .downcast_mut::<crate::tui::views::fleet_setup::FleetSetupView>()
-                    .map(|wizard| wizard.install_model_draft(draft, model_label.clone()));
+                    .map(|wizard| wizard.install_model_draft(draft, model_label.clone()))
+                    .is_some();
                 app.view_stack.push_boxed(boxed);
-                if let Some((title, content)) = preview {
-                    open_text_pager(app, title, content);
+                if installed {
                     app.status_message = Some(match locale {
                         crate::localization::Locale::ZhHans => {
-                            format!("{model_label} 已起草配置。请查看 TOML，然后按 g 批准。")
+                            format!("{model_label} 已起草配置。请查看下方 TOML，然后按 g 批准。")
                         }
                         _ => format!(
-                            "{model_label} drafted the profile. Review the TOML, then press g to ratify."
+                            "{model_label} drafted the profile. Review the TOML below, then press g to ratify."
                         ),
                     });
                 }

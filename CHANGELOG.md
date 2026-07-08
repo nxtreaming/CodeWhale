@@ -39,6 +39,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fleet setup is a role/profile roster editor, not a provider-scoped model
+  picker: the Model step lists routes from every configured provider (not
+  only the active one), a picked route's provider is persisted explicitly in
+  the saved profile TOML (`provider = "..."`, never inferred from the model
+  id), and the loader/route resolver read that field back out verbatim. The
+  draft-preview ratify keypress no longer competes with a separate pager's
+  `g`/`G` scroll bindings — the exact TOML preview now renders inline on the
+  same Review step that ratifies it (#4093).
 - Workflow correctness: completion polling fails closed instead of
   fabricating success when a sub-agent reports no terminal status; cancel
   interrupts the JS VM (cancel handle + abort) and blocks further spawns;

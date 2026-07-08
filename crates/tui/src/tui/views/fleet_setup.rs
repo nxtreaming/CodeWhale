@@ -142,10 +142,13 @@ pub struct FleetSetupSnapshot {
     /// config / project), so the wizard can say when a chosen role would
     /// override an existing roster member.
     roster_members: Vec<(String, String)>,
-    /// `(provider display name, model id)` pairs selectable for a worker,
+    /// `(canonical provider id, model id)` pairs selectable for a worker,
     /// drawn from ALL configured providers — not only the active one (#4093).
     /// Shown after `inherit` in the Model step so a Fleet worker can be pinned
-    /// to a route independent of the parent/current provider.
+    /// to a route independent of the parent/current provider. The provider id
+    /// is the canonical [`crate::config::ApiProvider::as_str`] identifier
+    /// (e.g. `"deepseek"`), not a display label — see
+    /// [`cross_provider_model_routes`].
     available_models: Vec<(String, String)>,
 }
 
@@ -197,11 +200,17 @@ impl FleetSetupSnapshot {
     }
 }
 
-/// Build the `(provider display name, model id)` pairs selectable for a worker
+/// Build the `(canonical provider id, model id)` pairs selectable for a worker
 /// from EVERY configured provider — not only the active one (#4093). Fleet
 /// workers can be pinned to a route independent of the parent/current provider,
 /// so the Model step must offer the same cross-provider catalog the model
 /// picker does, instead of the active provider's models alone.
+///
+/// The provider id here is the canonical [`crate::config::ApiProvider::as_str`]
+/// identifier (e.g. `"deepseek"`), not a display label — this is the exact
+/// value persisted into the saved profile's `provider` field and read back by
+/// the loader (#4093), so it must round-trip through `ApiProvider::parse`.
+/// Callers derive a human-readable label from it for UI text.
 fn cross_provider_model_routes(
     config: &Config,
     active: crate::config::ApiProvider,
@@ -209,10 +218,20 @@ fn cross_provider_model_routes(
     let mut routes = Vec::new();
     for provider in crate::provider_lake::configured_providers(config, active) {
         for model in crate::provider_lake::models_for_provider(config, active, provider) {
-            routes.push((provider.display_name().to_string(), model));
+            routes.push((provider.as_str().to_string(), model));
         }
     }
     routes
+}
+
+/// Human-readable label for a canonical provider id, falling back to the raw
+/// id verbatim when it doesn't parse (defensive — every id this module hands
+/// out itself comes from [`crate::config::ApiProvider::as_str`], so this only
+/// matters for a foreign/stale id read back from an old snapshot).
+fn provider_display_label(provider_id: &str) -> String {
+    crate::config::ApiProvider::parse(provider_id)
+        .map(|provider| provider.display_name().to_string())
+        .unwrap_or_else(|| provider_id.to_string())
 }
 
 /// Which focused screen of the wizard is showing.
@@ -238,6 +257,14 @@ pub struct FleetSetupView {
     model_draft: Option<Box<crate::fleet::profile::FleetProfileDraft>>,
     /// Display label of the model that authored `model_draft`.
     model_draft_label: Option<String>,
+    /// Exact rendered TOML preview for `model_draft` (header comment + the
+    /// deterministic bytes ratifying would persist). Rendered inline on the
+    /// Review step — never in a separate pager (#4093): a standalone pager
+    /// view owns its own `g`/`G` scroll bindings, which silently swallowed
+    /// the ratify keypress and left users unable to save without first
+    /// pressing Esc. Keeping the preview and the ratify control in the same
+    /// view means the footer's `g`/Enter hints are never a lie.
+    model_draft_preview: Option<String>,
     /// Model-step rows: `inherit` followed by one row per concrete model from
     /// every configured provider (#4093).
     model_choices: Vec<Choice>,
@@ -259,13 +286,16 @@ impl FleetSetupView {
         // concrete (provider, model) drawn from all configured providers.
         let mut model_routes = vec![(snapshot.provider.clone(), snapshot.model.clone())];
         for (provider, model) in &snapshot.available_models {
+            let provider_label = provider_display_label(provider);
             model_choices.push(Choice {
                 label: Cow::Owned(model.clone()),
-                summary: Cow::Owned(format!("Pin this model ({provider})")),
+                summary: Cow::Owned(format!("Pin this model ({provider_label})")),
                 description: Cow::Owned(format!(
-                    "Route this worker to {model} on {provider} instead of inheriting the session route."
+                    "Route this worker to {model} on {provider_label} instead of inheriting the session route."
                 )),
             });
+            // Canonical provider id (not the display label above) — this is
+            // what gets persisted into the saved profile (#4093).
             model_routes.push((provider.clone(), model.clone()));
         }
         Self {
@@ -276,14 +306,16 @@ impl FleetSetupView {
             review_scroll: 0,
             model_draft: None,
             model_draft_label: None,
+            model_draft_preview: None,
             model_choices,
             model_routes,
         }
     }
 
-    /// Install a sanitized, bounded model draft and return the preview the
-    /// host must open in the same breath — that preview is the exact TOML the
-    /// ratify keypress would persist.
+    /// Install a sanitized, bounded model draft. The exact TOML preview
+    /// (returned here for the caller's status message) renders inline on the
+    /// Review step — not in a separate pager — so the footer's `g`/Enter
+    /// ratify hints stay true the instant the draft lands (#4093).
     pub fn install_model_draft(
         &mut self,
         draft: Box<crate::fleet::profile::FleetProfileDraft>,
@@ -308,6 +340,8 @@ impl FleetSetupView {
         let content = format!("{header}{}", draft.render_toml());
         self.model_draft = Some(draft);
         self.model_draft_label = Some(model_label);
+        self.model_draft_preview = Some(content.clone());
+        self.review_scroll = 0;
         (title, content)
     }
 
@@ -371,6 +405,7 @@ impl FleetSetupView {
     fn discard_model_draft(&mut self) {
         self.model_draft = None;
         self.model_draft_label = None;
+        self.model_draft_preview = None;
     }
 
     fn move_down(&mut self) {
@@ -420,42 +455,50 @@ impl FleetSetupView {
         }
     }
 
+    /// Preview the exact starter profile TOML the next ratify keypress would
+    /// persist. Renders inline within the Review step's own scrollable pane —
+    /// deliberately NOT via `ViewEvent::OpenTextPager` (#4093): a standalone
+    /// pager view has its own `g`/`G` scroll bindings and would swallow the
+    /// ratify keypress, forcing an Esc-then-g round trip to actually save.
     fn preview_starter_profile_action(&mut self) -> ViewAction {
         let draft = self.starter_profile_draft();
-        let (title, header) = match self.snapshot.locale {
-            crate::localization::Locale::ZhHans => (
-                "Fleet 配置 — 起始草案（Enter/g 批准）".to_string(),
-                format!(
-                    "# .codewhale/agents/{}\n# CodeWhale 根据当前角色和模型选择确定性渲染。\n# 权限保持在 Fleet 底线：无 shell、无 trust、需审批。\n# 在向导中按 Enter 或 g 之前不会保存任何内容。\n\n",
-                    draft.file_name()
-                ),
+        let header = match self.snapshot.locale {
+            crate::localization::Locale::ZhHans => format!(
+                "# .codewhale/agents/{}\n# CodeWhale 根据当前角色和模型选择确定性渲染。\n# 权限保持在 Fleet 底线：无 shell、无 trust、需审批。\n# 在向导中按 Enter 或 g 之前不会保存任何内容。\n\n",
+                draft.file_name()
             ),
-            _ => (
-                "Fleet profile — starter draft (Enter/g ratifies)".to_string(),
-                format!(
-                    "# .codewhale/agents/{}\n# Deterministic starter profile rendered by CodeWhale from your role/model choices.\n# Permissions stay at the fleet floor: no shell, no trust, approval required.\n# Nothing is saved until you press Enter or g in the wizard.\n\n",
-                    draft.file_name()
-                ),
+            _ => format!(
+                "# .codewhale/agents/{}\n# Deterministic starter profile rendered by CodeWhale from your role/model choices.\n# Permissions stay at the fleet floor: no shell, no trust, approval required.\n# Nothing is saved until you press Enter or g in the wizard.\n\n",
+                draft.file_name()
             ),
         };
-        let content = format!("{header}{}", draft.render_toml());
+        self.model_draft_preview = Some(format!("{header}{}", draft.render_toml()));
         self.model_draft = Some(draft);
         self.model_draft_label = Some("CodeWhale starter".to_string());
-        ViewAction::Emit(ViewEvent::OpenTextPager { title, content })
+        self.review_scroll = 0;
+        ViewAction::None
     }
 
     /// Build a deterministic starter profile for the current role/model
     /// selection. The same ratify event persists this as model-drafted profiles,
     /// so duplicate-id checks and atomic writes stay in one host path.
+    ///
+    /// `provider` is seeded from whatever the user actually picked in the
+    /// Model step (#4093) — a concrete route names its own provider
+    /// explicitly, so the saved profile is never ambiguously scoped to
+    /// whatever provider happens to be active at launch time. `inherit`
+    /// carries no provider, matching its `model: None`.
     fn starter_profile_draft(&self) -> Box<crate::fleet::profile::FleetProfileDraft> {
         let role = &ROLES[self.role_idx.min(ROLES.len() - 1)];
+        let route = self.selected_route();
         Box::new(crate::fleet::profile::FleetProfileDraft {
             id: profile_file_stem(&role.label),
             display_name: Some(role.label.to_string()),
             description: Some(format!("{} - {}", role.summary, role.description)),
             role_hint: role.label.to_string(),
             model_class_hint: None,
-            model: self.selected_model(),
+            model: route.as_ref().map(|(_, model)| model.clone()),
+            provider: route.map(|(provider, _)| provider),
             instructions: Some(format!(
                 "Role: {}. Work only within the assigned Fleet slice. Report concise evidence and stop when the assignment is complete. Do not widen permissions, trust, route configuration, or topology.",
                 role.label
@@ -519,7 +562,7 @@ impl ModalView for FleetSetupView {
             }
             KeyCode::Char('m') if self.step == Step::Review && self.snapshot.provider_ready => {
                 ViewAction::Emit(ViewEvent::FleetProfileModelDraftRequested {
-                    role: self.selected_role().to_string(),
+                    role: self.selected_role(),
                     model: self
                         .selected_model()
                         .unwrap_or_else(|| "inherit".to_string()),
@@ -649,6 +692,10 @@ impl FleetSetupView {
                 "Choose a model",
                 "Pick this worker's model, or inherit your current route.",
             ),
+            Step::Review if self.model_draft.is_some() => (
+                "Ratify the draft",
+                "Exact TOML shown below. Press Enter or g to ratify, m to redraft.",
+            ),
             Step::Review => (
                 "Review & start",
                 "Confirm the posture below, preview exact TOML, then ratify to save.",
@@ -670,6 +717,15 @@ impl FleetSetupView {
     }
 
     fn render_review(&self, area: Rect, buf: &mut Buffer) {
+        // A ratify-ready draft is on screen: show the exact TOML preview
+        // inline, scrolled by the same `review_scroll` state, so `g`/Enter in
+        // THIS view's own `handle_key` ratify it directly — no separate pager
+        // in the way to swallow the keypress (#4093).
+        if let Some(preview) = self.model_draft_preview.as_deref() {
+            render_scrollable_text(area, buf, preview, self.review_scroll);
+            return;
+        }
+
         let role = &ROLES[self.role_idx.min(ROLES.len() - 1)];
         let (profile_value, _) = profile_file_status(&self.snapshot.workspace);
         let file_stem = profile_file_stem(&role.label);
@@ -703,8 +759,13 @@ impl FleetSetupView {
         section(
             &mut lines,
             "Model",
-            match self.selected_model() {
-                Some(model) => format!("{model}  ·  provider {}", self.snapshot.provider),
+            // The picked route's OWN provider, not the parent/current
+            // session's — a cross-provider pin must never be misreported as
+            // running on the active provider (#4093).
+            match self.selected_route() {
+                Some((provider, model)) => {
+                    format!("{model}  ·  provider {}", provider_display_label(&provider))
+                }
                 None => format!(
                     "inherit  ·  route {} / {}, reasoning {}",
                     self.snapshot.provider, self.snapshot.model, self.snapshot.reasoning
@@ -772,6 +833,28 @@ impl FleetSetupView {
             .scroll((scroll as u16, 0))
             .render(area, buf);
     }
+}
+
+/// Render wrapped, line-scrolled plain text (the ratify-ready draft TOML
+/// preview) into `area`, clamping `scroll` to the real wrapped-row bound the
+/// same way [`FleetSetupView::render_review`]'s summary does — an
+/// over-estimate of wrapped height is harmless (scroll clamps at the end).
+fn render_scrollable_text(area: Rect, buf: &mut Buffer, text: &str, scroll: usize) {
+    let lines: Vec<Line> = text
+        .lines()
+        .map(|line| Line::from(line.to_string()))
+        .collect();
+    let wrap_width = usize::from(area.width).max(1);
+    let visual_rows: usize = lines
+        .iter()
+        .map(|line| line.width().div_ceil(wrap_width).max(1))
+        .sum();
+    let max_scroll = visual_rows.saturating_sub(usize::from(area.height).max(1));
+    let scroll = scroll.min(max_scroll);
+    Paragraph::new(lines)
+        .wrap(Wrap { trim: true })
+        .scroll((scroll as u16, 0))
+        .render(area, buf);
 }
 
 /// Render a wizard choice step: a list of selectable identifiers on the left and
@@ -1055,7 +1138,7 @@ mod tests {
     }
 
     #[test]
-    fn start_on_review_previews_and_ratifies_starter_profile_for_selection() {
+    fn start_on_review_previews_inline_and_ratifies_starter_profile_for_selection() {
         let mut view = FleetSetupView::from_snapshot(snapshot());
         // Role: manager(0) scout(1) builder(2) -> builder.
         view.handle_key(key(KeyCode::Down));
@@ -1065,27 +1148,35 @@ mod tests {
         view.handle_key(key(KeyCode::Down));
         view.handle_key(key(KeyCode::Enter)); // -> Review
 
+        // Start previews inline (#4093: no separate pager to steal the next
+        // ratify keypress) — the action stays `None` and the draft/preview
+        // land directly on this same view.
         let action = view.handle_key(key(KeyCode::Enter)); // Start
-        match action {
-            ViewAction::Emit(ViewEvent::OpenTextPager { title, content }) => {
-                assert!(title.contains("starter draft"));
-                assert!(content.contains("# .codewhale/agents/builder.toml"));
-                assert!(content.contains("id = \"builder\""));
-                assert!(content.contains("role_hint = \"builder\""));
-                assert!(content.contains("model = \"deepseek-v4-pro\""));
-                assert!(content.contains("Nothing is saved until"));
-                for forbidden in ["provider", "base_url", "api_key"] {
-                    assert!(
-                        !content.contains(forbidden),
-                        "starter profile must not carry {forbidden}: {content}"
-                    );
-                }
-            }
-            other => panic!("expected starter profile preview, got {other:?}"),
-        }
+        assert!(matches!(action, ViewAction::None));
         assert!(view.model_draft.is_some());
+        let content = view
+            .model_draft_preview
+            .as_deref()
+            .expect("preview installed inline");
+        assert!(content.contains("# .codewhale/agents/builder.toml"));
+        assert!(content.contains("id = \"builder\""));
+        assert!(content.contains("role_hint = \"builder\""));
+        assert!(content.contains("model = \"deepseek-v4-pro\""));
+        // A concrete cross-provider route pin names its own provider
+        // explicitly (#4093) — the saved profile must not be ambiguously
+        // scoped to whatever provider happens to be active at launch time.
+        assert!(content.contains("provider = \"deepseek\""), "{content}");
+        assert!(content.contains("Nothing is saved until"));
+        for forbidden in ["base_url", "api_key"] {
+            assert!(
+                !content.contains(forbidden),
+                "starter profile must not carry {forbidden}: {content}"
+            );
+        }
 
-        let action = view.handle_key(key(KeyCode::Enter)); // ratify previewed draft
+        // `g` ratifies directly from this same view — no Esc-then-g round
+        // trip through a separate pager required.
+        let action = view.handle_key(key(KeyCode::Char('g')));
         let ViewAction::EmitAndClose(ViewEvent::FleetProfileDraftCommitRequested { draft }) =
             action
         else {
@@ -1094,6 +1185,21 @@ mod tests {
         assert_eq!(draft.id, "builder");
         assert_eq!(draft.role_hint, "builder");
         assert_eq!(draft.model.as_deref(), Some("deepseek-v4-pro"));
+        assert_eq!(draft.provider.as_deref(), Some("deepseek"));
+    }
+
+    #[test]
+    fn inherit_selection_starter_draft_carries_no_provider() {
+        // `inherit` (no concrete route pin) must never carry a provider —
+        // there's no explicit route to name (#4093).
+        let mut view = FleetSetupView::from_snapshot(snapshot());
+        to_review(&mut view);
+        view.handle_key(key(KeyCode::Enter)); // Start -> preview inherit draft
+        let draft = view.model_draft.as_deref().expect("draft installed");
+        assert_eq!(draft.model, None);
+        assert_eq!(draft.provider, None);
+        let content = view.model_draft_preview.as_deref().unwrap();
+        assert!(!content.contains("provider"), "{content}");
     }
 
     #[test]
