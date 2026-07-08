@@ -10178,6 +10178,95 @@ fn ctrl_o_open_turn_inspector_pager_opens_turn_overview_not_single_cell() {
 }
 
 #[test]
+fn turn_handoff_markdown_renders_compact_sections_for_active_turn() {
+    // Same committed turn as the inspector test: prompt, a verifier command, a
+    // patch, and a final reply. The handoff must reuse that turn's scope +
+    // section data and render it as compact Markdown headings/bullets.
+    let mut app = create_test_app();
+    app.history = vec![
+        HistoryCell::User {
+            content: "Fix the flaky login test".to_string(),
+        },
+        HistoryCell::Tool(ToolCell::Exec(ExecCell {
+            command: "cargo test login".to_string(),
+            status: ToolStatus::Success,
+            output: Some("ok".to_string()),
+            live_output: None,
+            shell_task_id: None,
+            owner_agent_id: None,
+            owner_agent_name: None,
+            started_at: None,
+            duration_ms: Some(2400),
+            source: ExecSource::Assistant,
+            interaction: None,
+            output_summary: None,
+        })),
+        HistoryCell::Tool(ToolCell::PatchSummary(
+            crate::tui::history::PatchSummaryCell {
+                path: "src/login.rs".to_string(),
+                summary: "guard against empty token".to_string(),
+                status: ToolStatus::Success,
+                error: None,
+            },
+        )),
+        HistoryCell::Assistant {
+            content: "Fixed the race in the login test.".to_string(),
+            streaming: false,
+        },
+    ];
+    app.runtime_turn_id = Some("turn_abc123456789".to_string());
+    app.runtime_turn_status = Some("completed".to_string());
+
+    let md = turn_handoff_markdown(&app);
+
+    // Title carries the turn id.
+    assert!(md.contains("# Turn handoff — turn_abc123456789"), "{md}");
+    // Markdown section headings for the issue's required sections.
+    for heading in [
+        "## Intent",
+        "## Files changed",
+        "## Commands & tools",
+        "## Tests / verifier",
+        "## Model route + tokens/cost",
+        "## Result / status",
+    ] {
+        assert!(md.contains(heading), "missing heading {heading}: {md}");
+    }
+    // Populated content: intent, changed file, verifier command, route, result.
+    assert!(md.contains("Fix the flaky login test"), "{md}");
+    assert!(md.contains("- src/login.rs"), "changed file bullet: {md}");
+    assert!(md.contains("cargo test login"), "{md}");
+    assert!(md.contains("Route: DeepSeek"), "route missing: {md}");
+    assert!(
+        md.contains("Result: Fixed the race in the login test."),
+        "{md}"
+    );
+    assert!(md.contains("Status: completed"), "{md}");
+}
+
+#[test]
+fn turn_handoff_markdown_degrades_empty_sections_without_panic() {
+    // A minimal turn: only a user prompt. Empty sections must degrade to `—`
+    // (never a heading over a void), and the optional Plan section is omitted.
+    let mut app = create_test_app();
+    app.history = vec![HistoryCell::User {
+        content: "hello".to_string(),
+    }];
+    app.runtime_turn_status = Some("in_progress".to_string());
+
+    let md = turn_handoff_markdown(&app);
+
+    assert!(md.contains("## Files changed\n—"), "{md}");
+    assert!(md.contains("## Tests / verifier\n—"), "{md}");
+    // The optional plan section is dropped entirely when no plan ran.
+    assert!(!md.contains("## Plan / checklist"), "{md}");
+    // Intent still resolves; status reflects the live turn.
+    assert!(md.contains("## Intent\nhello"), "{md}");
+    assert!(md.contains("Status: in progress"), "{md}");
+    assert!(md.contains("Result: turn still running"), "{md}");
+}
+
+#[test]
 fn engine_error_finalizes_active_thinking_block() {
     use crate::error_taxonomy::StreamError;
 

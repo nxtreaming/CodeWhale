@@ -809,11 +809,14 @@ pub(super) fn open_turn_inspector_pager(app: &mut App) -> bool {
         .map(|area| area.width)
         .unwrap_or(80);
     let text = turn_inspector_text(app);
-    app.view_stack.push(PagerView::from_text(
-        "Turn Inspector",
-        &text,
-        width.saturating_sub(2),
-    ));
+    // Precompute the compact Markdown handoff (#4108) and attach it so the
+    // pager's `e` key can copy a pasteable artifact without reaching back into
+    // `app`. Reuses the same turn scope + section data as the overview above.
+    let handoff = turn_handoff_markdown(app);
+    app.view_stack.push(
+        PagerView::from_text("Turn Inspector", &text, width.saturating_sub(2))
+            .with_export_markdown(handoff),
+    );
     true
 }
 
@@ -894,6 +897,109 @@ pub(super) fn turn_inspector_text(app: &App) -> String {
     );
 
     out.join("\n")
+}
+
+/// Build a compact, pasteable Markdown handoff of the current/latest turn
+/// (issue #4108).
+///
+/// Reuses the exact same turn scope (`current_turn_range`) and the same
+/// per-section data helpers as the Turn Inspector (#4104), so the handoff can
+/// never drift from what Ctrl+O shows — it only re-renders that data as
+/// Markdown headings + bullets instead of the inspector's box-drawn rules.
+/// Unavailable sections degrade to a short `—` (and the optional Plan section
+/// is dropped entirely when empty) so the artifact stays paste-ready without
+/// leaving a heading over a blank void — the same graceful-degrade contract the
+/// inspector already follows.
+pub(crate) fn turn_handoff_markdown(app: &App) -> String {
+    let (start, end) = current_turn_range(app);
+    let mut out: Vec<String> = Vec::new();
+
+    // Title + identity — turn id when known, else the turn counter, else a
+    // bare heading so an empty transcript still yields a coherent artifact.
+    let heading = if let Some(turn_id) = app.runtime_turn_id.as_ref() {
+        format!("# Turn handoff — {}", truncate_line_to_width(turn_id, 48))
+    } else if app.turn_counter > 0 {
+        format!("# Turn handoff — Turn #{}", app.turn_counter)
+    } else {
+        "# Turn handoff".to_string()
+    };
+    out.push(heading);
+
+    let status = match app.runtime_turn_status.as_deref() {
+        Some("in_progress") => "in progress",
+        Some(other) => other,
+        None => "idle",
+    };
+    out.push(format!(
+        "_Status: {status} · generated {}_",
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+    ));
+
+    push_md_section(&mut out, "Intent", vec![turn_intent_line(app, start)]);
+
+    // Plan/checklist is optional context: include it only when a plan or todo
+    // list actually ran, to keep the handoff compact.
+    let plan = turn_plan_lines(app);
+    if !plan.is_empty() {
+        push_md_section(&mut out, "Plan / checklist", md_bullets(plan));
+    }
+
+    push_md_section(
+        &mut out,
+        "Files changed",
+        md_bullets(turn_files_changed(app, start, end)),
+    );
+    push_md_section(
+        &mut out,
+        "Commands & tools",
+        md_bullets(turn_tool_timeline(app, start, end)),
+    );
+    push_md_section(
+        &mut out,
+        "Tests / verifier",
+        md_bullets(turn_verifier_lines(app, start, end)),
+    );
+    push_md_section(
+        &mut out,
+        "Model route + tokens/cost",
+        md_bullets(turn_route_lines(app)),
+    );
+    push_md_section(
+        &mut out,
+        "Result / status",
+        md_bullets(turn_result_lines(app, start, end)),
+    );
+
+    // Trailing newline keeps the artifact clean when pasted into a PR body.
+    out.push(String::new());
+    out.join("\n")
+}
+
+/// Append a `## Title` Markdown section. An empty body degrades to a single
+/// `—` line so a heading is never followed by a void — the Markdown analogue
+/// of [`push_section`]'s `none` degrade.
+fn push_md_section(out: &mut Vec<String>, title: &str, body: Vec<String>) {
+    out.push(String::new());
+    out.push(format!("## {title}"));
+    if body.is_empty() {
+        out.push("—".to_string());
+    } else {
+        out.extend(body);
+    }
+}
+
+/// Convert Turn Inspector section lines into Markdown bullet rows. Inspector
+/// list helpers prefix rows with `• `; swap that for `- `, and bullet the
+/// key/value rows (route, tokens, status) too so the whole section is valid
+/// Markdown.
+fn md_bullets(lines: Vec<String>) -> Vec<String> {
+    lines
+        .into_iter()
+        .map(|line| {
+            let body = line.strip_prefix("• ").unwrap_or(line.as_str());
+            format!("- {body}")
+        })
+        .collect()
 }
 
 /// Append a `── Title ──` section. An empty body degrades to a single
