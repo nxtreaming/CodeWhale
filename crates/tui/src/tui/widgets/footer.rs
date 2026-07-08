@@ -309,13 +309,16 @@ fn mode_style(app: &App) -> (&'static str, Color) {
         AppMode::Multitask => "multitask",
         AppMode::Operate => "operate",
     };
+    // Every mode gets its own badge color (dogfood A7): Operate previously
+    // borrowed the YOLO red (reads as "dangerous") and Multitask the Act
+    // blue (mode change was invisible in the footer).
     let color = match app.mode {
         AppMode::Agent => app.ui_theme.mode_agent,
         AppMode::Auto => app.ui_theme.mode_agent,
         AppMode::Yolo => app.ui_theme.mode_yolo,
         AppMode::Plan => app.ui_theme.mode_plan,
-        AppMode::Multitask => app.ui_theme.mode_agent,
-        AppMode::Operate => app.ui_theme.mode_yolo,
+        AppMode::Multitask => app.ui_theme.mode_multitask,
+        AppMode::Operate => app.ui_theme.mode_operate,
     };
     (label, color)
 }

@@ -57,7 +57,8 @@ pub const WHALE_DIFF_DELETED_BG_RGB: (u8, u8, u8) = (42, 18, 26); // #2A121A
 pub const WHALE_MODE_AGENT_RGB: (u8, u8, u8) = (80, 150, 255); // #5096FF
 pub const WHALE_MODE_YOLO_RGB: (u8, u8, u8) = (255, 100, 100); // #FF6464
 pub const WHALE_MODE_PLAN_RGB: (u8, u8, u8) = (246, 196, 83); // #F6C453 Signal Gold
-pub const WHALE_MODE_GOAL_RGB: (u8, u8, u8) = (100, 220, 160); // #64DCA0
+pub const WHALE_MODE_MULTITASK_RGB: (u8, u8, u8) = (100, 220, 160); // #64DCA0
+pub const WHALE_MODE_OPERATE_RGB: (u8, u8, u8) = (178, 132, 255); // #B284FF
 pub const WHALE_TOOL_LIVE_RGB: (u8, u8, u8) = (140, 190, 238); // #8CBEEE
 pub const WHALE_TOOL_ISSUE_RGB: (u8, u8, u8) = (198, 150, 160); // #C696A0
 pub const WHALE_TOOL_OUTPUT_RGB: (u8, u8, u8) = (194, 208, 224); // #C2D0E0
@@ -486,10 +487,15 @@ pub const MODE_PLAN: Color = Color::Rgb(
     WHALE_MODE_PLAN_RGB.1,
     WHALE_MODE_PLAN_RGB.2,
 );
-pub const MODE_GOAL: Color = Color::Rgb(
-    WHALE_MODE_GOAL_RGB.0,
-    WHALE_MODE_GOAL_RGB.1,
-    WHALE_MODE_GOAL_RGB.2,
+pub const MODE_MULTITASK: Color = Color::Rgb(
+    WHALE_MODE_MULTITASK_RGB.0,
+    WHALE_MODE_MULTITASK_RGB.1,
+    WHALE_MODE_MULTITASK_RGB.2,
+);
+pub const MODE_OPERATE: Color = Color::Rgb(
+    WHALE_MODE_OPERATE_RGB.0,
+    WHALE_MODE_OPERATE_RGB.1,
+    WHALE_MODE_OPERATE_RGB.2,
 );
 
 pub const SELECTION_BG: Color = Color::Rgb(
