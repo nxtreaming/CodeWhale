@@ -347,19 +347,23 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_o_help_copy_matches_activity_detail_behavior() {
+    fn ctrl_o_help_copy_matches_turn_inspector_behavior() {
         let ctrl_o = KEYBINDINGS
             .iter()
             .find(|entry| entry.chord == "Ctrl+O")
             .expect("Ctrl+O keybinding should be documented");
 
+        // Ctrl+O now opens the whole-turn Turn Inspector (#4104), not the
+        // single-cell Activity Detail. The message id is intentionally kept
+        // (`KbThinkingPager`) to avoid an existing-symbol rename; only the
+        // copy changes.
         assert_eq!(
             ctrl_o.description_id,
             crate::localization::MessageId::KbThinkingPager
         );
         assert_eq!(
             crate::localization::tr(crate::localization::Locale::En, ctrl_o.description_id,),
-            "Open Activity Detail"
+            "Open Turn Inspector"
         );
     }
 

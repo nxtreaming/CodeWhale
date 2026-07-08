@@ -255,7 +255,7 @@
     "KbLastMessagePager": "Open pager for the last message (when input is empty)",
     "KbSelectedDetails": "Open details for the selected tool or message (when input is empty)",
     "KbToolDetailsPager": "Open tool-details pager",
-    "KbThinkingPager": "Open Activity Detail",
+    "KbThinkingPager": "Open Turn Inspector",
     "KbLiveTranscript": "Open live transcript overlay (Ctrl+Shift+T; sticky-tail auto-scroll)",
     "KbBacktrackMessage": "Backtrack to a previous user message (Left/Right step, Enter to rewind)",
     "KbCompleteCycleModes": "Complete /command, queue running-turn follow-up, cycle modes (Plan → Act → Multitask → Operate)",

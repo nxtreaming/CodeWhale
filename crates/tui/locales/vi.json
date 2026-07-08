@@ -255,7 +255,7 @@
     "KbLastMessagePager": "Mở trang xem cho tin nhắn cuối cùng (khi khung nhập trống)",
     "KbSelectedDetails": "Mở chi tiết cho công cụ hoặc tin nhắn được chọn (khi khung nhập trống)",
     "KbToolDetailsPager": "Mở trang xem chi tiết công cụ",
-    "KbThinkingPager": "Mở Chi Tiết Hoạt Động (Activity Detail)",
+    "KbThinkingPager": "Mở Trình kiểm tra lượt (Turn Inspector)",
     "KbLiveTranscript": "Mở lớp phủ bản ghi trực tiếp (tự động cuộn theo đuôi)",
     "KbBacktrackMessage": "Quay lại tin nhắn trước đó của người dùng (nhấn Trái/Phải để chuyển bước, Enter để lùi lại)",
     "KbCompleteCycleModes": "Hoàn thành /command, xếp hàng theo dõi lượt đang chạy, chuyển đổi chế độ; Shift+Tab để chuyển đổi mức độ suy luận",

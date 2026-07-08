@@ -255,7 +255,7 @@
     "KbLastMessagePager": "Abrir paginador para el último mensaje (cuando la entrada está vacía)",
     "KbSelectedDetails": "Abrir detalles de la herramienta o mensaje seleccionado (cuando la entrada está vacía)",
     "KbToolDetailsPager": "Abrir paginador de detalles de la herramienta",
-    "KbThinkingPager": "Abrir paginador de razonamiento",
+    "KbThinkingPager": "Abrir Inspector de turno",
     "KbLiveTranscript": "Abrir superposición de transcripción en vivo (auto-scroll)",
     "KbBacktrackMessage": "Retroceder al mensaje anterior del usuario (izquierda/derecha, Enter para rebobinar)",
     "KbCompleteCycleModes": "Completar /command, encolar follow-up, ciclar modos; Shift+Tab cicla esfuerzo de razonamiento",

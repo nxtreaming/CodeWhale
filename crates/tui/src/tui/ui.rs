@@ -154,9 +154,14 @@ pub(crate) use self::activity_detail::{
     selected_detail_footer_label,
 };
 use self::activity_detail::{
-    copy_focused_cell, detail_target_cell_index, extract_reasoning_header,
-    open_activity_detail_pager, open_tool_details_pager,
+    copy_focused_cell, detail_target_cell_index, extract_reasoning_header, open_tool_details_pager,
+    open_turn_inspector_pager,
 };
+// Ctrl+O now opens the whole-turn Turn Inspector (#4104); the single-cell
+// Activity Detail pager is no longer bound to a key, so it is only referenced
+// from tests. (`v` raw leaf detail keeps using `open_tool_details_pager`.)
+#[cfg(test)]
+use self::activity_detail::open_activity_detail_pager;
 
 // === Constants ===
 
@@ -4449,7 +4454,7 @@ async fn run_event_loop(
                 KeyCode::Char('o')
                     if key.modifiers.contains(KeyModifiers::CONTROL)
                         && app.input.is_empty()
-                        && open_activity_detail_pager(app) =>
+                        && open_turn_inspector_pager(app) =>
                 {
                     continue;
                 }
@@ -12315,8 +12320,9 @@ fn open_pager_for_last_message(app: &mut App) -> bool {
     true
 }
 
-/// Compatibility wrapper for the old test name. The user-facing Ctrl+O
-/// surface is now Activity Detail, not a thinking-only pager.
+/// Compatibility wrapper for the old test name. Exercises the single-cell
+/// Activity Detail helper (still used by `v`-adjacent detail paths); the
+/// user-facing Ctrl+O surface is now the whole-turn Turn Inspector (#4104).
 #[cfg(test)]
 fn open_thinking_pager(app: &mut App) -> bool {
     open_activity_detail_pager(app)

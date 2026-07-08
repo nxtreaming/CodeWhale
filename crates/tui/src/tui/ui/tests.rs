@@ -7965,7 +7965,7 @@ fn detail_target_prefers_visible_tool_card() {
 
     assert_eq!(detail_target_cell_index(&app), Some(1));
     let expected = format!(
-        "{} Activity: find · {}",
+        "{} Turn Inspector · find · {}",
         crate::tui::key_shortcuts::activity_shortcut_label(),
         crate::tui::key_shortcuts::tool_details_shortcut_action_hint("raw details")
     );
@@ -7996,7 +7996,7 @@ fn activity_footer_hint_surfaces_visible_thinking_without_raw_tool_hint() {
 
     assert_eq!(
         selected_detail_footer_label(&app).as_deref(),
-        Some("Ctrl+O Activity: thinking")
+        Some("Ctrl+O Turn Inspector · thinking")
     );
 }
 
@@ -8020,7 +8020,7 @@ fn activity_footer_hint_uses_details_for_subagent_cards() {
     app.viewport.last_transcript_visible = 4;
 
     let expected = format!(
-        "{} Activity: sub-agent · {}",
+        "{} Turn Inspector · sub-agent · {}",
         crate::tui::key_shortcuts::activity_shortcut_label(),
         crate::tui::key_shortcuts::tool_details_shortcut_action_hint("details")
     );
@@ -10003,6 +10003,177 @@ fn activity_detail_fallback_uses_recent_meaningful_activity_without_full_tool_du
     assert!(
         !body.contains("line 10"),
         "middle of large raw output should not be dumped into Activity Detail: {body}"
+    );
+}
+
+#[test]
+fn turn_inspector_renders_overview_sections_for_active_turn() {
+    let mut app = create_test_app();
+    // A committed turn: user prompt, a tool call, a patch, and a final reply.
+    app.history = vec![
+        HistoryCell::User {
+            content: "Fix the flaky login test".to_string(),
+        },
+        HistoryCell::Tool(ToolCell::Exec(ExecCell {
+            command: "cargo test login".to_string(),
+            status: ToolStatus::Success,
+            output: Some("ok".to_string()),
+            live_output: None,
+            shell_task_id: None,
+            owner_agent_id: None,
+            owner_agent_name: None,
+            started_at: None,
+            duration_ms: Some(2400),
+            source: ExecSource::Assistant,
+            interaction: None,
+            output_summary: None,
+        })),
+        HistoryCell::Tool(ToolCell::PatchSummary(
+            crate::tui::history::PatchSummaryCell {
+                path: "src/login.rs".to_string(),
+                summary: "guard against empty token".to_string(),
+                status: ToolStatus::Success,
+                error: None,
+            },
+        )),
+        HistoryCell::Assistant {
+            content: "Fixed the race in the login test.".to_string(),
+            streaming: false,
+        },
+    ];
+    app.runtime_turn_id = Some("turn_abc123456789".to_string());
+    app.runtime_turn_status = Some("completed".to_string());
+
+    let body = turn_inspector_text(&app);
+
+    // Overview framing + Ctrl+O vs. v contract.
+    assert!(
+        body.contains("Turn: turn_abc123456789 (completed)"),
+        "{body}"
+    );
+    assert!(
+        body.contains("press v for the selected item's raw detail"),
+        "{body}"
+    );
+    // Section headers for all nine sections must be present.
+    for header in [
+        "── Intent ──",
+        "── Plan / checklist ──",
+        "── Tool timeline ──",
+        "── Files changed ──",
+        "── Diagnostics loop ──",
+        "── Tests / verifier ──",
+        "── Approvals / denials ──",
+        "── Model route + tokens/cost ──",
+        "── Final result / status ──",
+    ] {
+        assert!(body.contains(header), "missing section {header}: {body}");
+    }
+    // Intent + tool timeline + files + result are the must-have populated ones.
+    assert!(body.contains("Fix the flaky login test"), "{body}");
+    assert!(body.contains("cargo test login"), "{body}");
+    assert!(body.contains("2.4s"), "duration missing: {body}");
+    assert!(body.contains("src/login.rs"), "{body}");
+    assert!(
+        body.contains("cargo test login — done"),
+        "verifier section should surface the test run: {body}"
+    );
+    assert!(body.contains("Route: DeepSeek"), "route missing: {body}");
+    assert!(
+        body.contains("Result: Fixed the race in the login test."),
+        "{body}"
+    );
+    assert!(body.contains("Status: completed"), "{body}");
+}
+
+#[test]
+fn turn_inspector_degrades_empty_sections_without_panic() {
+    // A minimal turn: only a user prompt, nothing else has happened yet.
+    let mut app = create_test_app();
+    app.history = vec![HistoryCell::User {
+        content: "hello".to_string(),
+    }];
+    app.runtime_turn_status = Some("in_progress".to_string());
+
+    let body = turn_inspector_text(&app);
+
+    // Unavailable sections degrade to `none`, never a blank void.
+    assert!(body.contains("── Plan / checklist ──\nnone"), "{body}");
+    assert!(body.contains("── Files changed ──\nnone"), "{body}");
+    assert!(body.contains("── Tests / verifier ──\nnone"), "{body}");
+    assert!(body.contains("── Approvals / denials ──\nnone"), "{body}");
+    // Intent still resolves from the prompt; status reflects the live turn.
+    assert!(body.contains("hello"), "{body}");
+    assert!(body.contains("Status: in progress"), "{body}");
+    assert!(body.contains("Result: turn still running"), "{body}");
+}
+
+#[test]
+fn turn_inspector_scopes_to_latest_turn_only() {
+    // Two turns in history: the inspector must scope to the second (latest).
+    let mut app = create_test_app();
+    app.history = vec![
+        HistoryCell::User {
+            content: "first turn prompt".to_string(),
+        },
+        HistoryCell::Assistant {
+            content: "first turn answer".to_string(),
+            streaming: false,
+        },
+        HistoryCell::User {
+            content: "second turn prompt".to_string(),
+        },
+        HistoryCell::Tool(ToolCell::Generic(GenericToolCell {
+            name: "read_file".to_string(),
+            status: ToolStatus::Success,
+            input_summary: Some("src/lib.rs".to_string()),
+            output: Some("done".to_string()),
+            prompts: None,
+            spillover_path: None,
+            output_summary: None,
+            is_diff: false,
+        })),
+    ];
+
+    let body = turn_inspector_text(&app);
+
+    assert!(body.contains("second turn prompt"), "intent scope: {body}");
+    assert!(
+        !body.contains("first turn prompt"),
+        "inspector leaked prior turn intent: {body}"
+    );
+}
+
+#[test]
+fn ctrl_o_open_turn_inspector_pager_opens_turn_overview_not_single_cell() {
+    // The Ctrl+O handler dispatches to open_turn_inspector_pager; assert that
+    // helper opens the turn overview rather than the single-cell detail.
+    let mut app = create_test_app();
+    app.history = vec![
+        HistoryCell::User {
+            content: "do the thing".to_string(),
+        },
+        HistoryCell::Tool(ToolCell::Generic(GenericToolCell {
+            name: "grep_files".to_string(),
+            status: ToolStatus::Success,
+            input_summary: Some("TODO".to_string()),
+            output: Some("summary".to_string()),
+            prompts: None,
+            spillover_path: None,
+            output_summary: None,
+            is_diff: false,
+        })),
+    ];
+
+    assert!(open_turn_inspector_pager(&mut app));
+    assert_eq!(app.view_stack.top_kind(), Some(ModalKind::Pager));
+    let body = pop_pager_body(&mut app);
+    // Turn overview markers present; NOT the single-cell "Activity:" body.
+    assert!(body.contains("── Tool timeline ──"), "{body}");
+    assert!(body.contains("do the thing"), "{body}");
+    assert!(
+        !body.contains("Activity chunk:"),
+        "Ctrl+O must open the turn overview, not the single-cell detail: {body}"
     );
 }
 

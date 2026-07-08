@@ -255,7 +255,7 @@
     "KbLastMessagePager": "最後のメッセージのページャーを開く（入力が空の時）",
     "KbSelectedDetails": "選択中のツールまたはメッセージの詳細を開く（入力が空の時）",
     "KbToolDetailsPager": "ツール詳細のページャーを開く",
-    "KbThinkingPager": "Activity Detail を開く",
+    "KbThinkingPager": "ターン インスペクターを開く",
     "KbLiveTranscript": "ライブ会話履歴オーバーレイを開く（自動追尾スクロール）",
     "KbBacktrackMessage": "前のユーザーメッセージに戻る（左右でステップ、Enter で巻き戻し）",
     "KbCompleteCycleModes": "/command を補完、実行中ターンのフォローアップをキュー、モードを切り替え；Shift+Tab で推論強度を切り替え",

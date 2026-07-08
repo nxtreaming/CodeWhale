@@ -255,7 +255,7 @@
     "KbLastMessagePager": "打开最后一条消息的分页器（输入框为空时）",
     "KbSelectedDetails": "打开选中工具或消息的详情（输入框为空时）",
     "KbToolDetailsPager": "打开工具详情分页器",
-    "KbThinkingPager": "打开 Activity Detail",
+    "KbThinkingPager": "打开回合检查器 (Turn Inspector)",
     "KbLiveTranscript": "打开实时对话覆盖层（自动滚动尾随）",
     "KbBacktrackMessage": "回退到之前的用户消息（左右键步进，Enter 回退）",
     "KbCompleteCycleModes": "补全 /command、排队运行轮次跟进、切换模式；Shift+Tab 切换推理强度",
