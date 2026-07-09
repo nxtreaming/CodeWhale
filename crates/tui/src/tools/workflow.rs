@@ -26,6 +26,7 @@ use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
+use crate::core::events::Event;
 use crate::tools::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec,
     optional_bool, optional_str, optional_u64,
@@ -487,7 +488,7 @@ async fn start_workflow(
             source.spec.as_ref(),
         );
         record.verify_on_complete = verify_on_complete;
-        record.events.push(WorkflowUiEvent::at(
+        let started = WorkflowUiEvent::at(
             record.started_at_ms,
             WorkflowUiEventKind::RunStarted {
                 workflow_id: record.workflow_id.clone(),
@@ -495,9 +496,23 @@ async fn start_workflow(
                 source_path: record.source_path.clone(),
                 token_budget: record.token_budget,
             },
-        ));
+        );
+        record.events.push(started.clone());
         runs_guard.insert(run_id.clone(), record.clone());
         state.record_snapshot(&record);
+        // #4122: emit RunStarted immediately so the panel + history card open
+        // before the first task/phase (including wait:false fire-and-forget).
+        if let Some(tx) = runtime.event_tx.as_ref() {
+            if let Ok(mut value) = serde_json::to_value(&started) {
+                if let Some(obj) = value.as_object_mut() {
+                    obj.insert("run_id".to_string(), json!(run_id));
+                }
+                let _ = tx.try_send(Event::WorkflowUi {
+                    run_id: run_id.clone(),
+                    event: value,
+                });
+            }
+        }
     }
 
     let driver = SubAgentWorkflowDriver::new(
@@ -671,15 +686,17 @@ async fn run_workflow_vm(
         .and_then(|mut guard| {
             let record = guard.get_mut(&run_id)?;
             if record.status != WorkflowRunStatus::Cancelled {
-                record
-                    .events
-                    .push(WorkflowUiEvent::new(budget_event_kind(final_budget)));
-                record
-                    .events
-                    .push(WorkflowUiEvent::new(WorkflowUiEventKind::RunCompleted {
-                        status: record.status,
-                        error: record.error.clone(),
-                    }));
+                let budget_event = WorkflowUiEvent::new(budget_event_kind(final_budget));
+                let completed = WorkflowUiEvent::new(WorkflowUiEventKind::RunCompleted {
+                    status: record.status,
+                    error: record.error.clone(),
+                });
+                record.events.push(budget_event.clone());
+                record.events.push(completed.clone());
+                // Live stream terminal events even when recorded outside the
+                // driver helper (completion path).
+                driver.emit_ui_event(&budget_event);
+                driver.emit_ui_event(&completed);
             }
             Some(record.clone())
         })
@@ -1315,6 +1332,26 @@ impl SubAgentWorkflowDriver {
         if recorded {
             self.state.record_event(&self.run_id, &event);
         }
+        // #4122: stream typed events live into the panel + history card.
+        self.emit_ui_event(&event);
+    }
+
+    /// Publish a flattened WorkflowUiEvent on the engine event bus so the TUI
+    /// can hydrate the panel while the tool is still running.
+    fn emit_ui_event(&self, event: &WorkflowUiEvent) {
+        let Some(tx) = self.runtime.event_tx.as_ref() else {
+            return;
+        };
+        let Ok(mut value) = serde_json::to_value(event) else {
+            return;
+        };
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert("run_id".to_string(), json!(self.run_id));
+        }
+        let _ = tx.try_send(Event::WorkflowUi {
+            run_id: self.run_id.clone(),
+            event: value,
+        });
     }
 
     fn record_budget_snapshot(&self, snapshot: BudgetSnapshot) {
@@ -1567,6 +1604,8 @@ impl WorkflowDriver for SubAgentWorkflowDriver {
         }
         self.state.record_progress(&self.run_id, &message);
         self.state.record_event(&self.run_id, &ui_event);
+        // #4122: phase/schema/log progress streams into the live panel path.
+        self.emit_ui_event(&ui_event);
     }
 }
 

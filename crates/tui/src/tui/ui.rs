@@ -118,7 +118,8 @@ use crate::tui::subagent_routing::{
 #[cfg(test)]
 use crate::tui::tool_routing::exploring_label;
 use crate::tui::tool_routing::{
-    handle_tool_call_complete, handle_tool_call_started, maybe_add_patch_preview,
+    apply_workflow_ui_event, handle_tool_call_complete, handle_tool_call_started,
+    maybe_add_patch_preview,
 };
 use crate::tui::ui_text::{history_cell_to_text, text_display_width};
 use crate::tui::user_input::UserInputView;
@@ -3278,6 +3279,11 @@ async fn run_event_loop(
                             // AgentProgress redraw throttle.
                             received_engine_event = redraw_requested_before_event;
                         }
+                    }
+                    EngineEvent::WorkflowUi { run_id, event } => {
+                        // #4122: live typed workflow events → panel + history card.
+                        apply_workflow_ui_event(app, &run_id, &event);
+                        transcript_batch_updated = true;
                     }
                     EngineEvent::ApprovalRequired {
                         id,
