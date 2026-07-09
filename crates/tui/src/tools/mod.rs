@@ -67,11 +67,6 @@ pub mod workflow_plan_approval;
 pub mod workflow_trigger;
 
 pub use registry::{AgentToolSurfaceOptions, ToolRegistry, ToolRegistryBuilder};
-// Soft-auto Workflow policy (#4127) — re-export so call sites (and clippy) see a live surface.
 pub use review::ReviewOutput;
 pub use spec::ToolContext;
 pub use user_input::UserInputResponse;
-pub use workflow_trigger::{
-    WorkflowTriggerDecision, WorkflowTriggerSignals, evaluate_workflow_trigger,
-    soft_auto_policy_is_linked,
-};
