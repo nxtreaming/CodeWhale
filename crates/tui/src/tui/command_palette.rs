@@ -686,6 +686,7 @@ fn visible_entry_window(
 }
 
 impl CommandPaletteView {
+    #[cfg(test)]
     pub fn new(entries: Vec<CommandPaletteEntry>) -> Self {
         Self::new_for_locale(Locale::En, entries)
     }
