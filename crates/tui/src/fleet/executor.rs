@@ -614,6 +614,48 @@ mod tests {
         );
     }
 
+    #[test]
+    fn worker_command_threads_custom_profile_provider_name() {
+        let mut task = task("format");
+        task.worker.as_mut().unwrap().agent_profile = Some("local".to_string());
+
+        let mut profile = agent_profile("local", "formatter", "Keep edits tight.");
+        profile.profile.provider = Some("lm-studio".to_string());
+        profile.profile.model = Some("qwen-2.5-7b".to_string());
+
+        let cmd = build_worker_exec_command_with_profiles(
+            "codewhale",
+            &task,
+            &FleetExecConfig::default(),
+            Some("deepseek-v4-pro"),
+            &[profile],
+        )
+        .unwrap();
+
+        let provider_idx = cmd
+            .args
+            .iter()
+            .position(|a| a == "--provider")
+            .expect("--provider must be threaded for a custom provider pin");
+        assert_eq!(
+            cmd.args.get(provider_idx + 1).map(String::as_str),
+            Some("lm-studio"),
+            "{:?}",
+            cmd.args
+        );
+        let model_idx = cmd
+            .args
+            .iter()
+            .position(|a| a == "--model")
+            .expect("--model must be present");
+        assert_eq!(
+            cmd.args.get(model_idx + 1).map(String::as_str),
+            Some("qwen-2.5-7b"),
+            "{:?}",
+            cmd.args
+        );
+    }
+
     /// A worker with no profile-bound provider preserves today's behavior: the
     /// run-level model on `--model`, and NO `--provider` (the worker keeps its
     /// own session default). Guards against regressing profile-less workers.

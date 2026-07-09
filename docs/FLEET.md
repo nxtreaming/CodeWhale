@@ -58,6 +58,10 @@ concrete model pins its provider explicitly: the saved profile records both
 whichever provider happens to be active when the profile is later loaded.
 Pressing **Enter** ("start") on the review step previews the exact starter
 profile TOML inline on that same screen; nothing is written until you ratify it.
+The `provider` field may be a built-in provider id such as `openrouter` or a
+user-named OpenAI-compatible provider configured under `[providers.<name>]`
+such as `lm-studio`; the launch path preserves that id and fails closed if the
+provider is not configured.
 
 When a provider is configured, the review step also offers model-assisted
 drafting behind a ratify gate:

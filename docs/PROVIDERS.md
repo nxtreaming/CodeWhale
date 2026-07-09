@@ -144,6 +144,10 @@ Instead, choose the closest shipped route and override its endpoint/model:
 - Generic OpenAI-compatible gateway: use `provider = "openai"` with
   `[providers.openai].base_url` plus `[providers.openai].model`, or launch with
   `OPENAI_BASE_URL` and `OPENAI_MODEL`.
+- Multiple named OpenAI-compatible gateways, or local routes you want to pin
+  from an AgentProfile, can use a custom table such as
+  `[providers.lm-studio] kind = "openai-compatible"` and select it with
+  `provider = "lm-studio"` or a profile `provider = "lm-studio"`.
 - Local OpenAI-compatible runtimes: use `provider = "vllm"`, `"sglang"`, or
   `"ollama"` with the matching provider-specific base URL/model values.
 

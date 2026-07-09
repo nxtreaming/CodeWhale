@@ -4791,6 +4791,17 @@ fn stub_client() -> DeepSeekClient {
 /// resolve each provider independently.
 fn cross_provider_config() -> crate::config::Config {
     let _ = rustls::crypto::ring::default_provider().install_default();
+    let mut custom = std::collections::HashMap::new();
+    custom.insert(
+        "lm-studio".to_string(),
+        crate::config::ProviderConfig {
+            kind: Some("openai-compatible".to_string()),
+            api_key: Some("lm-studio-key".to_string()),
+            base_url: Some("http://127.0.0.1:1234/v1".to_string()),
+            model: Some("qwen-2.5-7b".to_string()),
+            ..Default::default()
+        },
+    );
     let providers = crate::config::ProvidersConfig {
         deepseek: crate::config::ProviderConfig {
             api_key: Some("session-key".to_string()),
@@ -4802,6 +4813,7 @@ fn cross_provider_config() -> crate::config::Config {
             base_url: Some("https://pinned-provider.example.com/v1".to_string()),
             ..Default::default()
         },
+        custom,
         ..crate::config::ProvidersConfig::default()
     };
     crate::config::Config {
@@ -4871,6 +4883,30 @@ fn spawn_child_client_targets_profile_pinned_provider() {
             .contains("session-provider.example.com"),
         "child must NOT reuse the session provider's endpoint (the #4093 misroute)"
     );
+}
+
+#[test]
+fn spawn_child_client_targets_custom_profile_provider() {
+    // #3965: LM Studio and other user-named OpenAI-compatible providers live in
+    // `[providers.<name>]` tables. A profile pin must preserve that name so the
+    // child client resolves the custom table instead of rejecting it or
+    // silently inheriting the DeepSeek session client.
+    let runtime = cross_provider_runtime();
+    assert_eq!(
+        runtime.client.api_provider(),
+        crate::config::ApiProvider::Deepseek,
+        "precondition: session is on DeepSeek"
+    );
+
+    let member = member_pinning_provider("lm-studio", "qwen-2.5-7b");
+    let child_client = child_client_for_member(&runtime, Some(&member))
+        .expect("custom provider client builds from the named provider table");
+
+    assert_eq!(
+        child_client.api_provider(),
+        crate::config::ApiProvider::Custom
+    );
+    assert_eq!(child_client.base_url(), "http://127.0.0.1:1234/v1");
 }
 
 #[test]

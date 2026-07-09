@@ -653,6 +653,31 @@ fn resolve_exec_model(config: &Config, explicit_model: Option<&str>) -> String {
         .unwrap_or_else(|| config.default_model())
 }
 
+fn apply_exec_provider_override(config: &mut Config, provider_arg: &str) -> Result<()> {
+    let provider_arg = provider_arg.trim();
+    if provider_arg.is_empty() {
+        return Ok(());
+    }
+    if let Some(provider) = crate::config::ApiProvider::parse(provider_arg) {
+        config.provider = Some(provider.as_str().to_string());
+        return Ok(());
+    }
+    if config
+        .providers
+        .as_ref()
+        .and_then(|providers| providers.custom_provider_config(provider_arg))
+        .is_some()
+    {
+        config.provider = Some(provider_arg.to_string());
+        return Ok(());
+    }
+    bail!(
+        "Unrecognized --provider {provider_arg:?}. Known providers: {} \
+         or a configured [providers.<name>] custom provider",
+        crate::config::ApiProvider::names_hint()
+    );
+}
+
 fn exec_model_env_override() -> Option<String> {
     ["CODEWHALE_MODEL", "DEEPSEEK_MODEL"]
         .into_iter()
@@ -1283,13 +1308,7 @@ async fn main() -> Result<()> {
                     .map(str::trim)
                     .filter(|p| !p.is_empty())
                 {
-                    let Some(provider) = crate::config::ApiProvider::parse(provider_arg) else {
-                        bail!(
-                            "Unrecognized --provider {provider_arg:?}. Known providers: {}",
-                            crate::config::ApiProvider::names_hint()
-                        );
-                    };
-                    config.provider = Some(provider.as_str().to_string());
+                    apply_exec_provider_override(&mut config, provider_arg)?;
                 }
                 if let Some(reasoning_arg) = args
                     .reasoning_effort
@@ -9468,6 +9487,51 @@ mod terminal_mode_tests {
             crate::config::ApiProvider::parse(args.provider.as_deref().unwrap()),
             Some(crate::config::ApiProvider::Openrouter)
         );
+    }
+
+    #[test]
+    fn exec_provider_override_accepts_configured_custom_provider() {
+        let mut custom = std::collections::HashMap::new();
+        custom.insert(
+            "lm-studio".to_string(),
+            crate::config::ProviderConfig {
+                kind: Some("openai-compatible".to_string()),
+                base_url: Some("http://127.0.0.1:1234/v1".to_string()),
+                model: Some("qwen-2.5-7b".to_string()),
+                api_key: Some("lm-studio".to_string()),
+                ..Default::default()
+            },
+        );
+        let mut config = Config {
+            provider: Some("deepseek".to_string()),
+            providers: Some(crate::config::ProvidersConfig {
+                custom,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        apply_exec_provider_override(&mut config, "lm-studio")
+            .expect("configured custom provider should be accepted");
+
+        assert_eq!(config.provider.as_deref(), Some("lm-studio"));
+        assert_eq!(config.api_provider(), crate::config::ApiProvider::Custom);
+    }
+
+    #[test]
+    fn exec_provider_override_rejects_unknown_provider() {
+        let mut config = Config {
+            provider: Some("deepseek".to_string()),
+            ..Default::default()
+        };
+
+        let err = apply_exec_provider_override(&mut config, "lm-studio")
+            .expect_err("unconfigured custom provider should fail closed");
+        let message = err.to_string();
+
+        assert!(message.contains("Unrecognized --provider"));
+        assert!(message.contains("[providers.<name>] custom provider"));
+        assert_eq!(config.provider.as_deref(), Some("deepseek"));
     }
 
     #[test]

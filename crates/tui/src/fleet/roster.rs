@@ -412,13 +412,14 @@ mod tests {
     #[test]
     fn broken_workspace_dir_degrades_to_built_ins_and_config() {
         let tmp = TempDir::new().unwrap();
-        // An unrecognized provider id is still a load failure (#4093):
-        // `provider` is now a first-class field, but it's validated against
-        // the known `ApiProvider` vocabulary, not accepted as any string.
+        // A malformed provider token is still a load failure (#4093 / #3965):
+        // profile pins may name built-ins or simple custom ids like
+        // `lm-studio`, but whitespace/punctuation is rejected so a broken
+        // workspace dir still degrades to built-ins + config.
         write_workspace_profile(
             tmp.path(),
             "broken.toml",
-            "provider = \"not-a-real-provider\"\n",
+            "provider = \"not a real provider\"\n",
         );
         let config = config_with_profiles(BTreeMap::from([(
             "extra".to_string(),

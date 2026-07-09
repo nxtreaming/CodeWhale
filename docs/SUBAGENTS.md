@@ -331,6 +331,49 @@ OpenRouter, Novita, SiliconFlow, SGLang, vLLM) route between that pair;
 providers without a known cheap tier (e.g. Ollama, Moonshot) skip the
 network router and keep children on the session model.
 
+## Per-profile provider routes (#3965)
+
+`[subagents.models]` changes the child model within the active provider. To pin
+a child to a different provider, use a Fleet/AgentProfile and pass it to the
+model-facing `agent` tool with `profile`. The profile's explicit `provider` +
+`model` fields win over the parent session route; omitting `provider` preserves
+the existing inherit behavior.
+
+Example: keep the parent session on DeepSeek, but run a formatter child on a
+local LM Studio OpenAI-compatible endpoint:
+
+```toml
+# ~/.codewhale/config.toml or workspace config
+provider = "deepseek"
+
+[providers.deepseek]
+api_key = "YOUR_DEEPSEEK_KEY"
+
+[providers.lm-studio]
+kind = "openai-compatible"
+base_url = "http://127.0.0.1:1234/v1"
+api_key = "lm-studio"
+model = "qwen-2.5-7b"
+```
+
+```toml
+# .codewhale/agents/local-formatter.toml
+id = "local-formatter"
+role_hint = "formatter"
+provider = "lm-studio"
+model = "qwen-2.5-7b"
+reasoning_effort = "off"
+
+[instructions]
+text = "Use small, local edits. Keep formatting changes mechanical."
+```
+
+Then call `agent(profile: "local-formatter", prompt: "...")`. In-process
+children build a client for `lm-studio`; Fleet workers forward
+`--provider lm-studio` to `codewhale exec`, which resolves the same
+`[providers.lm-studio]` table. Unknown or unconfigured provider ids fail the
+spawn rather than silently falling back to the parent provider.
+
 ## Per-step API timeout (#1806, #1808)
 
 Each sub-agent step wraps its DeepSeek `create_message` call in a

@@ -283,15 +283,21 @@ fn validate_agent_profile_model_hint(path: &Path, value: Option<&str>) -> Result
     Ok(())
 }
 
-/// Validate an explicit `provider` field against the known `ApiProvider`
-/// vocabulary (#4093). This is the ONLY place a profile's provider is
-/// established — a name that doesn't parse is rejected outright rather than
-/// silently ignored or guessed from `model` (EPIC #2608: explicit config
-/// only, never a model-id prefix/substring sniff).
+/// Validate an explicit `provider` field as a safe provider id (#4093).
+///
+/// Built-in providers are accepted by the runtime vocabulary, and user-named
+/// OpenAI-compatible custom providers are accepted as simple tokens so the
+/// launch path can resolve `[providers.<id>]` from the session config (#3965).
+/// This field remains the ONLY place a profile's provider is established:
+/// callers never infer it from `model` (EPIC #2608).
 fn validate_agent_profile_provider(path: &Path, value: &str) -> Result<()> {
-    if crate::config::ApiProvider::parse(value).is_none() {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        bail!("agent profile {} provider cannot be empty", path.display());
+    }
+    if trimmed != value || !trimmed.chars().all(is_agent_profile_token_char) {
         bail!(
-            "agent profile {} provider {value:?} is not a recognized provider id",
+            "agent profile {} provider must be a simple provider id",
             path.display()
         );
     }
@@ -1015,17 +1021,36 @@ model = "deepseek/deepseek-v4-pro"
     }
 
     #[test]
-    fn agent_profile_loader_rejects_unrecognized_provider_name() {
-        // EPIC #2608 explicit-config-only mandate: an unrecognized provider
-        // name is rejected outright at load time — never silently ignored,
-        // and never guessed from `model`.
+    fn agent_profile_loader_accepts_custom_provider_name() {
+        // #3965: LM Studio and other user-named OpenAI-compatible providers
+        // are resolved from `[providers.<id>]` at launch time, so the profile
+        // loader must preserve the safe id instead of requiring a built-in.
         let tmp = TempDir::new().unwrap();
         write_profile(
             tmp.path(),
             "reviewer.toml",
             r#"
 name = "reviewer"
-provider = "not-a-real-provider"
+provider = "lm-studio"
+model = "qwen-2.5-7b"
+"#,
+        );
+
+        let profiles = load_agent_profiles_from_dir(tmp.path()).expect("profile loads");
+
+        assert_eq!(profiles[0].profile.provider.as_deref(), Some("lm-studio"));
+        assert_eq!(profiles[0].profile.model.as_deref(), Some("qwen-2.5-7b"));
+    }
+
+    #[test]
+    fn agent_profile_loader_rejects_malformed_provider_name() {
+        let tmp = TempDir::new().unwrap();
+        write_profile(
+            tmp.path(),
+            "reviewer.toml",
+            r#"
+name = "reviewer"
+provider = "lm studio"
 model = "some-model"
 "#,
         );
@@ -1035,7 +1060,7 @@ model = "some-model"
             .to_string();
 
         assert!(
-            err.contains("not a recognized provider"),
+            err.contains("provider must be a simple provider id"),
             "unexpected error: {err}"
         );
     }

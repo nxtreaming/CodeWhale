@@ -355,8 +355,9 @@ is reasoning-capable, while Preview is not marked as a thinking model.
 
 ### Custom OpenAI-Compatible Gateways
 
-For a third-party service that implements the OpenAI Chat Completions API, use
-the built-in `openai` provider name and point its provider table at the gateway:
+For a single third-party service that implements the OpenAI Chat Completions
+API, the simplest setup is the built-in `openai` provider name pointed at the
+gateway:
 
 ```toml
 provider = "openai"
@@ -367,12 +368,27 @@ api_key = "YOUR_OPENAI_COMPATIBLE_API_KEY"
 base_url = "https://your-gateway.example/v1"
 ```
 
-Do not invent a custom provider name; `provider` must be one of the known
-providers listed above. Put the endpoint under `[providers.openai]`, not the
-legacy top-level `base_url`, so the OpenAI-compatible provider receives it.
-`default_text_model` is the model ID sent to the gateway; if you keep several
-provider tables in one config, `[providers.openai].model` can be used as the
-OpenAI-provider-specific override.
+Put the endpoint under `[providers.openai]`, not the legacy top-level
+`base_url`, so the OpenAI-compatible provider receives it. `default_text_model`
+is the model ID sent to the gateway; `[providers.openai].model` can be used as
+the OpenAI-provider-specific override.
+
+If you keep several OpenAI-compatible gateways, or need a stable name for an
+AgentProfile provider pin, define a user-named custom provider table:
+
+```toml
+provider = "lm-studio"
+
+[providers.lm-studio]
+kind = "openai-compatible"
+base_url = "http://127.0.0.1:1234/v1"
+api_key = "lm-studio"
+model = "qwen-2.5-7b"
+```
+
+Custom provider names may be selected with `provider = "<name>"`,
+`--provider <name>`, or an AgentProfile `provider = "<name>"` when the matching
+`[providers.<name>]` table exists.
 
 StepFun has a first-class provider entry, so keep Coding Plan credentials and
 base URL scoped to `[providers.stepfun]`:
@@ -1362,7 +1378,10 @@ If you are upgrading from older releases:
   `explorer`, `general`, `explore`, `plan`, and `review`. Values are validated
   against the active provider at spawn time; direct DeepSeek requires DeepSeek
   IDs, while OpenAI-compatible/custom provider routes pass explicit model IDs
-  through to that provider.
+  through to that provider. To route a child to a different provider than the
+  parent session, save a Fleet/AgentProfile with explicit `provider` and
+  `model` fields (including user-named custom providers such as `lm-studio`)
+  and call `agent(profile: "...")`; see [SUBAGENTS.md](SUBAGENTS.md).
 - `skills_dir` (string, optional): defaults to `~/.codewhale/skills` (each skill is
   a directory containing `SKILL.md`). Workspace-local `.agents/skills` or
   `./skills` are preferred when present; the runtime also discovers global

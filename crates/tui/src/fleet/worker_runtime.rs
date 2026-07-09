@@ -75,8 +75,7 @@ pub fn fleet_task_to_worker_spec_with_profiles(
         &loadout,
         model_source,
     );
-    requested_runtime.provider =
-        explicit_fleet_provider(agent_profile).map(|provider| provider.as_str().to_string());
+    requested_runtime.provider = explicit_fleet_provider_id(agent_profile);
     requested_runtime.reasoning_effort = effective_fleet_reasoning_effort(agent_profile);
     if let Some(agent_profile) = agent_profile
         && let Some(profile_depth) = agent_profile.profile.delegation.max_spawn_depth
@@ -159,8 +158,13 @@ pub(crate) fn resolve_fleet_route(
     // Resolve within the profile's own explicit provider scope when it has
     // one (#4093); otherwise fall back to the existing default scope (mirrors
     // `ProviderKind::default()`). The resolver is fully offline/hermetic and
-    // never reads secrets, env, or config.
-    let provider = effective_fleet_provider(agent_profile);
+    // never reads secrets, env, or config. User-named custom providers need the
+    // session Config to resolve their table, so this receipt path omits the
+    // route instead of fabricating DeepSeek details for them (#3965).
+    let provider = match explicit_fleet_provider_id(agent_profile).as_deref() {
+        Some(provider_id) => ApiProvider::parse(provider_id)?,
+        None => ApiProvider::Deepseek,
+    };
     let candidate = resolve_route_candidate(provider, model_selector, None, None, None).ok()?;
 
     Some(FleetResolvedRoute {
@@ -427,33 +431,42 @@ fn effective_fleet_model_with_source(
     (run_model.to_string(), "run.model")
 }
 
-/// The provider this task's resolved route should use (#4093).
+/// The provider id a resolved agent profile EXPLICITLY pins, if any (#4093).
 ///
-/// Only an explicit `provider` field on the resolved agent profile ever
-/// selects a provider here — EPIC #2608 forbids inferring one by sniffing a
-/// substring/prefix out of `model`. Absent an explicit pin (no profile, or a
-/// profile that never named a provider), the worker profile carries no
-/// provider authority and resolution falls back to the existing default
-/// scope, unchanged from prior behavior.
-fn effective_fleet_provider(agent_profile: Option<&AgentProfile>) -> ApiProvider {
-    explicit_fleet_provider(agent_profile).unwrap_or(ApiProvider::Deepseek)
+/// This preserves user-named OpenAI-compatible custom providers such as
+/// `lm-studio` instead of collapsing them through [`ApiProvider`]. Runtime
+/// launch paths can set `Config.provider` to this exact id so the normal config
+/// resolver finds `[providers.<id>]` (#3965).
+///
+/// Returns `None` when no profile names a provider — never invents a DeepSeek
+/// default — so launch paths can omit `--provider` and leave profile-less
+/// workers on their own session default. EPIC #2608: never inferred from
+/// `model`.
+pub(crate) fn explicit_fleet_provider_id(agent_profile: Option<&AgentProfile>) -> Option<String> {
+    agent_profile
+        .and_then(|profile| profile.profile.provider.as_deref())
+        .map(str::trim)
+        .filter(|provider| !provider.is_empty())
+        .map(str::to_string)
 }
 
-/// The provider a resolved agent profile EXPLICITLY pins, if any (#4093).
+/// The built-in provider a resolved agent profile EXPLICITLY pins, if any (#4093).
 ///
-/// Unlike [`effective_fleet_provider`], this returns `None` (never the DeepSeek
-/// default) when no profile names a provider, so the launch path can leave
-/// `--provider` off the worker argv and preserve today's behavior for
-/// profile-less / provider-less workers (they resolve their provider from
-/// their own session default). EPIC #2608: never inferred from `model`.
+/// This returns `None` (never the DeepSeek default) when no profile names a
+/// provider, so call sites can leave `--provider` off the worker argv and
+/// preserve today's behavior for profile-less / provider-less workers (they
+/// resolve their provider from their own session default). EPIC #2608: never
+/// inferred from `model`.
 ///
 /// `pub(crate)` so the interactive-TUI in-process spawn path
 /// (`tools::subagent`) resolves the pinned provider from the SAME
 /// explicit-only source as the headless `codewhale exec` launch route (#4193),
-/// instead of re-deriving it and risking a second, divergent policy.
+/// instead of re-deriving it and risking a second, divergent policy. User-named
+/// custom providers intentionally return `None` here; launch paths that can
+/// carry strings should use [`explicit_fleet_provider_id`].
 pub(crate) fn explicit_fleet_provider(agent_profile: Option<&AgentProfile>) -> Option<ApiProvider> {
-    agent_profile
-        .and_then(|profile| profile.profile.provider.as_deref())
+    explicit_fleet_provider_id(agent_profile)
+        .as_deref()
         .and_then(ApiProvider::parse)
 }
 
@@ -488,18 +501,18 @@ pub(crate) fn fleet_worker_launch_reasoning_effort(
 /// This is the launch-side twin of [`resolve_fleet_route`] (the receipt): both
 /// read the worker's model from the same task/profile/run precedence
 /// ([`effective_fleet_model`]) and the provider from the same explicit-only
-/// source ([`explicit_fleet_provider`]), so a worker whose profile is pinned to
-/// provider B launches on provider B even when the parent session is on
+/// source ([`explicit_fleet_provider_id`]), so a worker whose profile is pinned
+/// to provider B launches on provider B even when the parent session is on
 /// provider A.
 ///
 /// - `model`: never empty in practice — falls back to `run_model` when neither
 ///   the task nor the profile pins a model, matching pre-#4093 dispatch.
-/// - `provider`: `Some(canonical_id)` ONLY when the resolved agent profile
+/// - `provider`: `Some(provider_id)` ONLY when the resolved agent profile
 ///   explicitly pins a provider. `None` means "no provider authority" — the
 ///   caller omits `--provider` and the worker keeps its own session default,
-///   preserving today's behavior for profile-less workers. The id is
-///   [`ApiProvider::as_str`], which round-trips through `ApiProvider::parse` on
-///   the worker's `--provider` flag.
+///   preserving today's behavior for profile-less workers. Built-ins use their
+///   canonical ids; user-named custom providers preserve the profile's id so
+///   `codewhale exec --provider <id>` can resolve `[providers.<id>]`.
 pub(crate) fn fleet_worker_launch_route(
     task_spec: &FleetTaskSpec,
     agent_profiles: &[AgentProfile],
@@ -510,8 +523,7 @@ pub(crate) fn fleet_worker_launch_route(
         .flatten();
     let worker_profile = task_spec.worker.as_ref();
     let model = effective_fleet_model(run_model, worker_profile, agent_profile);
-    let provider =
-        explicit_fleet_provider(agent_profile).map(|provider| provider.as_str().to_string());
+    let provider = explicit_fleet_provider_id(agent_profile);
     (model, provider)
 }
 
@@ -1429,6 +1441,36 @@ mod tests {
     }
 
     #[test]
+    fn resolve_fleet_route_omits_custom_provider_without_config_snapshot() {
+        let mut profile = agent_profile(
+            "local",
+            "scout",
+            None,
+            codewhale_config::FleetLoadout::Inherit,
+        );
+        profile.profile.model = Some("qwen-2.5-7b".to_string());
+        profile.profile.provider = Some("lm-studio".to_string());
+        let task = fleet_task(
+            "custom-receipt",
+            Some(worker_profile(
+                Some("local"),
+                None,
+                None,
+                None,
+                None,
+                vec![],
+            )),
+        );
+
+        let route = resolve_fleet_route(&task, &[profile], Some("deepseek-v4-pro"));
+
+        assert!(
+            route.is_none(),
+            "custom providers need the session Config snapshot; do not fabricate a DeepSeek receipt"
+        );
+    }
+
+    #[test]
     fn fleet_worker_launch_route_is_explicit_provider_only() {
         // The LAUNCH resolver (twin of the receipt) must emit a provider ONLY
         // when the profile explicitly pins one, and NEVER infer it from a
@@ -1465,6 +1507,34 @@ mod tests {
             fleet_worker_launch_reasoning_effort(&pinned_task, &pinned_profiles).as_deref(),
             Some("high")
         );
+
+        // 1b) User-named OpenAI-compatible providers are launchable too: keep
+        //     the exact provider id so `codewhale exec --provider lm-studio`
+        //     can resolve `[providers.lm-studio]` from config (#3965).
+        let mut custom = agent_profile(
+            "local",
+            "scout",
+            None,
+            codewhale_config::FleetLoadout::Inherit,
+        );
+        custom.profile.model = Some("qwen-2.5-7b".to_string());
+        custom.profile.provider = Some("lm-studio".to_string());
+        let custom_task = fleet_task(
+            "launch-custom",
+            Some(worker_profile(
+                Some("local"),
+                None,
+                None,
+                None,
+                None,
+                vec![],
+            )),
+        );
+        let custom_profiles = vec![custom];
+        let (model, provider) =
+            fleet_worker_launch_route(&custom_task, &custom_profiles, "deepseek-v4-pro");
+        assert_eq!(model, "qwen-2.5-7b");
+        assert_eq!(provider.as_deref(), Some("lm-studio"));
 
         // 2) A DeepSeek-shaped model with NO explicit provider must NOT infer a
         //    provider — provider stays None so the worker keeps its own session

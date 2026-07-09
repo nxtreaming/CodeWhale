@@ -168,6 +168,9 @@ impl HookSink for JsonlHookSink {
         file.write_all(b"\n")
             .await
             .context("failed to write hook event newline")?;
+        // Flush before drop so sequential emits (and tests that read the
+        // file immediately after) observe every completed line.
+        file.flush().await.context("failed to flush hook event")?;
         Ok(())
     }
 }

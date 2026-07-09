@@ -1598,21 +1598,20 @@ impl SubAgentRuntime {
         self
     }
 
-    /// Build an LLM client bound to `provider` from the threaded session
+    /// Build an LLM client bound to `provider_id` from the threaded session
     /// `Config` (#4193). Mirrors the proven per-provider client factory used by
     /// per-turn auto-routing (`model_routing`) and the engine's provider switch:
     /// clone the session config, override only its `provider`, and let
     /// [`DeepSeekClient::new`] re-resolve that provider's base URL + credentials
-    /// from config/env.
+    /// from config/env. `provider_id` may be a built-in provider id or a
+    /// user-named `[providers.<id>] kind="openai-compatible"` custom provider
+    /// such as `lm-studio` (#3965).
     ///
     /// Returns `Err` when no config was threaded in, or when the provider's
     /// credentials/base URL cannot be resolved. Callers MUST surface that error
     /// rather than fall back to the session client: a silent fallback would send
     /// the pinned model id to the session provider's endpoint (#4093).
-    fn client_for_provider(
-        &self,
-        provider: crate::config::ApiProvider,
-    ) -> Result<DeepSeekClient, String> {
+    fn client_for_provider_id(&self, provider_id: &str) -> Result<DeepSeekClient, String> {
         let Some(api_config) = self.api_config.as_ref() else {
             return Err(
                 "session Config was not threaded into this runtime; cannot build a \
@@ -1620,13 +1619,34 @@ impl SubAgentRuntime {
                     .to_string(),
             );
         };
+        let provider_id = provider_id.trim();
+        if provider_id.is_empty() {
+            return Err("provider pin was blank".to_string());
+        }
+        let built_in = crate::config::ApiProvider::parse(provider_id);
+        let custom = built_in.is_none()
+            && api_config
+                .providers
+                .as_ref()
+                .and_then(|providers| providers.custom_provider_config(provider_id))
+                .is_some();
+        if built_in.is_none() && !custom {
+            return Err(format!(
+                "provider '{provider_id}' is neither a built-in provider nor a configured \
+                 [providers.{provider_id}] custom provider"
+            ));
+        }
         let mut provider_config = (**api_config).clone();
         // EPIC #2608: the provider is taken verbatim from the profile pin
-        // (already parsed to a canonical `ApiProvider`), never inferred from the
-        // model id. Overriding only `provider` makes `Config::api_provider`,
+        // (built-in id or configured custom id), never inferred from the model
+        // id. Overriding only `provider` makes `Config::api_provider`,
         // `deepseek_base_url`, and `deepseek_api_key` all re-resolve for the
         // pinned provider.
-        provider_config.provider = Some(provider.as_str().to_string());
+        provider_config.provider = Some(
+            built_in
+                .map(|provider| provider.as_str().to_string())
+                .unwrap_or_else(|| provider_id.to_string()),
+        );
         DeepSeekClient::new(&provider_config).map_err(|err| err.to_string())
     }
 
@@ -4137,6 +4157,21 @@ async fn wait_result_payload(
     Ok(tool_result)
 }
 
+fn provider_pin_matches_session(runtime: &SubAgentRuntime, provider_id: &str) -> bool {
+    let provider_id = provider_id.trim();
+    let session_provider = runtime.client.api_provider();
+    if let Some(provider) = crate::config::ApiProvider::parse(provider_id) {
+        return provider == session_provider;
+    }
+    session_provider == crate::config::ApiProvider::Custom
+        && runtime
+            .api_config
+            .as_ref()
+            .and_then(|config| config.provider.as_deref())
+            .map(str::trim)
+            .is_some_and(|active| active == provider_id)
+}
+
 /// Resolve the LLM client a freshly spawned in-process child should run on,
 /// honoring a fleet roster member's explicit provider pin (#4193).
 ///
@@ -4158,14 +4193,14 @@ fn child_client_for_member(
     member: Option<&crate::fleet::profile::AgentProfile>,
 ) -> Result<DeepSeekClient, ToolError> {
     let session_provider = runtime.client.api_provider();
-    match crate::fleet::worker_runtime::explicit_fleet_provider(member) {
-        Some(pinned) if pinned != session_provider => {
-            runtime.client_for_provider(pinned).map_err(|err| {
+    match crate::fleet::worker_runtime::explicit_fleet_provider_id(member) {
+        Some(pinned_id) if !provider_pin_matches_session(runtime, &pinned_id) => {
+            runtime.client_for_provider_id(&pinned_id).map_err(|err| {
                 ToolError::execution_failed(format!(
                     "fleet profile pins provider '{}' but its client could not be built \
                      ({err}). Configure that provider's credentials/base URL, or drop the \
                      provider pin to inherit the session provider '{}'.",
-                    pinned.as_str(),
+                    pinned_id,
                     session_provider.as_str()
                 ))
             })
