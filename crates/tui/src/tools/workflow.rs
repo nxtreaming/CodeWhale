@@ -352,6 +352,7 @@ impl ToolSpec for WorkflowTool {
     fn description(&self) -> &'static str {
         concat!(
             "Start, run, inspect, or cancel a Workflow. Workflows execute deterministic JS with args, phase/log progress, and task(...) calls that dispatch real sub-agents through Fleet/sub-agent scheduling. ",
+            "Provide exactly one of script, source_path, or plan (structured planner JSON). ",
             "Use action=start for detached orchestration and action=status with run_id to inspect progress. Use action=run when the model needs the final result before continuing."
         )
     }
@@ -376,6 +377,10 @@ impl ToolSpec for WorkflowTool {
                 "source_path": {
                     "type": "string",
                     "description": "Path to a .workflow.js script inside the workspace. Use instead of script for checked-in workflows."
+                },
+                "plan": {
+                    "type": "object",
+                    "description": "Structured planner plan JSON (#4124). Alternative to script/source_path. Accepts goal, risk, max_children, token_budget, phases[], and/or children[] (or IR nodes). Lowered to Workflow JS with parallel() partial-success semantics."
                 },
                 "args": {
                     "description": "JSON value exposed to the script as args. Defaults to null."
@@ -748,13 +753,347 @@ fn workflow_source(input: &Value, context: &ToolContext) -> Result<WorkflowSourc
         .or_else(|| optional_str(input, "source"))
         .map(str::to_string);
     let source_path = optional_str(input, "source_path").or_else(|| optional_str(input, "path"));
-    match (script, source_path) {
-        (Some(source), None) if !source.trim().is_empty() => workflow_source_from_raw(source, None),
-        (None, Some(path)) => read_workflow_source_path(path, context),
-        (Some(_), Some(_)) => Err(ToolError::invalid_input(
-            "Use either script or source_path, not both",
-        )),
+    let plan = input.get("plan").filter(|value| !value.is_null());
+
+    let provided = [
+        script.as_ref().is_some_and(|s| !s.trim().is_empty()),
+        source_path.is_some(),
+        plan.is_some(),
+    ]
+    .into_iter()
+    .filter(|present| *present)
+    .count();
+    if provided > 1 {
+        return Err(ToolError::invalid_input(
+            "Use exactly one of script, source_path, or plan",
+        ));
+    }
+
+    match (script, source_path, plan) {
+        (Some(source), None, None) if !source.trim().is_empty() => {
+            workflow_source_from_raw(source, None)
+        }
+        (None, Some(path), None) => read_workflow_source_path(path, context),
+        (None, None, Some(plan_value)) => workflow_source_from_plan(plan_value),
         _ => Err(ToolError::missing_field("script")),
+    }
+}
+
+/// Planner-to-workflow structured launch path (#4124).
+///
+/// Accepts product-shaped plans (`goal` + `phases`/`children`) or IR-shaped
+/// plans (`goal` + `nodes`), validates them, and lowers to imperative JS that
+/// uses `parallel()` (partial success) rather than raw `Promise.all()`.
+fn workflow_source_from_plan(plan_value: &Value) -> Result<WorkflowSource, ToolError> {
+    let spec = structured_plan_to_workflow_spec(plan_value)?;
+    let lowered = lower_declarative_workflow_to_imperative_js(&spec)?;
+    Ok(WorkflowSource {
+        source: lowered,
+        path: None,
+        spec: Some(spec),
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct StructuredWorkflowPlan {
+    goal: String,
+    #[serde(default)]
+    risk: Option<String>,
+    #[serde(default)]
+    max_children: Option<usize>,
+    #[serde(default)]
+    token_budget: Option<u64>,
+    #[serde(default)]
+    phases: Vec<StructuredPlanPhase>,
+    #[serde(default)]
+    children: Vec<StructuredPlanChild>,
+    /// Escape hatch: full Workflow IR nodes (kind/spec or JS authoring shapes).
+    #[serde(default)]
+    nodes: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StructuredPlanPhase {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    parallel: Option<bool>,
+    #[serde(default)]
+    children: Vec<StructuredPlanChild>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StructuredPlanChild {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(alias = "description")]
+    prompt: String,
+    #[serde(default, alias = "type", alias = "agent_type")]
+    agent_type: Option<String>,
+    #[serde(default)]
+    profile: Option<String>,
+    #[serde(default)]
+    mode: Option<String>,
+}
+
+fn structured_plan_to_workflow_spec(plan_value: &Value) -> Result<WorkflowSpec, ToolError> {
+    if !plan_value.is_object() {
+        return Err(ToolError::invalid_input(
+            "Workflow plan must be a JSON object with goal and phases/children (or nodes)",
+        ));
+    }
+
+    let plan: StructuredWorkflowPlan =
+        serde_json::from_value(plan_value.clone()).map_err(|err| {
+            ToolError::invalid_input(format!("Invalid structured Workflow plan: {err}"))
+        })?;
+
+    let goal = plan.goal.trim();
+    if goal.is_empty() {
+        return Err(ToolError::invalid_input(
+            "Workflow plan goal must be a non-empty string",
+        ));
+    }
+
+    // IR / declarative nodes escape hatch: re-parse as workflow({...}) object.
+    if let Some(nodes) = plan.nodes.as_ref() {
+        if !nodes.is_array() {
+            return Err(ToolError::invalid_input(
+                "Workflow plan.nodes must be an array of workflow nodes",
+            ));
+        }
+        let mut object = plan_value.clone();
+        if let Some(obj) = object.as_object_mut() {
+            obj.insert("goal".to_string(), Value::String(goal.to_string()));
+            if let Some(token_budget) = plan.token_budget {
+                let mut budget = obj.get("budget").cloned().unwrap_or_else(|| json!({}));
+                if let Some(budget_obj) = budget.as_object_mut() {
+                    budget_obj.insert("max_tokens".to_string(), json!(token_budget));
+                }
+                obj.insert("budget".to_string(), budget);
+            }
+        }
+        let wrapped = format!("workflow({});", object);
+        return compile_javascript_workflow("<structured plan>", &wrapped).map_err(|err| {
+            ToolError::invalid_input(format!("Invalid structured Workflow plan nodes: {err}"))
+        });
+    }
+
+    let default_mode = plan_risk_to_mode(plan.risk.as_deref())?;
+    let mut nodes = Vec::new();
+
+    if !plan.phases.is_empty() {
+        for (phase_index, phase) in plan.phases.iter().enumerate() {
+            let phase_id = phase
+                .id
+                .as_deref()
+                .or(phase.title.as_deref())
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("phase-{}", phase_index + 1));
+            let children = plan_children_to_leaves(
+                &phase.children,
+                default_mode,
+                plan.token_budget,
+                &phase_id,
+            )?;
+            if children.is_empty() {
+                return Err(ToolError::invalid_input(format!(
+                    "Workflow plan phase '{phase_id}' must declare at least one child"
+                )));
+            }
+            let parallel = phase.parallel.unwrap_or(children.len() > 1);
+            if parallel && children.len() > 1 {
+                nodes.push(WorkflowNode::BranchSet(BranchSpec {
+                    id: phase_id,
+                    description: phase.title.clone(),
+                    parallel: true,
+                    budget: BudgetSpec {
+                        max_tokens: plan.token_budget,
+                        ..BudgetSpec::default()
+                    },
+                    permissions: Default::default(),
+                    model_policy: Default::default(),
+                    children: children.into_iter().map(WorkflowNode::Leaf).collect(),
+                }));
+            } else if children.len() == 1 {
+                nodes.push(WorkflowNode::Leaf(
+                    children.into_iter().next().expect("one child"),
+                ));
+            } else {
+                nodes.push(WorkflowNode::Sequence(SequenceSpec {
+                    id: phase_id,
+                    children: children.into_iter().map(WorkflowNode::Leaf).collect(),
+                }));
+            }
+        }
+    } else if !plan.children.is_empty() {
+        let children =
+            plan_children_to_leaves(&plan.children, default_mode, plan.token_budget, "plan")?;
+        if children.len() == 1 {
+            nodes.push(WorkflowNode::Leaf(
+                children.into_iter().next().expect("one child"),
+            ));
+        } else {
+            nodes.push(WorkflowNode::BranchSet(BranchSpec {
+                id: "plan".to_string(),
+                description: Some(goal.to_string()),
+                parallel: true,
+                budget: BudgetSpec {
+                    max_tokens: plan.token_budget,
+                    ..BudgetSpec::default()
+                },
+                permissions: Default::default(),
+                model_policy: Default::default(),
+                children: children.into_iter().map(WorkflowNode::Leaf).collect(),
+            }));
+        }
+    } else {
+        return Err(ToolError::invalid_input(
+            "Workflow plan must include phases, children, or nodes",
+        ));
+    }
+
+    let mut total_children = 0usize;
+    count_plan_leaves(&nodes, &mut total_children);
+    if let Some(max_children) = plan.max_children
+        && total_children > max_children
+    {
+        return Err(ToolError::invalid_input(format!(
+            "Workflow plan declares {total_children} children which exceeds max_children={max_children}"
+        )));
+    }
+
+    Ok(WorkflowSpec {
+        id: None,
+        goal: goal.to_string(),
+        description: plan.risk.clone(),
+        budget: BudgetSpec {
+            max_tokens: plan.token_budget,
+            ..BudgetSpec::default()
+        },
+        permissions: Default::default(),
+        model_policy: Default::default(),
+        promotion_policy: Default::default(),
+        nodes,
+    })
+}
+
+fn plan_risk_to_mode(risk: Option<&str>) -> Result<TaskMode, ToolError> {
+    match risk.map(str::trim).filter(|s| !s.is_empty()) {
+        None | Some("read_only") | Some("readonly") | Some("low") | Some("safe") => {
+            Ok(TaskMode::ReadOnly)
+        }
+        Some("writes") | Some("write") | Some("read_write") | Some("readwrite")
+        | Some("medium") => Ok(TaskMode::ReadWrite),
+        Some("elevated") | Some("high") | Some("shell") | Some("network") => {
+            // Elevated risk still launches as read_write; approval gates (#4126)
+            // consume the risk string via plan description.
+            Ok(TaskMode::ReadWrite)
+        }
+        Some(other) => Err(ToolError::invalid_input(format!(
+            "Invalid plan risk '{other}'. Use read_only, writes, or elevated."
+        ))),
+    }
+}
+
+fn plan_children_to_leaves(
+    children: &[StructuredPlanChild],
+    default_mode: TaskMode,
+    token_budget: Option<u64>,
+    phase_id: &str,
+) -> Result<Vec<LeafSpec>, ToolError> {
+    if children.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut leaves = Vec::with_capacity(children.len());
+    for (index, child) in children.iter().enumerate() {
+        let prompt = child.prompt.trim();
+        if prompt.is_empty() {
+            return Err(ToolError::invalid_input(format!(
+                "Workflow plan child {} in phase '{phase_id}' must have a non-empty prompt",
+                index + 1
+            )));
+        }
+        let id = child
+            .id
+            .as_deref()
+            .or(child.label.as_deref())
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("{phase_id}-child-{}", index + 1));
+        let agent_type = parse_plan_agent_type(child.agent_type.as_deref())?;
+        let mode = match child.mode.as_deref().map(str::trim) {
+            None | Some("") => default_mode,
+            Some("read_only") | Some("readonly") => TaskMode::ReadOnly,
+            Some("read_write") | Some("readwrite") | Some("writes") | Some("write") => {
+                TaskMode::ReadWrite
+            }
+            Some(other) => {
+                return Err(ToolError::invalid_input(format!(
+                    "Invalid plan child mode '{other}' on '{id}'. Use read_only or read_write."
+                )));
+            }
+        };
+        let profile = child
+            .profile
+            .as_deref()
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(|p| p.to_ascii_lowercase());
+        leaves.push(LeafSpec {
+            id,
+            prompt: prompt.to_string(),
+            agent_type,
+            profile,
+            mode,
+            isolation: Default::default(),
+            file_scope: Vec::new(),
+            depends_on_results: Vec::new(),
+            budget: BudgetSpec {
+                max_tokens: token_budget,
+                ..BudgetSpec::default()
+            },
+            permissions: Default::default(),
+            model_policy: Default::default(),
+        });
+    }
+    Ok(leaves)
+}
+
+fn parse_plan_agent_type(raw: Option<&str>) -> Result<AgentType, ToolError> {
+    match raw.map(str::trim).filter(|s| !s.is_empty()) {
+        None => Ok(AgentType::General),
+        Some("general") | Some("worker") | Some("delegate") => Ok(AgentType::General),
+        Some("explore") | Some("scout") => Ok(AgentType::Explore),
+        Some("plan") | Some("planner") => Ok(AgentType::Plan),
+        Some("review") | Some("reviewer") => Ok(AgentType::Review),
+        Some("implementer") | Some("builder") | Some("implement") => Ok(AgentType::Implementer),
+        Some("verifier") | Some("verify") => Ok(AgentType::Verifier),
+        Some(other) => Err(ToolError::invalid_input(format!(
+            "Invalid plan child type '{other}'. Use general, explore, plan, review, implementer, or verifier."
+        ))),
+    }
+}
+
+fn count_plan_leaves(nodes: &[WorkflowNode], total: &mut usize) {
+    for node in nodes {
+        match node {
+            WorkflowNode::Leaf(_) => *total += 1,
+            WorkflowNode::BranchSet(spec) => count_plan_leaves(&spec.children, total),
+            WorkflowNode::Sequence(spec) => count_plan_leaves(&spec.children, total),
+            WorkflowNode::Reduce(_)
+            | WorkflowNode::TeacherReview(_)
+            | WorkflowNode::LoopUntil(_)
+            | WorkflowNode::Cond(_)
+            | WorkflowNode::Expand(_) => {}
+        }
     }
 }
 
@@ -935,13 +1274,15 @@ impl DeclarativeWorkflowLowerer {
                 };
                 leaves.push(leaf);
             }
+            // #4124: use Workflow `parallel()` (all-settled / partial success)
+            // instead of raw Promise.all, which aborts siblings on first failure.
             let temp = self.next_temp("parallel");
-            self.line(format!("const {temp} = await Promise.all(["));
+            self.line(format!("const {temp} = await parallel(["));
             for leaf in &leaves {
                 // Parallel write-capable children default to worktree isolation
                 // (#4120) unless the plan explicitly sets isolation: shared.
                 self.line(format!(
-                    "  task({}),",
+                    "  () => task({}),",
                     leaf_task_options_expression(leaf, Some(&spec.id), /* parallel */ true)?
                 ));
             }
@@ -2543,7 +2884,168 @@ export default workflow({
             &ctx,
         )
         .unwrap_err();
-        assert!(err.to_string().contains("either script or source_path"));
+        assert!(
+            err.to_string()
+                .contains("exactly one of script, source_path, or plan"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn structured_plan_lowers_to_parallel_not_promise_all() {
+        // #4124: planner plan → JS with parallel() partial-success semantics.
+        let ctx = ToolContext::new(".");
+        let source = workflow_source(
+            &json!({
+                "plan": {
+                    "goal": "audit two independent scopes",
+                    "risk": "read_only",
+                    "max_children": 8,
+                    "token_budget": 120000,
+                    "phases": [{
+                        "id": "scout",
+                        "title": "Scout",
+                        "children": [
+                            {
+                                "id": "left",
+                                "label": "left-lane",
+                                "prompt": "Inspect crates/left",
+                                "type": "explore"
+                            },
+                            {
+                                "id": "right",
+                                "prompt": "Inspect crates/right",
+                                "type": "explore"
+                            }
+                        ]
+                    }]
+                }
+            }),
+            &ctx,
+        )
+        .expect("structured plan should lower");
+
+        assert!(
+            source.source.contains("await parallel(["),
+            "lowered JS must use parallel():\n{}",
+            source.source
+        );
+        assert!(
+            !source.source.contains("Promise.all"),
+            "lowered JS must not use raw Promise.all:\n{}",
+            source.source
+        );
+        assert!(
+            source.source.contains("() => task("),
+            "parallel slots should be thunks:\n{}",
+            source.source
+        );
+        let spec = source.spec.expect("plan should produce WorkflowSpec");
+        assert_eq!(spec.goal, "audit two independent scopes");
+        assert_eq!(spec.budget.max_tokens, Some(120000));
+        assert_eq!(spec.nodes.len(), 1);
+        let WorkflowNode::BranchSet(branch) = &spec.nodes[0] else {
+            panic!("expected parallel branch for multi-child phase");
+        };
+        assert!(branch.parallel);
+        assert_eq!(branch.children.len(), 2);
+    }
+
+    #[test]
+    fn structured_plan_validation_errors_are_typed() {
+        let ctx = ToolContext::new(".");
+        let missing_goal = workflow_source(
+            &json!({
+                "plan": {
+                    "goal": "   ",
+                    "children": [{ "prompt": "do work" }]
+                }
+            }),
+            &ctx,
+        )
+        .unwrap_err();
+        assert!(missing_goal.to_string().contains("goal"), "{missing_goal}");
+
+        let over_limit = workflow_source(
+            &json!({
+                "plan": {
+                    "goal": "too many children",
+                    "max_children": 1,
+                    "children": [
+                        { "id": "a", "prompt": "one" },
+                        { "id": "b", "prompt": "two" }
+                    ]
+                }
+            }),
+            &ctx,
+        )
+        .unwrap_err();
+        assert!(
+            over_limit.to_string().contains("max_children"),
+            "{over_limit}"
+        );
+
+        let bad_type = workflow_source(
+            &json!({
+                "plan": {
+                    "goal": "bad type",
+                    "children": [{ "prompt": "x", "type": "wizard" }]
+                }
+            }),
+            &ctx,
+        )
+        .unwrap_err();
+        assert!(
+            bad_type.to_string().contains("Invalid plan child type"),
+            "{bad_type}"
+        );
+
+        let exclusive = workflow_source(
+            &json!({
+                "script": "return 1;",
+                "plan": { "goal": "x", "children": [{ "prompt": "y" }] }
+            }),
+            &ctx,
+        )
+        .unwrap_err();
+        assert!(
+            exclusive
+                .to_string()
+                .contains("exactly one of script, source_path, or plan"),
+            "{exclusive}"
+        );
+    }
+
+    #[test]
+    fn declarative_parallel_branch_uses_parallel_helper() {
+        let source = r#"
+export default workflow({
+  "goal": "partial success fan-out",
+  "nodes": [
+    {
+      "branch": {
+        "id": "fan",
+        "parallel": true,
+        "children": [
+          { "agent": { "id": "a", "prompt": "A", "agent_type": "explore", "mode": "read_only" } },
+          { "agent": { "id": "b", "prompt": "B", "agent_type": "explore", "mode": "read_only" } }
+        ]
+      }
+    }
+  ]
+});
+"#;
+        let adapted = adapt_workflow_source(source, None).expect("lower declarative");
+        assert!(
+            adapted.source.contains("await parallel(["),
+            "declarative parallel must lower via parallel():\n{}",
+            adapted.source
+        );
+        assert!(
+            !adapted.source.contains("Promise.all"),
+            "must not emit raw Promise.all:\n{}",
+            adapted.source
+        );
     }
 
     #[test]
@@ -2753,12 +3255,15 @@ export default workflow({
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
-    async fn declarative_parallel_spawn_failure_fails_before_reduce() {
+    async fn declarative_parallel_spawn_failure_nulls_slot_and_continues() {
+        // #4124: parallel() is all-settled — a rejected spawn becomes a null slot
+        // (with a breadcrumb) instead of aborting the rest of the script the way
+        // raw Promise.all would. Downstream reduce still runs on partial results.
         let _retry_guard = workflow_test_retry_guard();
         let tmp = tempfile::tempdir().expect("tempdir");
         let ctx = ToolContext::new(tmp.path().to_path_buf());
         let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
-        let (client, calls) = fake_chat_client("should not be called").await;
+        let (client, calls) = fake_chat_client("reduce-with-partial").await;
         let runtime = SubAgentRuntime::new(
             client,
             "deepseek-v4-flash".to_string(),
@@ -2774,7 +3279,7 @@ export default workflow({
                 json!({
                     "action": "run",
                     "script": r#"export default workflow({
-                        "goal": "fail fast",
+                        "goal": "partial success fan-out",
                         "nodes": [
                             {
                                 "branch": {
@@ -2795,7 +3300,7 @@ export default workflow({
                                 "reduce": {
                                     "id": "summary",
                                     "inputs": ["bad-profile"],
-                                    "prompt": "This reduce must not run."
+                                    "prompt": "Summarize whatever survived the parallel fan-out."
                                 }
                             }
                         ]
@@ -2804,21 +3309,32 @@ export default workflow({
                 &ctx,
             )
             .await
-            .expect("failed workflow still returns run record");
+            .expect("partial-success workflow still returns run record");
         let payload: Value = serde_json::from_str(&result.content).expect("json result");
 
-        assert_eq!(payload["status"], "failed");
+        assert_eq!(payload["status"], "completed");
+        assert!(payload["error"].is_null());
         assert!(
-            payload["error"]
-                .as_str()
-                .unwrap()
-                .contains("Unknown profile 'missing-profile'"),
-            "{}",
-            payload["error"]
+            payload["result"]["bad-profile"].is_null(),
+            "failed parallel slot should be null: {}",
+            payload["result"]
         );
-        assert!(payload["result"].is_null());
-        assert_eq!(payload["execution"]["status"], "failed");
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(payload["result"]["summary"], "reduce-with-partial");
+        let progress = payload["progress"]
+            .as_array()
+            .expect("progress array")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            progress.contains("missing-profile") && progress.contains("dropped a failed slot"),
+            "breadcrumb should surface the spawn rejection:\n{progress}"
+        );
+        assert!(
+            calls.load(Ordering::SeqCst) >= 1,
+            "reduce should still run after a null parallel slot"
+        );
     }
 
     #[tokio::test]
