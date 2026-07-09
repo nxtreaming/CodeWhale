@@ -345,7 +345,7 @@ mod tests {
         assert!(
             result.content.contains("# Skill: from-opencode"),
             "body header missing: {}",
-            &result.content
+            result.content
         );
         assert!(result.content.contains("Body content marker."));
 

@@ -1526,13 +1526,14 @@ mod tests {
 
     /// Explicit animated baseline for env-force tests (#4095 flipped defaults to calm).
     fn animated_settings() -> Settings {
-        let mut s = Settings::default();
-        s.calm_mode = false;
-        s.low_motion = false;
-        s.fancy_animations = true;
-        s.show_tool_details = true;
-        s.transcript_spacing = "comfortable".to_string();
-        s
+        Settings {
+            calm_mode: false,
+            low_motion: false,
+            fancy_animations: true,
+            show_tool_details: true,
+            transcript_spacing: "comfortable".to_string(),
+            ..Settings::default()
+        }
     }
 
     #[test]

@@ -1148,7 +1148,7 @@ mod tests {
 
     #[test]
     fn ensure_filtered_reuses_unchanged_cells() {
-        let cells = vec![
+        let cells = [
             user_cell("hello"),
             assistant_cell("streaming", true),
             user_cell("again"),
