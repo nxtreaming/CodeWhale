@@ -34,6 +34,17 @@ The v0.8.68 maintenance lane started with post-release cleanup on `main`: runtim
 thread persistence, terminal selection, UTF-8 edit handling, README discovery,
 and dead-code removal landed alongside Cursor dogfood evidence for v0.8.67.
 
+- **[moduvoice](https://github.com/moduvoice)** — Korean (ko) UI locale with
+  full key parity and onboarding/setup wiring (PR #4347)
+- **[qinlinwang](https://github.com/qinlinwang)** — Anthropic tool-schema
+  sanitization for top-level oneOf/anyOf/allOf failures (PR #4346)
+- **[knqiufan](https://github.com/knqiufan)** — Anthropic cache-write token
+  pricing at published rates (PR #4348, #4318)
+- **[Chavdar Ivanov / ci4ic4](https://github.com/ci4ic4)** — NetBSD QuickJS
+  bindgen support for codewhale-workflow-js (PR #4349)
+- **[eugenicum](https://github.com/eugenicum)** — copy-paste rail-pollution
+  report with code-aware fix direction (#4208)
+
 - **[Jeffrey Luna / Mr-Moon121](https://github.com/Mr-Moon121)** — anti-polling
   constitution for sub-agent waiting (harvested into #4097 / PR #4229 from
   PR #4098)

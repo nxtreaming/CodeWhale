@@ -11,6 +11,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Replace the default TUI shell with the underwater interaction system: a
+  pre-session launch menu, a top-anchored transcript ledger with settled tool
+  receipts and one live row, phase-truthful header/footer fact ownership,
+  responsive compact/normal/wide tiers, rebuilt config/setup/sessions/help/
+  context/theme/model/Fleet rooms on one hairline grammar, distinct
+  ordinary vs repository-law approvals, and provider-unit streaming without
+  typewriter pacing or completion-time full clears.
+- Give every underwater treatment ambient life: flat and Terminal-owned keep
+  the idle fish and bubble (with a typed treatment setting replacing string
+  comparisons), reduced motion freezes them legibly, and typing scatters them
+  immediately.
+- Keep compact terminals operable: `/config` and `/resume` now collapse
+  secondary chrome before sacrificing their selectable rows at 40x12/60x16,
+  and footers budget for their real wrapped height.
+- Route footer notices through the classified toast system so informational
+  acknowledgements (for example "Auto-compaction enabled") expire instead of
+  becoming permanent idle chrome, while errors hold as sticky notices.
+- Complete the `CODEWHALE_ASCII_SAFE=1` decorative tier: the whale mark,
+  context meter, braille state markers, bubbles, rails, and role/lane glyphs
+  all narrow to semantic ASCII while language text passes through untouched.
+- Localization: raw key-parity gates now fail when a "complete" pack misses a
+  key the English fallback would hide; the two missing keybinding rows were
+  translated into ja, zh-Hans, es-419, pt-BR, and vi; the drifted Operate-mode
+  copy was retranslated everywhere; and the `/config` theme/locale hints and
+  invalid-locale error derive from the shipped registries.
+
+### Added
+
+- Korean (ko) UI locale with full 752-key parity and onboarding/setup wiring
+  (PR #4347 by @moduvoice).
+- Anthropic adapter: sanitize top-level `oneOf`/`anyOf`/`allOf` in tool input
+  schemas so affected tools no longer fail the whole request with HTTP 400
+  (PR #4346 by @qinlinwang).
+- Anthropic pricing: bill cache-write tokens at published rates
+  (PR #4348 by @knqiufan, #4318).
+- NetBSD: generate QuickJS bindings at build time so `codewhale-workflow-js`
+  compiles (PR #4349 by @ci4ic4).
+
+### Changed (pre-candidate 2026-07-10)
+
 - Make the advertised Android/Termux release target buildable by generating
   QuickJS bindings against the Android NDK instead of expecting an upstream
   pre-generated `aarch64-linux-android` binding file, and give Android CLI/TUI
