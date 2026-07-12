@@ -14,7 +14,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Widget},
+    widgets::{Block, Clear, Paragraph, Widget},
 };
 
 use codewhale_config::catalog::CatalogSource;
@@ -36,8 +36,7 @@ use crate::provider_lake::{
 };
 use crate::tui::app::{App, ReasoningEffort};
 use crate::tui::views::{
-    ActionHint, ListDetailLayout, ModalKind, ModalView, ViewAction, ViewEvent, centered_modal_area,
-    render_modal_footer, render_modal_surface,
+    ActionHint, ListDetailLayout, ModalKind, ModalView, ViewAction, ViewEvent, render_modal_footer,
 };
 
 /// Thinking-effort rows shown for DeepSeek-style providers, in the order
@@ -540,12 +539,7 @@ impl ModelPickerView {
         selected: usize,
         focused: bool,
     ) {
-        let border_style = if focused {
-            Style::default().fg(palette::WHALE_INFO)
-        } else {
-            Style::default().fg(palette::BORDER_COLOR)
-        };
-        let visible_height = usize::from(area.height.saturating_sub(2));
+        let visible_height = usize::from(area.height.saturating_sub(1));
         let (start, end) = visible_row_window(selected, rows.len(), visible_height);
         let title = if rows.len() > visible_height && visible_height > 0 {
             if start + 1 == end {
@@ -559,16 +553,32 @@ impl ModelPickerView {
         } else {
             format!(" {title} ")
         };
-        let block = Block::default()
-            .title(Line::from(Span::styled(
+        Block::default()
+            .style(Style::default().bg(palette::WHALE_BG))
+            .render(area, buf);
+        let title_area = Rect { height: 1, ..area };
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                if focused { "▸ " } else { "  " },
+                Style::default().fg(palette::WHALE_INFO),
+            ),
+            Span::styled(
                 title,
-                Style::default().fg(palette::TEXT_PRIMARY).bold(),
-            )))
-            .borders(Borders::ALL)
-            .border_style(border_style)
-            .style(Style::default());
-        let inner = block.inner(area);
-        block.render(area, buf);
+                Style::default()
+                    .fg(if focused {
+                        palette::WHALE_INFO
+                    } else {
+                        palette::TEXT_PRIMARY
+                    })
+                    .bold(),
+            ),
+        ]))
+        .render(title_area, buf);
+        let inner = Rect {
+            y: area.y.saturating_add(1),
+            height: area.height.saturating_sub(1),
+            ..area
+        };
 
         let mut lines = Vec::with_capacity(end.saturating_sub(start));
         for (idx, (label, hint)) in rows.iter().enumerate().skip(start).take(end - start) {
@@ -1420,37 +1430,16 @@ impl ModalView for ModelPickerView {
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer) {
-        self.render_classic(area, buf);
+        self.render_route(area, buf);
     }
 }
 
 impl ModelPickerView {
-    fn render_classic(&self, area: Rect, buf: &mut Buffer) {
-        let desired_height = (self.model_row_count().max(self.current_efforts().len()) as u16)
-            .saturating_add(4)
-            .clamp(10, 22);
-        let popup_area = centered_modal_area(area, 96, desired_height, 60, 10);
-
-        render_modal_surface(area, popup_area, buf);
-
-        // Outer chrome with title; the action footer moves into the body so it
-        // wraps instead of clipping at narrow widths (#3732).
-        let outer = Block::default()
-            .title(Line::from(Span::styled(
-                format!(
-                    " Model & thinking · {}{} ",
-                    self.view.title_label(),
-                    catalog_freshness_title_suffix()
-                ),
-                Style::default()
-                    .fg(palette::WHALE_INFO)
-                    .add_modifier(Modifier::BOLD),
-            )))
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(palette::BORDER_COLOR))
-            .style(Style::default().bg(palette::WHALE_BG));
-        let inner = outer.inner(popup_area);
-        outer.render(popup_area, buf);
+    fn render_route(&self, area: Rect, buf: &mut Buffer) {
+        Clear.render(area, buf);
+        Block::default()
+            .style(Style::default().bg(palette::WHALE_BG))
+            .render(area, buf);
 
         // Say what the action does in model language. Provider changes are an
         // implementation detail of applying a cross-provider model row.
@@ -1459,7 +1448,7 @@ impl ModelPickerView {
             other => other.next().title_label(),
         };
         let content = render_modal_footer(
-            inner,
+            area,
             buf,
             &[
                 ActionHint::new("↑↓", "move"),
@@ -1471,7 +1460,54 @@ impl ModelPickerView {
             ],
         );
 
-        let layout = ListDetailLayout::split(content, 24);
+        let shell = ratatui::layout::Layout::default()
+            .direction(ratatui::layout::Direction::Vertical)
+            .constraints([
+                ratatui::layout::Constraint::Length(3),
+                ratatui::layout::Constraint::Min(1),
+            ])
+            .split(content);
+        Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled(
+                    "─ route ",
+                    Style::default().fg(palette::WHALE_ACCENT_PRIMARY).bold(),
+                ),
+                Span::styled(
+                    "──────────────────────── ",
+                    Style::default().fg(palette::BORDER_COLOR),
+                ),
+                Span::styled(
+                    format!(
+                        "{}{}",
+                        self.view.title_label(),
+                        catalog_freshness_title_suffix()
+                    ),
+                    Style::default().fg(palette::TEXT_MUTED),
+                ),
+                Span::styled(
+                    " ─────────────────",
+                    Style::default().fg(palette::BORDER_COLOR),
+                ),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("  provider ", Style::default().fg(palette::WHALE_INFO)),
+                Span::styled(
+                    self.resolved_provider()
+                        .unwrap_or(self.initial_provider)
+                        .display_name(),
+                    Style::default().fg(palette::TEXT_PRIMARY),
+                ),
+                Span::styled(
+                    " · model-first atomic route",
+                    Style::default().fg(palette::TEXT_MUTED),
+                ),
+            ]),
+        ])
+        .render(shell[0], buf);
+
+        let layout = ListDetailLayout::split(shell[1], 24);
 
         let mut model_rows: Vec<(String, String)> = self
             .visible_model_rows()
@@ -3342,14 +3378,14 @@ mod tests {
         let (app, config, _lock) = create_test_app();
         let view = ModelPickerView::new(&app, &config);
 
-        // Three rows in a pane only tall enough to show one inner row (height 3
-        // leaves 1 row after the top/bottom border). The scrollable-title branch
+        // Three rows in a pane only tall enough to show one row (height 2
+        // leaves 1 row after the hairline title). The scrollable-title branch
         // must render a single position (`Model 2/3`), not a degenerate `2-2/3`
         // range (#3995).
         let rows: Vec<(String, String)> = (1..=3)
             .map(|n| (format!("model-{n}"), String::new()))
             .collect();
-        let area = Rect::new(0, 0, 40, 3);
+        let area = Rect::new(0, 0, 40, 2);
         let mut buf = Buffer::empty(area);
         view.render_pane(area, &mut buf, "Model", rows, 1, false);
 
@@ -3369,12 +3405,12 @@ mod tests {
         let (app, config, _lock) = create_test_app();
         let view = ModelPickerView::new(&app, &config);
 
-        // Four rows in a pane tall enough for two inner rows (height 4). The
+        // Four rows in a pane tall enough for two inner rows (height 3). The
         // visible window spans two rows, so the title keeps a real range.
         let rows: Vec<(String, String)> = (1..=4)
             .map(|n| (format!("model-{n}"), String::new()))
             .collect();
-        let area = Rect::new(0, 0, 40, 4);
+        let area = Rect::new(0, 0, 40, 3);
         let mut buf = Buffer::empty(area);
         view.render_pane(area, &mut buf, "Thinking", rows, 2, false);
 

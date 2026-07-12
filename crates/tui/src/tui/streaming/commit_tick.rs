@@ -14,22 +14,24 @@ use std::collections::VecDeque;
 use std::time::Duration;
 use std::time::Instant;
 
-use unicode_segmentation::UnicodeSegmentation;
-
 use super::chunking::AdaptiveChunkingPolicy;
 use super::chunking::ChunkingDecision;
 use super::chunking::DrainPlan;
 use super::chunking::QueueSnapshot;
 
-const GRAPHEMES_PER_MICRO_CHUNK: usize = 1;
-/// Buffers raw stream deltas and emits committed text in small display chunks.
+/// Buffers raw model deltas and emits them on display-clock commits.
+///
+/// A queue entry is one provider delta, not one grapheme. The previous path
+/// split every delta into one-grapheme `String` allocations and then drained
+/// the entire queue on the same beat. That preserved burstiness while paying
+/// maximum allocation and queue overhead.
 #[derive(Debug, Default)]
 pub struct StreamChunker {
     /// Bytes received but not yet split into display chunks. Normally empty;
     /// retained so `drain_remaining` has a lossless place to pull from if we
     /// ever decide to hold a tail for a future markdown-sensitive mode.
     pending: String,
-    /// Small grapheme-aligned chunks waiting to be flushed to the transcript.
+    /// Provider deltas waiting to be flushed to the transcript.
     queue: VecDeque<QueuedChunk>,
 }
 
@@ -49,22 +51,12 @@ impl StreamChunker {
         if delta.is_empty() {
             return false;
         }
-        self.pending.push_str(delta);
-
         let now = Instant::now();
-        let committed = std::mem::take(&mut self.pending);
-        let mut produced = false;
-        for chunk in split_into_micro_chunks(&committed) {
-            if chunk.is_empty() {
-                continue;
-            }
-            self.queue.push_back(QueuedChunk {
-                text: chunk,
-                enqueued_at: now,
-            });
-            produced = true;
-        }
-        produced
+        self.queue.push_back(QueuedChunk {
+            text: delta.to_string(),
+            enqueued_at: now,
+        });
+        true
     }
 
     /// Number of display chunks currently queued for commit.
@@ -166,31 +158,6 @@ pub fn run_commit_tick(
     }
 }
 
-/// Split text into grapheme-aligned chunks. Newlines force a boundary so
-/// markdown layout still settles quickly, but prose no longer waits for a full
-/// line before becoming visible.
-fn split_into_micro_chunks(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut current = String::new();
-    let mut graphemes = 0usize;
-
-    for grapheme in UnicodeSegmentation::graphemes(text, true) {
-        current.push_str(grapheme);
-        graphemes += 1;
-
-        if grapheme == "\n" || graphemes >= GRAPHEMES_PER_MICRO_CHUNK {
-            out.push(std::mem::take(&mut current));
-            graphemes = 0;
-        }
-    }
-
-    if !current.is_empty() {
-        out.push(current);
-    }
-
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,7 +239,7 @@ mod tests {
         let burst = "abcdefghijklmnopqrstuvwxyz".repeat(8);
         chunker.push_delta(&burst);
         let out = run_commit_tick(&mut policy, &mut chunker, now);
-        assert_eq!(out.decision.mode, ChunkingMode::CatchUp);
+        assert_eq!(out.decision.mode, ChunkingMode::Smooth);
         assert_eq!(out.committed_text, burst);
         assert!(out.is_idle);
     }

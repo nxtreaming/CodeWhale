@@ -711,6 +711,8 @@ pub enum ViewEvent {
     /// setup wizard for authoring or overriding a roster member. The roster
     /// view itself never writes anything.
     FleetRosterOpenSetupRequested,
+    /// Open the live workers tab from the unified Fleet surface.
+    FleetRosterOpenWorkersRequested,
     /// Emitted by the fleet setup Review step after the user previewed a
     /// model-drafted profile and pressed the explicit ratify key. The host
     /// renders TOML deterministically from the validated draft and persists
@@ -2563,19 +2565,13 @@ impl ModalView for SubAgentsView {
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer) {
-        use ratatui::{
-            layout::Alignment,
-            style::Style,
-            text::{Line, Span},
-            widgets::{Block, Borders, Padding, Paragraph, Widget},
-        };
-
-        let popup_area = centered_modal_area(area, 78, 20, 56, 12);
-
-        render_modal_surface(area, popup_area, buf);
+        Clear.render(area, buf);
+        Block::default()
+            .style(Style::default().bg(palette::WHALE_BG))
+            .render(area, buf);
 
         let mut lines: Vec<Line> = Vec::new();
-        let content_width = popup_area.width.saturating_sub(4) as usize;
+        let content_width = area.width.saturating_sub(4) as usize;
 
         if self.agents.is_empty() {
             lines.push(Line::from(Span::styled(
@@ -2700,51 +2696,55 @@ impl ModalView for SubAgentsView {
             );
         }
 
-        // Reserve one body row for the wrapping footer below.
-        let total_lines = lines.len();
-        let visible_lines = usize::from(popup_area.height).saturating_sub(5).max(1);
-        let max_scroll = total_lines.saturating_sub(visible_lines);
-        let scroll = self.scroll.min(max_scroll);
-
-        let scroll_indicator = if total_lines > visible_lines {
-            format!(" [{}/{} ↑↓] ", scroll + 1, max_scroll + 1)
-        } else {
-            String::new()
-        };
-
-        let block = Block::default()
-            .title(Line::from(vec![Span::styled(
-                " Fleet workers ",
-                Style::default().fg(palette::WHALE_ACCENT_PRIMARY).bold(),
-            )]))
-            .title_bottom(
-                Line::from(Span::styled(
-                    scroll_indicator,
-                    Style::default().fg(palette::WHALE_INFO),
-                ))
-                .alignment(Alignment::Right),
-            )
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(palette::BORDER_COLOR))
-            .style(Style::default().bg(palette::WHALE_BG))
-            .padding(Padding::uniform(1));
-
-        let inner = block.inner(popup_area);
-        block.render(popup_area, buf);
-
         let content = render_modal_footer(
-            inner,
+            area,
             buf,
             &[
                 ActionHint::new("Esc", "close"),
                 ActionHint::new("R", "refresh"),
-                ActionHint::new("F", "setup"),
+                ActionHint::new("F", "roster/setup"),
             ],
         );
+        let shell = ratatui::layout::Layout::default()
+            .direction(ratatui::layout::Direction::Vertical)
+            .constraints([
+                ratatui::layout::Constraint::Length(3),
+                ratatui::layout::Constraint::Min(1),
+            ])
+            .split(content);
+        Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled(
+                    "─ fleet ",
+                    Style::default().fg(palette::WHALE_ACCENT_PRIMARY).bold(),
+                ),
+                Span::styled(
+                    "──────────────────────── ",
+                    Style::default().fg(palette::BORDER_COLOR),
+                ),
+                Span::styled("roster  setup  ", Style::default().fg(palette::TEXT_MUTED)),
+                Span::styled("workers", Style::default().fg(palette::WHALE_INFO).bold()),
+                Span::styled(
+                    " ─────────────────",
+                    Style::default().fg(palette::BORDER_COLOR),
+                ),
+            ]),
+            Line::from(""),
+            Line::from(Span::styled(
+                "  live worker status · role · objective · model · elapsed",
+                Style::default().fg(palette::TEXT_MUTED),
+            )),
+        ])
+        .render(shell[0], buf);
+
+        let total_lines = lines.len();
+        let visible_lines = usize::from(shell[1].height).max(1);
+        let max_scroll = total_lines.saturating_sub(visible_lines);
+        let scroll = self.scroll.min(max_scroll);
 
         Paragraph::new(lines)
             .scroll((scroll as u16, 0))
-            .render(content, buf);
+            .render(shell[1], buf);
     }
 }
 

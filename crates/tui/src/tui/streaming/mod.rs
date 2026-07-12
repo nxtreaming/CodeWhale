@@ -1,10 +1,10 @@
 #![allow(dead_code)]
 
-//! Markdown stream collector for live micro-chunk rendering.
+//! Markdown stream collector for display-clock rendering.
 //!
 //! This module implements the pattern from codex-rs where:
-//! - Streaming text is split into small grapheme-aligned chunks
-//! - Commit ticks drip chunks into the transcript between provider deltas
+//! - Provider deltas are ingested without mutating the visible transcript
+//! - Commit ticks coalesce pending deltas into one visible update
 //! - Final content is emitted when the stream ends
 
 use ratatui::style::{Modifier, Style};
@@ -397,9 +397,8 @@ impl StreamingState {
         Self::default()
     }
 
-    /// Start a new text block. Assistant prose streams live in micro-chunks so
-    /// users can visually track the answer as it forms instead of waiting for
-    /// a newline-terminated line.
+    /// Start a new text block. Assistant prose is buffered until the next
+    /// display-clock beat so provider bursts produce one visible mutation.
     pub fn start_text(&mut self, index: usize, width: Option<usize>) {
         self.ensure_capacity(index);
         self.blocks[index] = Some(BlockState {

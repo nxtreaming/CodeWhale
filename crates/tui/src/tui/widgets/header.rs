@@ -26,10 +26,7 @@ const CONTEXT_SIGNAL_WIDTH: usize = 4;
 /// what long-time users remember.
 const STATUS_INDICATOR_FRAME_MS: u128 = 420;
 
-/// Whale-cycle frames: 🐳 builds up dots, then surfaces as 🐋. Restored from
-/// the original `deepseek_squiggle` in v0.8.30 (removed by commit
-/// `1a04659a9` "smoother TUI streaming"). The breaching whale is the
-/// punchline at the midpoint of each cycle.
+/// Frames retained only for the explicitly selected classic treatment.
 const STATUS_INDICATOR_WHALE_FRAMES: &[&str] = &[
     "🐳", "🐳.", "🐳..", "🐳...", "🐳..", "🐳.", "🐋", "🐋.", "🐋..", "🐋...", "🐋..", "🐋.",
 ];

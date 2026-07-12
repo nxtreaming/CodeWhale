@@ -75,6 +75,7 @@ pub mod transcript_cache;
 pub mod translation;
 pub mod ui;
 mod ui_text;
+pub mod underwater;
 pub mod user_input;
 pub mod views;
 pub mod vim_mode;

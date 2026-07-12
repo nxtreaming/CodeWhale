@@ -90,9 +90,14 @@ impl ChatWidget {
             .then(|| crate::tui::ocean::OceanRamp::for_theme(&app.ui_theme))
             .flatten();
         let ocean_elapsed_ms = app.ocean_started_at.elapsed().as_millis();
-        let ocean_animated =
-            !app.low_motion && app.fancy_animations && !app.attention_hold_active();
         let render_empty_state = should_render_empty_state(app);
+        // Ambient phase animation is an empty-water affordance. Once real
+        // transcript work exists, keep the field stable so model text and
+        // receipts do not compete with a full-viewport repaint.
+        let ocean_animated = render_empty_state
+            && !app.low_motion
+            && app.fancy_animations
+            && !app.attention_hold_active();
         let scroll_track = app.ui_theme.border;
         let scroll_thumb = app.ui_theme.status_working;
         let jump_border = app.ui_theme.border;
@@ -389,9 +394,20 @@ impl ChatWidget {
 
         apply_selection(&mut lines, top, app);
 
-        if app.viewport.transcript_scroll.is_at_tail() {
+        // The HTML contract is a top-first ledger. Bottom-padding the short
+        // transcript made every newly wrapped stream line shift all prior
+        // rows upward, producing repeated thousand-cell repaints and the
+        // visible "slab" motion recorded in live QA. Empty-state centering is
+        // handled separately; active work starts at the top and appends in
+        // place until scrolling is genuinely necessary. The old anchoring is
+        // retained only inside the explicitly selected classic treatment.
+        if app.ocean_treatment.eq_ignore_ascii_case("classic")
+            && app.viewport.transcript_scroll.is_at_tail()
+        {
             app.viewport.last_transcript_padding_top = visible_lines.saturating_sub(lines.len());
             pad_lines_to_bottom(&mut lines, visible_lines);
+        } else {
+            app.viewport.last_transcript_padding_top = 0;
         }
 
         let scrollbar = (total_lines > visible_lines && content_area.width > 1).then_some(
@@ -839,7 +855,9 @@ impl<'a> ComposerWidget<'a> {
 
     fn inner_area(&self, area: Rect) -> Rect {
         if self.has_panel(area) {
-            Block::default().borders(Borders::ALL).inner(area)
+            Block::default()
+                .borders(Borders::TOP | Borders::BOTTOM)
+                .inner(area)
         } else if area.height >= 2 {
             Block::default().borders(Borders::TOP).inner(area)
         } else {
@@ -923,11 +941,10 @@ impl Renderable for ComposerWidget<'_> {
                     ),
                 ]))
             } else if !self.slash_menu_entries.is_empty() {
-                Some(Line::from(vec![
-                    Span::styled(" Up/Down move  ", Style::default().fg(palette::TEXT_MUTED)),
-                    Span::styled("Tab accept  ", Style::default().fg(palette::TEXT_MUTED)),
-                    Span::styled("Esc close", Style::default().fg(palette::TEXT_MUTED)),
-                ]))
+                Some(Line::from(Span::styled(
+                    " enter:run · tab:complete · ↑↓:select · esc:keep typing ",
+                    Style::default().fg(self.app.ui_theme.text_hint),
+                )))
             } else if !input_text.trim().is_empty() {
                 // Live disambiguation for #345: when there's content in the
                 // composer, show what `Enter` will do RIGHT NOW so the user
@@ -982,7 +999,7 @@ impl Renderable for ComposerWidget<'_> {
             };
 
             let mut block = Block::default()
-                .borders(Borders::ALL)
+                .borders(Borders::TOP | Borders::BOTTOM)
                 .border_style(Style::default().fg(border_color))
                 .style(background);
             if self.app.is_history_search_active() || is_draft_mode {
@@ -1002,7 +1019,9 @@ impl Renderable for ComposerWidget<'_> {
             // Top-right corner: editor state plus transient turn receipts.
             // Receipts are lifecycle chrome, not transcript content; they
             // should appear briefly without displacing conversation rows.
-            if let Some(chrome) = composer_top_right_chrome(self.app, area.width) {
+            if self.app.ocean_treatment.eq_ignore_ascii_case("classic")
+                && let Some(chrome) = composer_top_right_chrome(self.app, area.width)
+            {
                 block = block.title_top(chrome.right_aligned());
             }
             if let Some(hint_line) = hint_line {
@@ -1014,7 +1033,9 @@ impl Renderable for ComposerWidget<'_> {
                 .borders(Borders::TOP)
                 .border_style(Style::default().fg(self.app.ui_theme.border))
                 .style(background);
-            if let Some(chrome) = composer_top_right_chrome(self.app, area.width) {
+            if self.app.ocean_treatment.eq_ignore_ascii_case("classic")
+                && let Some(chrome) = composer_top_right_chrome(self.app, area.width)
+            {
                 block = block.title_top(chrome.right_aligned());
             }
             block.render(area, buf);
@@ -1024,24 +1045,24 @@ impl Renderable for ComposerWidget<'_> {
 
         let mut input_lines = Vec::new();
         if input_text.is_empty() {
-            input_lines.push(Line::from(""));
-            if input_rows_budget > 1 {
-                let (placeholder, style): (Cow<'_, str>, Style) = if let Some(ref suggestion) =
-                    self.app.prompt_suggestion
-                    && !self.app.is_history_search_active()
-                {
-                    (
-                        Cow::Borrowed(suggestion.as_str()),
-                        Style::default().fg(palette::TEXT_HINT),
-                    )
-                } else {
-                    (
-                        composer_empty_hint_text(self.app),
-                        Style::default().fg(palette::TEXT_MUTED).italic(),
-                    )
-                };
-                input_lines.push(Line::from(Span::styled(placeholder, style)));
-            }
+            let (placeholder, style): (Cow<'_, str>, Style) = if let Some(ref suggestion) =
+                self.app.prompt_suggestion
+                && !self.app.is_history_search_active()
+            {
+                (
+                    Cow::Borrowed(suggestion.as_str()),
+                    Style::default().fg(palette::TEXT_HINT),
+                )
+            } else {
+                (
+                    composer_empty_hint_text(self.app),
+                    Style::default().fg(palette::TEXT_MUTED).italic(),
+                )
+            };
+            input_lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(placeholder, style),
+            ]));
         } else if let Some((sel_start, sel_end)) = self.app.selection_range() {
             // Use the character indices we already computed during layout
             // to avoid redundant wrapping (issue #3909).
@@ -1754,7 +1775,8 @@ impl Renderable for ApprovalWidget<'_> {
 
         // Top separator rule, risk-tinted, so the prompt reads as a distinct
         // panel without a heavy full border box.
-        let rule: String = "─".repeat(region.width as usize);
+        let rule_glyph = if repo_law { "═" } else { "─" };
+        let rule: String = rule_glyph.repeat(region.width as usize);
         buf.set_string(
             region.x,
             region.y,
@@ -1815,10 +1837,6 @@ impl Renderable for ApprovalWidget<'_> {
         Paragraph::new(controls)
             .wrap(Wrap { trim: false })
             .render(control_rect, buf);
-
-        if repo_law || matches!(stakes, crate::tui::approval::ApprovalStakes::Critical) {
-            paint_left_rail(region, buf, palette_colors.accent);
-        }
     }
 
     fn desired_height(&self, _width: u16) -> u16 {
@@ -1949,25 +1967,6 @@ fn approval_truncation_hint(locale: Locale) -> &'static str {
     match locale {
         Locale::ZhHans => "  … 已截断 · 按 [v] 查看完整内容",
         _ => "  … truncated · press [v] for full details",
-    }
-}
-
-/// Paint a single-column accent on the inside-left of the card. Only
-/// touches cells that already exist in the buffer area.
-fn paint_left_rail(card: Rect, buf: &mut Buffer, color: Color) {
-    if card.width < 2 || card.height < 4 {
-        return;
-    }
-    let rail_x = card.x + 1;
-    let top = card.y + 1;
-    let bot = card.y + card.height.saturating_sub(2);
-    for y in top..=bot {
-        if y >= buf.area.y + buf.area.height {
-            break;
-        }
-        let cell = &mut buf[(rail_x, y)];
-        cell.set_char('\u{2503}'); // ┃ — heavy bar so the warning reads at a glance
-        cell.set_style(Style::default().fg(color).bg(palette::WHALE_BG));
     }
 }
 
@@ -2840,76 +2839,8 @@ fn should_render_empty_state(app: &App) -> bool {
         && crate::tui::sidebar::compact_work_indicator(app).is_none()
 }
 
-const CW_WHALE_MARK_WIDTH: usize = 22;
-const CW_WHALE_MARK_MIN_HEIGHT: usize = 14;
-
-fn centered_line(text: String, width: u16, style: Style) -> Line<'static> {
-    let text = truncate_display_width(&text, usize::from(width));
-    let inset =
-        " ".repeat(usize::from(width).saturating_sub(UnicodeWidthStr::width(text.as_str())) / 2);
-    Line::from(Span::styled(format!("{inset}{text}"), style))
-}
-
-fn cw_whale_mark_lines(app: &App, width: u16) -> Vec<Line<'static>> {
-    let gold = Style::default().fg(app.ui_theme.accent_primary);
-    let seafoam = Style::default().fg(app.ui_theme.accent_secondary);
-    let ivory = Style::default().fg(app.ui_theme.text_body);
-    let inset = " ".repeat(usize::from(width).saturating_sub(CW_WHALE_MARK_WIDTH) / 2);
-
-    vec![
-        Line::from(Span::styled(format!("{inset}   ˚"), seafoam)),
-        Line::from(Span::styled(format!("{inset} ▗▄▄▄▄▄▄▄▄▄▄▄▄▄▖    ▚▞"), gold)),
-        Line::from(vec![
-            Span::styled(format!("{inset}▐██"), gold),
-            Span::styled("·", ivory),
-            Span::styled("████████████▙▄▄▄▞", gold),
-        ]),
-        Line::from(Span::styled(format!("{inset} ▝▀▀▀▀▀▀▀▀▀▀▀▀▀▘"), gold)),
-    ]
-}
-
 fn build_empty_state_lines(app: &App, area: Rect) -> Vec<Line<'static>> {
-    if area.width == 0 || area.height == 0 {
-        return Vec::new();
-    }
-
-    let workspace = crate::utils::display_path(&app.workspace);
-    let workspace_identity = crate::tui::workspace_context::identity_from_context(
-        &app.workspace,
-        app.workspace_context.as_deref(),
-    );
-    let repo_state = workspace_identity.branch.as_deref().unwrap_or("no git");
-    let context = format!(
-        "codewhale · {workspace} · {repo_state} · mcp {}",
-        app.mcp_configured_count
-    );
-    let fleet = "Fleet  /fleet setup".to_string();
-    let routes = "Model  /model    Rules  /constitution    Setup  /setup".to_string();
-    let mark_fits = usize::from(area.width) >= CW_WHALE_MARK_WIDTH + 2
-        && usize::from(area.height) >= CW_WHALE_MARK_MIN_HEIGHT;
-
-    let mut lines = vec![Line::from("")];
-    if mark_fits {
-        lines.extend(cw_whale_mark_lines(app, area.width));
-        lines.push(Line::from(""));
-    }
-    lines.push(centered_line(
-        context,
-        area.width,
-        Style::default().fg(app.ui_theme.text_muted),
-    ));
-    lines.push(Line::from(""));
-    lines.push(centered_line(
-        fleet,
-        area.width,
-        Style::default().fg(app.ui_theme.accent_secondary).bold(),
-    ));
-    lines.push(centered_line(
-        routes,
-        area.width,
-        Style::default().fg(app.ui_theme.text_hint),
-    ));
-    lines
+    crate::tui::underwater::empty_state_lines(app, area)
 }
 
 pub fn composer_input_rows_budget(inner_height: u16, extra_lines: usize) -> usize {
@@ -2930,6 +2861,7 @@ fn placeholder_visual_lines(content_width: usize) -> usize {
     placeholder_visual_lines_for(COMPOSER_PLACEHOLDER, content_width)
 }
 
+#[cfg(test)]
 fn placeholder_visual_lines_for(placeholder: &str, content_width: usize) -> usize {
     wrap_text(placeholder, content_width).len().max(1)
 }
@@ -2943,17 +2875,11 @@ pub(crate) fn composer_empty_hint_text(app: &App) -> Cow<'static, str> {
 }
 
 pub(crate) fn empty_composer_visual_rows(
-    hint: Option<&str>,
-    content_width: usize,
-    rows_budget: usize,
+    _hint: Option<&str>,
+    _content_width: usize,
+    _rows_budget: usize,
 ) -> usize {
-    if rows_budget <= 1 {
-        1
-    } else {
-        1 + hint
-            .map(|text| placeholder_visual_lines_for(text, content_width))
-            .unwrap_or(0)
-    }
+    1
 }
 
 fn composer_min_input_rows(density: ComposerDensity) -> usize {
@@ -2988,22 +2914,13 @@ fn composer_height(
     } else {
         0
     };
-    let content_width = if has_panel {
-        usize::from(width.saturating_sub(2).max(1))
-    } else {
-        usize::from(width.max(1))
-    };
+    let content_width = usize::from(width.max(1));
     let mut line_count = wrap_input_lines(input, content_width).len();
     if line_count == 0 {
         line_count = 1;
     }
     if has_panel {
         line_count = line_count.max(composer_min_input_rows(density));
-    } else if input.is_empty() && available_height >= 3 {
-        // Quiet launch composer: rule + focused prompt + one explanatory hint.
-        // Keeping the hint visible makes the surface self-explanatory and is
-        // also the terminal-level readiness contract used by PTY QA.
-        line_count = line_count.max(2);
     }
     line_count = line_count
         .saturating_add(extra_lines)
@@ -3785,14 +3702,13 @@ fn line_spans_with_selection<'a>(
 mod tests {
     use super::{
         ACTIVE_REVISION_DOMAIN, ApprovalWidget, COMPOSER_PANEL_HEIGHT, COMPOSER_PLACEHOLDER,
-        CW_WHALE_MARK_MIN_HEIGHT, ChatWidget, ComposerWidget, Renderable, SlashMenuEntry,
-        active_entry_revision, ambient_ping_pong, apply_detail_target_highlight,
-        apply_selection_to_line, apply_send_flash, build_empty_state_lines, composer_height,
-        composer_max_height, composer_min_input_rows, composer_top_padding, cursor_row_col,
-        empty_composer_visual_rows, history_entry_revision, layout_input, pad_lines_to_bottom,
-        placeholder_visual_lines, push_command_entry, revision_in_domain,
-        should_render_empty_state, slash_completion_hints, tool_run_summary_revision,
-        wrap_input_lines, wrap_input_lines_for_mouse, wrap_text,
+        ChatWidget, ComposerWidget, Renderable, SlashMenuEntry, active_entry_revision,
+        ambient_ping_pong, apply_detail_target_highlight, apply_selection_to_line,
+        apply_send_flash, build_empty_state_lines, composer_height, composer_max_height,
+        composer_min_input_rows, composer_top_padding, cursor_row_col, empty_composer_visual_rows,
+        history_entry_revision, layout_input, pad_lines_to_bottom, placeholder_visual_lines,
+        push_command_entry, revision_in_domain, should_render_empty_state, slash_completion_hints,
+        tool_run_summary_revision, wrap_input_lines, wrap_input_lines_for_mouse, wrap_text,
     };
     use crate::config::{ApiProvider, Config};
     use crate::localization::Locale;
@@ -4913,7 +4829,7 @@ mod tests {
         let without_border = composer_height("", 40, 8, 0, ComposerDensity::Comfortable, false);
 
         assert_eq!(with_border, 5);
-        assert_eq!(without_border, 3);
+        assert_eq!(without_border, 2);
         assert!(without_border < with_border);
     }
 
@@ -4928,7 +4844,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_composer_cursor_sits_above_placeholder_hint() {
+    fn empty_composer_keeps_prompt_and_hint_on_one_row() {
         let mut app = create_test_app();
         // Pin density so the test is independent of any loaded user settings.
         app.composer_density = ComposerDensity::Comfortable;
@@ -4948,13 +4864,12 @@ mod tests {
         // reference's continuous water field instead of drawing a full box.
         // inner_area: {x:0, y:1, w:40, h:4}
         // input_rows_budget = 4
-        // empty_composer_visual_rows = cursor row + one hint row = 2
-        // top_padding = 4 - clamp(2, 1, 4) = 2
+        // The prompt and hint share one quiet row.
         assert_eq!(
             empty_composer_visual_rows(Some(COMPOSER_PLACEHOLDER), 40, 4),
-            2
+            1
         );
-        assert_eq!(widget.cursor_pos(area), Some((2, 3)));
+        assert_eq!(widget.cursor_pos(area), Some((2, 4)));
     }
 
     #[test]
@@ -4976,18 +4891,18 @@ mod tests {
         // inner_area: {x:0, y:1, w:14, h:4}
         // input_rows_budget = 4
         // placeholder_visual_lines(14) = 2
-        // empty_composer_visual_rows = cursor row + two hint rows = 3
-        // top_padding = 4 - clamp(3, 1, 4) = 1
+        // The narrow fallback still reserves one composer row; Paragraph
+        // clipping keeps it from growing the shell.
         assert_eq!(placeholder_visual_lines(14), 2);
         assert_eq!(
             empty_composer_visual_rows(Some(COMPOSER_PLACEHOLDER), 14, 4),
-            3
+            1
         );
-        assert_eq!(widget.cursor_pos(area), Some((2, 2)));
+        assert_eq!(widget.cursor_pos(area), Some((2, 4)));
     }
 
     #[test]
-    fn empty_composer_keeps_cursor_row_clear_for_ime_preedit() {
+    fn empty_composer_renders_prompt_and_hint_on_cursor_row() {
         let mut app = create_test_app();
         app.composer_density = ComposerDensity::Comfortable;
         let slash_menu_entries = Vec::<SlashMenuEntry>::new();
@@ -5007,20 +4922,21 @@ mod tests {
         };
         let rendered = buffer_text(&buf, area);
 
-        assert_eq!(buf[(cursor_x, cursor_y)].symbol(), " ");
+        assert_eq!(buf[(cursor_x, cursor_y)].symbol(), "W");
         assert!(
             rendered.contains(COMPOSER_PLACEHOLDER),
-            "placeholder hint should still render below the cursor row: {rendered}"
+            "placeholder hint should render on the prompt row: {rendered}"
         );
         assert!(
-            !row_text(&buf, area, cursor_y).contains(COMPOSER_PLACEHOLDER),
-            "cursor row must remain clear for terminal IME preedit text: {rendered}"
+            row_text(&buf, area, cursor_y).contains(COMPOSER_PLACEHOLDER),
+            "prompt and hint should share one row: {rendered}"
         );
     }
 
     #[test]
     fn composer_border_renders_session_title() {
         let mut app = create_test_app();
+        app.ocean_treatment = "classic".to_string();
         app.composer_density = ComposerDensity::Comfortable;
         app.session_title = Some("my-session".to_string());
         let slash_menu_entries = Vec::<SlashMenuEntry>::new();
@@ -5044,6 +4960,7 @@ mod tests {
     #[test]
     fn composer_border_renders_active_turn_receipt() {
         let mut app = create_test_app();
+        app.ocean_treatment = "classic".to_string();
         app.composer_density = ComposerDensity::Comfortable;
         app.set_receipt_text("✓ turn completed · 2 tool(s) used");
         let slash_menu_entries = Vec::<SlashMenuEntry>::new();
@@ -5179,7 +5096,7 @@ mod tests {
             height: 3,
         };
 
-        assert_eq!(widget.cursor_pos(area), Some((2, 1)));
+        assert_eq!(widget.cursor_pos(area), Some((2, 2)));
     }
 
     #[test]
@@ -5282,9 +5199,9 @@ mod tests {
             .join("\n");
 
         assert!(rendered.contains("codewhale · /tmp/codewhale-test-workspace · no git · mcp 2"));
-        assert!(rendered.contains("Fleet  /fleet setup"));
-        assert!(rendered.contains("Model  /model"));
-        assert!(rendered.contains("Rules  /constitution"));
+        assert!(rendered.contains("Fleet setup  /fleet setup"));
+        assert!(!rendered.contains("Model  /model"));
+        assert!(!rendered.contains("Rules  /constitution"));
     }
 
     #[test]
@@ -5325,12 +5242,14 @@ mod tests {
         ChatWidget::new(&mut app, area).render(area, &mut buf);
 
         assert_ne!(buf[(0, 0)].bg, buf[(0, 19)].bg);
-        assert_eq!(buf[(11, 14)].symbol(), ">");
+        assert!(buffer_text(&buf, area).contains("><>"));
 
         let context = "codewhale · /tmp/codewhale-test-workspace · no git · mcp 0";
         let context_x = ((100usize - UnicodeWidthStr::width(context)) / 2) as u16;
-        assert_eq!(buf[(context_x, 6)].symbol(), "c");
-        assert_eq!(buf[(context_x, 6)].bg, base);
+        let context_cell = (0..area.height)
+            .find_map(|y| (buf[(context_x, y)].symbol() == "c").then_some((context_x, y)))
+            .expect("context line");
+        assert_eq!(buf[context_cell].bg, base);
     }
 
     #[test]
@@ -5360,7 +5279,7 @@ mod tests {
                 rendered.contains("Fleet") && rendered.contains("/fleet setup"),
                 "Fleet must remain the launch priority at {width}x{height}:\n{rendered}"
             );
-            if height < CW_WHALE_MARK_MIN_HEIGHT as u16 {
+            if height < 14 {
                 assert!(
                     !rendered.contains("▗▄▄"),
                     "the decorative whale must yield before the Fleet action at {width}x{height}"
@@ -5828,7 +5747,7 @@ mod tests {
         assert!(rendered.contains("Cargo.toml"), "{rendered}");
         assert!((0..area.height).any(|y| {
             let cell = &buf[(1, y)];
-            cell.symbol() == "┃" && cell.fg == palette::WHALE_ERROR
+            cell.symbol() == "═" && cell.fg == palette::STATUS_WARNING
         }));
     }
 

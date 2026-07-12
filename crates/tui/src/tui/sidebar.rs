@@ -113,18 +113,16 @@ pub fn render_sidebar(f: &mut Frame, area: Rect, app: &mut App, config: &Config)
 /// Height of the transcript-top Tasks / To-do strip from the underwater TUI
 /// action spec. It collapses completely when neither durable background work
 /// nor current work state exists, preserving the full launch water field.
-pub(crate) fn top_work_strip_height(app: &mut App, width: u16) -> u16 {
+pub(crate) fn top_work_strip_height(app: &mut App, _width: u16) -> u16 {
     let has_tasks = app
         .task_panel
         .iter()
         .any(|task| task.kind == TaskPanelEntryKind::Background);
     let has_todo = sidebar_work_summary(app).has_useful_content();
-    if !has_tasks && !has_todo {
-        0
-    } else if width >= 88 {
-        4
-    } else {
-        7
+    match (has_tasks, has_todo) {
+        (false, false) => 0,
+        (true, true) => 7,
+        _ => 4,
     }
 }
 
@@ -169,18 +167,9 @@ pub(crate) fn render_top_work_strip(f: &mut Frame, area: Rect, app: &mut App) {
         render_top_strip_rule(f, area, app);
         return;
     }
-    let wide = area.width >= 88;
     let sections = Layout::default()
-        .direction(if wide {
-            Direction::Horizontal
-        } else {
-            Direction::Vertical
-        })
-        .constraints(if wide {
-            vec![Constraint::Percentage(50), Constraint::Percentage(50)]
-        } else {
-            vec![Constraint::Length(3), Constraint::Length(3)]
-        })
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Length(3)])
         .split(Rect {
             height: area.height.saturating_sub(1),
             ..area
@@ -247,15 +236,23 @@ fn render_top_tasks(f: &mut Frame, area: Rect, app: &App) {
         };
         let duration = task.duration_ms.map(format_duration_ms).unwrap_or_default();
         let duration_width = UnicodeWidthStr::width(duration.as_str());
+        let controls = if matches!(task.status.as_str(), "running" | "waiting" | "needs_user") {
+            " [↗] [×]"
+        } else {
+            " [↗]"
+        };
+        let controls_width = UnicodeWidthStr::width(controls);
         let summary_width = width
-            .saturating_sub(3 + UnicodeWidthStr::width(mark) + duration_width + 2)
+            .saturating_sub(3 + UnicodeWidthStr::width(mark) + duration_width + controls_width + 2)
             .max(1);
         let summary = truncate_line_to_width(&task.prompt_summary, summary_width);
         let used = 3 + UnicodeWidthStr::width(mark) + UnicodeWidthStr::width(summary.as_str());
         let gap = if duration.is_empty() {
             0
         } else {
-            width.saturating_sub(used + duration_width).max(2)
+            width
+                .saturating_sub(used + duration_width + controls_width)
+                .max(2)
         };
         lines.push(Line::from(vec![
             Span::raw("  "),
@@ -264,6 +261,7 @@ fn render_top_tasks(f: &mut Frame, area: Rect, app: &App) {
             Span::styled(summary, Style::default().fg(label_color)),
             Span::raw(" ".repeat(gap)),
             Span::styled(duration, Style::default().fg(app.ui_theme.text_hint)),
+            Span::styled(controls, Style::default().fg(app.ui_theme.info)),
         ]));
     }
     Paragraph::new(lines).render(area, f.buffer_mut());
@@ -315,6 +313,18 @@ fn render_top_todo(f: &mut Frame, area: Rect, summary: &SidebarWorkSummary, app:
         };
         let label = truncate_line_to_width(&format!("  {mark} {}", item.content), width);
         lines.push(Line::from(Span::styled(label, Style::default().fg(color))));
+
+        if let Some(next) = summary
+            .checklist_items
+            .iter()
+            .find(|candidate| candidate.id != item.id && candidate.status == TodoStatus::Pending)
+        {
+            let label = truncate_line_to_width(&format!("  ☐ {}", next.content), width);
+            lines.push(Line::from(Span::styled(
+                label,
+                Style::default().fg(app.ui_theme.text_muted),
+            )));
+        }
     } else if let Some(goal) = summary.goal_objective.as_deref() {
         let label = truncate_line_to_width(&format!("  ◆ {goal}"), width);
         lines.push(Line::from(Span::styled(
@@ -3905,7 +3915,7 @@ mod tests {
             );
         }
 
-        let backend = TestBackend::new(100, 4);
+        let backend = TestBackend::new(100, 7);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
             .draw(|frame| render_top_work_strip(frame, frame.area(), &mut app))

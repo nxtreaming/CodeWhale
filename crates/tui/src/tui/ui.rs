@@ -33,6 +33,7 @@ use crossterm::{
 };
 use ratatui::{
     Frame, Terminal,
+    buffer::Buffer,
     layout::{Constraint, Direction, Layout, Rect, Size},
     prelude::Widget,
     style::Style,
@@ -121,7 +122,7 @@ use crate::tui::tool_routing::{
     apply_workflow_ui_event, handle_tool_call_complete, handle_tool_call_started,
     maybe_add_patch_preview,
 };
-use crate::tui::ui_text::{history_cell_to_text, text_display_width};
+use crate::tui::ui_text::history_cell_to_text;
 use crate::tui::user_input::UserInputView;
 use crate::tui::views::subagent_view_agents;
 use crate::tui::vim_mode;
@@ -206,7 +207,6 @@ const UI_STATUS_ANIMATION_MS: u64 = crate::tui::spinner::BRAILLE_SPINNER_FRAME_M
 // chat host. Keep a compact 20-column sidebar plus a 40-column transcript.
 pub(crate) const SIDEBAR_VISIBLE_MIN_WIDTH: u16 = 60;
 const DEFAULT_TERMINAL_PROBE_TIMEOUT_MS: u64 = 500;
-const PERIODIC_FULL_REPAINT_EVERY_N: u64 = 50;
 const TURN_META_PREFIX: &str = "<turn_meta>";
 const SESSION_TITLE_MAX_CHARS: usize = 32;
 const VERSION_HINT_TOAST_TTL_MS: u64 = 12_000;
@@ -1955,7 +1955,6 @@ async fn run_event_loop(
     let mut prev_input_snapshot = String::new();
     let mut terminal_paused_at: Option<Instant> = None;
     let mut force_terminal_repaint = false;
-    let mut draws_since_last_full_repaint: u64 = 0;
     // FocusGained debounce: some terminal emulators (e.g. Tabby) re-trigger
     // FocusGained when we re-arm focus-change reporting inside
     // recover_terminal_modes, creating a tight repaint loop. Skip
@@ -2583,11 +2582,12 @@ async fn run_event_loop(
                             app.pausable = false;
                             app.paused = false;
                         }
-                        if !matches!(status, crate::core::events::TurnOutcomeStatus::Completed)
-                            || draws_since_last_full_repaint >= PERIODIC_FULL_REPAINT_EVERY_N
-                        {
-                            force_terminal_repaint = true;
-                        }
+                        // Turn completion is an ordinary state transition.
+                        // Clearing all 7,900 cells after a long stream was the
+                        // visible end-of-turn flash in the rejected build.
+                        // Ratatui's diff is sufficient here; full repaints stay
+                        // reserved for real terminal boundary changes (resize,
+                        // focus recovery, theme, child-terminal return).
                         // Finalize any in-flight tool group. Cancellation
                         // marks still-running entries as Failed so the user
                         // sees they were interrupted rather than the spinner
@@ -3729,14 +3729,8 @@ async fn run_event_loop(
             app.force_next_full_repaint = false;
         }
         if app.needs_redraw && draw_wait.is_none() {
-            let was_full_repaint = force_terminal_repaint;
             draw_app_frame_inner(terminal, app, config, force_terminal_repaint)?;
             force_terminal_repaint = false;
-            if was_full_repaint {
-                draws_since_last_full_repaint = 0;
-            } else {
-                draws_since_last_full_repaint = draws_since_last_full_repaint.saturating_add(1);
-            }
             frame_rate_limiter.mark_emitted(Instant::now());
             app.needs_redraw = false;
         }
@@ -3965,7 +3959,6 @@ async fn run_event_loop(
                     backend.set_terminal_size(new_size);
                 }
                 draw_app_frame_inner(terminal, app, config, true)?;
-                draws_since_last_full_repaint = 0;
                 {
                     let backend = terminal.backend_mut();
                     backend.clear_forced_size();
@@ -9657,8 +9650,52 @@ fn build_pending_input_preview(app: &App) -> PendingInputPreview {
     preview
 }
 
+fn render_classic_header(area: Rect, buf: &mut Buffer, app: &App) {
+    let context_usage = context_usage_snapshot(app);
+    let context_window = context_usage.as_ref().map(|(_, max, _)| *max).or_else(|| {
+        Some(crate::route_budget::route_context_window_tokens(
+            app.api_provider,
+            app.effective_model_for_budget(),
+            app.active_route_limits,
+        ))
+    });
+    let prompt_tokens = context_usage
+        .as_ref()
+        .and_then(|(used, _, _)| u32::try_from(*used).ok());
+    let workspace = app
+        .workspace
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("workspace");
+    let model = app.model_display_label();
+    let effort = app.reasoning_effort_display_label();
+    let started_at = (!app.low_motion).then_some(app.turn_started_at).flatten();
+    let data = HeaderData::new(
+        app.mode,
+        &model,
+        workspace,
+        app.is_loading,
+        app.ui_theme.header_bg,
+    )
+    .with_usage(
+        app.session.total_conversation_tokens,
+        context_window,
+        app.session.session_cost,
+        prompt_tokens,
+    )
+    .with_reasoning_effort(Some(&effort))
+    .with_provider(None)
+    .with_status_indicator(crate::tui::widgets::header_status_indicator_frame(
+        started_at,
+        &app.status_indicator,
+    ));
+    HeaderWidget::new(data).render(area, buf);
+}
+
 fn render(f: &mut Frame, app: &mut App, config: &Config) {
     let size = f.area();
+    let classic_shell = app.ocean_treatment.eq_ignore_ascii_case("classic");
 
     // Clear entire area with the configured app background.
     let background = Block::default().style(Style::default().bg(app.ui_theme.surface_bg));
@@ -9670,7 +9707,11 @@ fn render(f: &mut Frame, app: &mut App, config: &Config) {
         return;
     }
 
-    let header_height = 1;
+    let header_height = if classic_shell || size.height < 16 {
+        1
+    } else {
+        2
+    };
     let footer_height = 1;
     let slash_menu_entries = visible_slash_menu_entries(app, SLASH_MENU_LIMIT);
     let mention_menu_limit = app.mention_menu_limit;
@@ -9679,7 +9720,6 @@ fn render(f: &mut Frame, app: &mut App, config: &Config) {
     if !mention_menu_entries.is_empty() && app.mention_menu_selected >= mention_menu_entries.len() {
         app.mention_menu_selected = mention_menu_entries.len().saturating_sub(1);
     }
-    let context_usage = context_usage_snapshot(app);
     let top_work_strip_height = super::sidebar::top_work_strip_height(app, size.width);
 
     // Defensive two-pass layout: pin the header to the absolute top row,
@@ -9742,94 +9782,17 @@ fn render(f: &mut Frame, app: &mut App, config: &Config) {
         super::sidebar::render_top_work_strip(f, body_chunks[0], app);
     }
 
-    // Render header
-    {
-        let sanitized_context_window =
-            context_usage.as_ref().map(|(_, max, _)| *max).or_else(|| {
-                Some(crate::route_budget::route_context_window_tokens(
-                    app.api_provider,
-                    app.effective_model_for_budget(),
-                    app.active_route_limits,
-                ))
-            });
-        let sanitized_prompt_tokens = context_usage
-            .as_ref()
-            .and_then(|(used, _, _)| u32::try_from(*used).ok());
-        let workspace_name = app
-            .workspace
-            .file_name()
-            .and_then(|value| value.to_str())
-            .filter(|value| !value.is_empty())
-            .unwrap_or("workspace");
-        let model_label = app.model_display_label();
-        let effort_label = app.reasoning_effort_display_label();
-        let provider_label = match app.api_provider {
-            crate::config::ApiProvider::Deepseek => None,
-            crate::config::ApiProvider::DeepseekCN => None,
-            crate::config::ApiProvider::DeepseekAnthropic => Some("DS-A"),
-            crate::config::ApiProvider::NvidiaNim => Some("NIM"),
-            crate::config::ApiProvider::Openai => Some("OpenAI"),
-            crate::config::ApiProvider::Anthropic => Some("Claude"),
-            crate::config::ApiProvider::Openmodel => None,
-            crate::config::ApiProvider::Atlascloud => Some("Atlas"),
-            crate::config::ApiProvider::WanjieArk => Some("Wanjie"),
-            crate::config::ApiProvider::Volcengine => Some("Volc"),
-            crate::config::ApiProvider::Openrouter => Some("OR"),
-            crate::config::ApiProvider::XiaomiMimo => Some("MiMo"),
-            crate::config::ApiProvider::Novita => Some("Novita"),
-            crate::config::ApiProvider::Fireworks => Some("Fireworks"),
-            crate::config::ApiProvider::Siliconflow | ApiProvider::SiliconflowCn => {
-                Some("SiliconFlow")
-            }
-            crate::config::ApiProvider::Arcee => Some("Arcee"),
-            crate::config::ApiProvider::Moonshot => Some("Kimi"),
-            crate::config::ApiProvider::Sglang => Some("SGLang"),
-            crate::config::ApiProvider::Vllm => Some("vLLM"),
-            crate::config::ApiProvider::Ollama => Some("Ollama"),
-            crate::config::ApiProvider::Huggingface => Some("HF"),
-            crate::config::ApiProvider::Deepinfra => Some("DeepInfra"),
-            crate::config::ApiProvider::Together => Some("Together"),
-            crate::config::ApiProvider::Qianfan => Some("Qianfan"),
-            crate::config::ApiProvider::OpenaiCodex => Some("Codex"),
-            crate::config::ApiProvider::Zai => Some("Z.ai"),
-            crate::config::ApiProvider::Stepfun => Some("StepFun"),
-            crate::config::ApiProvider::Minimax => Some("MiniMax"),
-            crate::config::ApiProvider::Sakana => Some("Sakana"),
-            crate::config::ApiProvider::LongCat => Some("Meituan LongCat"),
-            crate::config::ApiProvider::Meta => Some("Meta"),
-            crate::config::ApiProvider::Xai => Some("xAI"),
-            crate::config::ApiProvider::Custom => Some("Custom"),
-        };
-        let status_indicator_started_at = if app.low_motion {
-            None
-        } else {
-            app.turn_started_at
-        };
-        let header_data = HeaderData::new(
-            app.mode,
-            &model_label,
-            workspace_name,
-            app.is_loading,
-            app.ui_theme.header_bg,
-        )
-        .with_usage(
-            app.session.total_conversation_tokens,
-            sanitized_context_window,
-            app.session.session_cost,
-            sanitized_prompt_tokens,
-        )
-        .with_reasoning_effort(Some(&effort_label))
-        .with_provider(provider_label)
-        .with_status_indicator(crate::tui::widgets::header_status_indicator_frame(
-            status_indicator_started_at,
-            &app.status_indicator,
-        ));
-        let header_widget = HeaderWidget::new(header_data);
-        let buf = f.buffer_mut();
-        header_widget.render(header_area, buf);
+    if classic_shell {
+        render_classic_header(header_area, f.buffer_mut(), app);
+    } else {
+        crate::tui::underwater::render_header(header_area, f.buffer_mut(), app);
     }
 
-    // Render chat + sidebar + optional file-tree pane
+    // Render the transcript and optional file-tree sidecar. The underwater
+    // default deliberately has no legacy right sidebar: Tasks and To-do own
+    // the strip above, Fleet owns `/fleet`, and dense context owns its
+    // inspector. Keeping the sidebar here was the architectural reason the
+    // rejected build still read as the old TUI under a gradient.
     {
         // Defensive backstop (#400): fill the entire body area with ink
         // background before any sub-widgets render, so cells that end up
@@ -9838,8 +9801,6 @@ fn render(f: &mut Frame, app: &mut App, config: &Config) {
         Block::default()
             .style(Style::default().bg(app.ui_theme.surface_bg))
             .render(body_chunks[1], f.buffer_mut());
-
-        let mut sidebar_area = None;
 
         // When the file-tree pane is visible and the terminal is wide
         // enough, reserve the left ~25% for the file tree.
@@ -9863,143 +9824,50 @@ fn render(f: &mut Frame, app: &mut App, config: &Config) {
                 app.file_tree_visible = false;
                 body_chunks[1]
             };
-
-        // Auto-reveal: in Auto focus mode, collapse the sidebar to a
-        // full-width transcript when nothing is active; bring it back the
-        // moment there is a To-do, a live fleet, or background jobs.
         app.last_sidebar_host_width = Some(chat_area.width);
-        let sidebar_auto_collapsed = crate::tui::sidebar::sidebar_auto_idle(app);
-        if !sidebar_auto_collapsed
+        let sidebar_area = if classic_shell
+            && !crate::tui::sidebar::sidebar_auto_idle(app)
             && let Some(sidebar_width) = sidebar_width_for_chat_area(app, chat_area.width)
         {
-            // Record total width for drag-to-resize percentage calculation.
             app.sidebar_resize_total_width = chat_area.width;
             let split = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Min(1), Constraint::Length(sidebar_width)])
                 .split(chat_area);
             chat_area = split[0];
-            sidebar_area = Some(split[1]);
-        }
-
-        // Record the sidebar rect (or its absence) every frame so mouse
-        // hit-testing can route scroll events correctly.
+            Some(split[1])
+        } else {
+            None
+        };
         app.viewport.last_sidebar_area = sidebar_area;
-
-        // When the sidebar is hidden or doesn't fit, drop its stale mouse
-        // hit areas and any in-flight resize so clicks on those columns
-        // don't keep routing to an invisible handle (#3063).
         if sidebar_area.is_none() {
             app.last_sidebar_area = None;
             app.last_sidebar_handle_area = None;
             app.sidebar_resizing = false;
+            app.sidebar_hover_tooltip = None;
         }
 
         let chat_widget = ChatWidget::new(app, chat_area);
         let buf = f.buffer_mut();
         chat_widget.render(chat_area, buf);
 
+        // The rejected shell remains available only as an explicitly selected
+        // compatibility treatment. It is never composed into the underwater
+        // default path.
         if let Some(sidebar_area) = sidebar_area {
-            // Store sidebar area for mouse hit-testing (resize handle).
             app.last_sidebar_area = Some(sidebar_area);
-
-            // Render sidebar
             super::sidebar::render_sidebar(f, sidebar_area, app, config);
-
-            // Paint resize handle (1-col draggable bar) on the left edge of
-            // the sidebar, over the sidebar content. Mouse drag on this strip
-            // adjusts sidebar_width_percent in real time.
-            let handle_rect = Rect {
+            let handle_area = Rect {
                 x: sidebar_area.x,
                 y: sidebar_area.y,
                 width: 1,
                 height: sidebar_area.height,
             };
-
-            // Store for mouse event handler.
-            app.last_sidebar_handle_area = Some(handle_rect);
-
-            let mouse_over = app.last_mouse_pos.is_some_and(|(col, row)| {
-                row >= handle_rect.y
-                    && row < handle_rect.y.saturating_add(handle_rect.height)
-                    && col == handle_rect.x
-            });
-
-            let handle_style = if app.sidebar_resizing {
-                Style::default()
-                    .bg(palette::WHALE_ACCENT_PRIMARY)
-                    .fg(palette::TEXT_PRIMARY)
-            } else if mouse_over {
-                Style::default()
-                    .bg(palette::STATUS_WARNING)
-                    .fg(palette::TEXT_MUTED)
-            } else {
-                Style::default()
-                    .bg(palette::WHALE_PANEL)
-                    .fg(palette::TEXT_MUTED)
-            };
-
-            let buf = f.buffer_mut();
-            for row in handle_rect.y..handle_rect.y.saturating_add(handle_rect.height) {
-                if row < buf.area().height {
-                    buf[(handle_rect.x, row)]
-                        .set_char('│')
-                        .set_style(handle_style);
-                }
-            }
-
-            // Render sidebar hover popover if active.
-            if let Some(ref tooltip_text) = app.sidebar_hover_tooltip
-                && let Some((mouse_col, mouse_row)) = app.last_mouse_pos
-            {
-                let max_popup_width = 72u16.min(size.width.saturating_sub(4));
-                if max_popup_width >= 10 && size.height >= 3 {
-                    let popup_width = tooltip_text
-                        .lines()
-                        .map(text_display_width)
-                        .max()
-                        .unwrap_or(0)
-                        .saturating_add(2)
-                        .clamp(12, max_popup_width as usize)
-                        as u16;
-                    let inner_width = popup_width.saturating_sub(2).max(1) as usize;
-                    let wrapped_rows = tooltip_text.lines().fold(0u16, |rows, line| {
-                        let width = text_display_width(line);
-                        rows.saturating_add(((width.max(1) - 1) / inner_width + 1) as u16)
-                    });
-                    let popup_content_height = wrapped_rows.clamp(1, 10);
-                    let popup_height = popup_content_height.saturating_add(2);
-                    let x = mouse_col
-                        .saturating_add(2)
-                        .min(size.width.saturating_sub(popup_width));
-                    // Sit one row BELOW the cursor so the tooltip never paints over
-                    // the row above the hovered line (which read as corruption).
-                    let y = mouse_row
-                        .saturating_add(1)
-                        .min(size.height.saturating_sub(popup_height));
-                    let tooltip_area = Rect {
-                        x,
-                        y,
-                        width: popup_width,
-                        height: popup_height,
-                    };
-                    // Neutral elevated-surface styling so the popover reads as a
-                    // detail surface, not a warning highlight.
-                    let tooltip = ratatui::widgets::Paragraph::new(tooltip_text.as_str())
-                        .wrap(ratatui::widgets::Wrap { trim: false })
-                        .block(
-                            Block::default()
-                                .borders(ratatui::widgets::Borders::ALL)
-                                .border_style(Style::default().fg(palette::WHALE_ACCENT_PRIMARY))
-                                .style(
-                                    Style::default()
-                                        .bg(palette::SURFACE_ELEVATED)
-                                        .fg(palette::TEXT_PRIMARY),
-                                ),
-                        );
-                    f.render_widget(tooltip, tooltip_area);
-                }
-            }
+            app.last_sidebar_handle_area = Some(handle_area);
+            let handle =
+                ratatui::widgets::Paragraph::new("│\n".repeat(usize::from(handle_area.height)))
+                    .style(Style::default().fg(palette::TEXT_MUTED));
+            f.render_widget(handle, handle_area);
         }
     }
 
@@ -10044,7 +9912,7 @@ fn render(f: &mut Frame, app: &mut App, config: &Config) {
         );
         let inner = if composer_widget.has_panel(area) {
             ratatui::widgets::Block::default()
-                .borders(ratatui::widgets::Borders::ALL)
+                .borders(ratatui::widgets::Borders::TOP | ratatui::widgets::Borders::BOTTOM)
                 .inner(area)
         } else if area.height >= 2 {
             ratatui::widgets::Block::default()
@@ -10095,8 +9963,11 @@ fn render(f: &mut Frame, app: &mut App, config: &Config) {
         f.set_cursor_position(cursor_pos);
     }
 
-    // Render footer
-    render_footer(f, body_chunks[5], app);
+    if classic_shell {
+        render_footer(f, body_chunks[5], app);
+    } else {
+        crate::tui::underwater::render_footer(body_chunks[5], f.buffer_mut(), app);
+    }
     // Toast stack overlay (#439): when multiple status toasts are queued,
     // surface the older ones as a 1-2 line strip above the footer so a
     // burst of events isn't collapsed to a single visible message.
@@ -10786,6 +10657,16 @@ async fn handle_view_events(
                             app, config,
                         ));
                 }
+            }
+            ViewEvent::FleetRosterOpenWorkersRequested => {
+                if app.view_stack.top_kind() != Some(ModalKind::SubAgents) {
+                    let agents = subagent_view_agents(app, &app.subagent_cache);
+                    app.view_stack
+                        .push(super::views::SubAgentsView::new(agents));
+                }
+                app.status_message =
+                    Some(tr(app.ui_locale, MessageId::SubagentsFetching).to_string());
+                let _ = engine_handle.try_send(Op::ListSubAgents);
             }
             ViewEvent::FleetProfileDraftCommitRequested { draft } => {
                 // The TOML is rendered deterministically from the validated
