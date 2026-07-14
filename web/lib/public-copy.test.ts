@@ -51,6 +51,23 @@ describe("public website copy contracts", () => {
     }
   });
 
+  it("uses the current modes, permission postures, and key guidance", () => {
+    const modes = pageSource("docs/modes/page.tsx");
+    const install = pageSource("install/page.tsx");
+    const faq = pageSource("faq/page.tsx");
+    const modeCopy = `${modes}\n${install}\n${faq}`;
+
+    expect(modeCopy).not.toMatch(/\bAgent mode\b|Agent 模式|\bYOLO\b|suggest\s*\/\s*auto\s*\/\s*never|approval_mode|审批模式（建议/);
+    for (const label of ["Plan", "Act", "Operate", "Ask", "Auto-Review", "Full Access"]) {
+      expect(modes).toContain(label);
+      expect(install).toContain(label);
+    }
+    expect(modes).toContain("/mode act");
+    expect(modes).toContain("Shift+Tab");
+    expect(modes).toContain("Plan is always Read Only");
+    expect(install).toContain("New sessions open in Act mode by default");
+  });
+
   it("presents providers as peers and puts contributor actions near the top", () => {
     const providerCopy = `${pageSource("models/page.tsx")}\n${pageSource("faq/page.tsx")}`;
     const community = pageSource("community/page.tsx");
