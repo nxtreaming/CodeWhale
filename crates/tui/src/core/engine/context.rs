@@ -659,11 +659,11 @@ fn route_output_reservation_for_window(
     window_tokens: u32,
     route_limits: Option<RouteLimits>,
 ) -> u32 {
-    if let Some(route_cap) = crate::route_budget::route_output_limit_tokens(route_limits) {
-        return route_cap.min(TURN_MAX_OUTPUT_TOKENS);
-    }
     if window_tokens >= INTERNAL_BUDGET_LARGE_WINDOW_THRESHOLD {
-        TURN_MAX_OUTPUT_TOKENS
+        crate::route_budget::route_output_limit_tokens(route_limits)
+            .map_or(TURN_MAX_OUTPUT_TOKENS, |route_cap| {
+                route_cap.min(TURN_MAX_OUTPUT_TOKENS)
+            })
     } else {
         effective_max_output_tokens_for_route(provider, model, route_limits)
     }
