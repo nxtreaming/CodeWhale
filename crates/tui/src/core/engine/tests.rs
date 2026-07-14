@@ -19,6 +19,75 @@ use tempfile::tempdir;
 const WORKING_SET_SUMMARY_MARKER: &str = "## Repo Working Set";
 
 #[test]
+fn idle_and_in_turn_subagent_delivery_claim_each_completion_once() {
+    use crate::tools::subagent::SubAgentCompletion;
+
+    let mut delivered = HashSet::new();
+    let first = SubAgentCompletion {
+        agent_id: "agent_same".to_string(),
+        payload: "first delivery".to_string(),
+    };
+    let duplicate = SubAgentCompletion {
+        agent_id: "agent_same".to_string(),
+        payload: "duplicate delivery".to_string(),
+    };
+    let second = SubAgentCompletion {
+        agent_id: "agent_other".to_string(),
+        payload: "other delivery".to_string(),
+    };
+
+    assert!(claim_subagent_completion(&mut delivered, first).is_some());
+    assert!(claim_subagent_completion(&mut delivered, duplicate).is_none());
+    assert!(claim_subagent_completion(&mut delivered, second).is_some());
+    assert_eq!(
+        delivered,
+        HashSet::from(["agent_same".to_string(), "agent_other".to_string()])
+    );
+}
+
+#[tokio::test]
+async fn idle_subagent_delivery_releases_claim_when_route_fails_before_recording() {
+    use crate::tools::subagent::SubAgentCompletion;
+
+    let workspace = tempdir().expect("tempdir");
+    let api_config = Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some("http://127.0.0.1:1/v1".to_string()),
+        ..Config::default()
+    };
+    let (mut engine, _handle) =
+        Engine::new(deterministic_engine_config(workspace.path()), &api_config);
+    // Keep the already-built provider client so route activation is a no-op,
+    // but force the pre-record client check to fail without any network call.
+    engine.model_client = None;
+    engine.deepseek_client_error = Some("forced missing model client".to_string());
+
+    engine
+        .handle_idle_subagent_completion(SubAgentCompletion {
+            agent_id: "agent_retryable".to_string(),
+            payload: "completed work".to_string(),
+        })
+        .await;
+
+    assert!(
+        !engine
+            .delivered_subagent_completion_ids
+            .contains("agent_retryable"),
+        "a completion that never reached the transcript must remain retryable"
+    );
+    assert!(
+        claim_subagent_completion(
+            &mut engine.delivered_subagent_completion_ids,
+            SubAgentCompletion {
+                agent_id: "agent_retryable".to_string(),
+                payload: "retry".to_string(),
+            },
+        )
+        .is_some()
+    );
+}
+
+#[test]
 fn subagent_mailbox_keeps_lifecycle_events_reliable() {
     use crate::models::Usage;
     use crate::tools::subagent::MailboxMessage;
@@ -4321,11 +4390,11 @@ fn mode_invariant_matrix_covers_provenance_authority_narrowing() {
         ProvenanceCase {
             name: "sub-agent handoff",
             provenance: UserInputProvenance::SubAgentHandoff,
-            expected_mode: AppMode::Yolo,
-            expected_trust: true,
-            expected_auto: true,
-            expected_approval: ApprovalMode::Bypass,
-            expect_status: false,
+            expected_mode: AppMode::Agent,
+            expected_trust: false,
+            expected_auto: false,
+            expected_approval: ApprovalMode::Suggest,
+            expect_status: true,
         },
         ProvenanceCase {
             name: "imported transcript",
@@ -5780,7 +5849,6 @@ fn provenance_gate_preserves_standing_yolo_only_for_runtime_continuations() {
     let inheriting_provenances = [
         UserInputProvenance::ExternalUser,
         UserInputProvenance::Runtime,
-        UserInputProvenance::SubAgentHandoff,
     ];
 
     for provenance in all_provenances {

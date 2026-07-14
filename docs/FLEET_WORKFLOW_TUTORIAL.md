@@ -50,7 +50,9 @@ override. Fleet task specs can reference either resolved profile with
 
 This makes the Fleet definition cross-repository, not the authority of one
 running session. For a multi-repository operation, launch Codewhale from a
-shared parent workspace; workers remain inside that workspace boundary.
+shared parent workspace. Profile availability does not grant filesystem access;
+the session's workspace, explicit trusted paths, trust mode, and permission
+posture remain authoritative.
 
 ## 2. Write A Fleet Task Spec
 

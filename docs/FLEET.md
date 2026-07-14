@@ -62,9 +62,11 @@ choose where the profile lives:
   overrides the personal profile for that project.
 
 Profile scope controls where a role definition is reusable; it does not widen
-the filesystem boundary of a running operation. To coordinate several nearby
+the authority of a running operation. To coordinate several nearby
 repositories, start Codewhale from their shared parent directory so that parent
-is the workspace. Workers still inherit the active trust and permission posture.
+is the workspace. Explicit trusted external paths or Full Access can still
+change what tools may reach; workers inherit the active trust and permission
+posture, never the profile's storage scope.
 
 Picking a concrete model pins its provider explicitly: the saved profile records both
 `model` and `provider` fields, so the route it names doesn't depend on

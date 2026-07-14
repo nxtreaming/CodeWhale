@@ -207,10 +207,10 @@ impl Engine {
     async fn drain_subagent_completion_events(&mut self, status_label: &str) -> usize {
         let mut completions: Vec<crate::tools::subagent::SubAgentCompletion> = Vec::new();
         while let Ok(completion) = self.rx_subagent_completion.try_recv() {
-            if self
-                .delivered_subagent_completion_ids
-                .insert(completion.agent_id.clone())
-            {
+            if let Some(completion) = super::claim_subagent_completion(
+                &mut self.delivered_subagent_completion_ids,
+                completion,
+            ) {
                 completions.push(completion);
             }
         }
@@ -220,13 +220,12 @@ impl Engine {
             manager.terminal_results_excluding(&self.delivered_subagent_completion_ids)
         };
         for result in synthesized {
-            if self
-                .delivered_subagent_completion_ids
-                .insert(result.agent_id.clone())
-            {
-                completions.push(crate::tools::subagent::subagent_completion_from_result(
-                    &result,
-                ));
+            let completion = crate::tools::subagent::subagent_completion_from_result(&result);
+            if let Some(completion) = super::claim_subagent_completion(
+                &mut self.delivered_subagent_completion_ids,
+                completion,
+            ) {
+                completions.push(completion);
             }
         }
 

@@ -40,9 +40,9 @@ Run `/mode` to open the mode picker, or switch directly with `/mode act`,
 |:---|:---:|:---:|:---:|
 | Read-only file, search, and diagnostic tools | yes | yes | yes |
 | File write and patch tools | no | yes | Fleet workers; blocked in the parent |
-| Shell tools (`exec_shell`, `task_shell_start`, waits, interact, cancel) | no | approval-gated by default, hidden when `allow_shell = false` | Fleet workers; blocked in the parent |
-| Paid or external-service tools | follows approval posture | follows approval posture | follows approval posture |
-| Access outside the workspace root | no | only with trust mode | no; start at a shared parent workspace for multi-repository work |
+| Shell tools (`exec_shell`, `task_shell_start`, waits, interact, cancel) | no | approval-gated by default, hidden when `allow_shell = false` | proven read-only inspection may stay in the parent; shell execution belongs to Fleet workers |
+| Paid or external-service tools | follows approval posture | follows approval posture | read-only in the parent; mutations via workers and the active approval posture |
+| Access outside the workspace root | explicit trusted paths only | only through trusted paths or trust mode | only through the active trusted-path/trust policy; profile availability never widens it |
 
 If a shell tool is missing from the model-visible catalog in Agent mode, check
 for an explicit `allow_shell = false` in the active config/profile or runtime

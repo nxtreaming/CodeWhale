@@ -1513,8 +1513,14 @@ pub struct SubAgentRuntime {
     pub allow_shell: bool,
     /// When true, Suggest-level file writes auto-accept for write-capable roles
     /// without full parent auto-approve. Shell/network/MCP still gated.
-    /// Set for Workflow-spawned children.
+    /// Set for Workflow-spawned children and parent-approved root Operate
+    /// workers.
     pub accept_edits: bool,
+    /// Allow the built-in, non-custom verification tools after a root Operate
+    /// worker start has crossed the parent's approval boundary. This is not a
+    /// general shell grant: arbitrary commands and custom verifier programs
+    /// remain blocked unless the parent session is auto-approved.
+    pub accept_verification: bool,
     /// Native Agent-mode tool surface inherited from the parent turn. Carries
     /// feature/config-dependent families such as web search, patch, memory,
     /// vision, notify, and FIM so child catalogs stay in parity with the parent.
@@ -1608,6 +1614,7 @@ impl SubAgentRuntime {
             context,
             allow_shell,
             accept_edits: false,
+            accept_verification: false,
             agent_tool_surface_options: AgentToolSurfaceOptions::new(
                 ShellPolicy::from_legacy_allow_shell(allow_shell),
             ),
@@ -1870,6 +1877,10 @@ impl SubAgentRuntime {
             context: child_context,
             allow_shell: self.allow_shell,
             accept_edits: self.accept_edits,
+            // A parent-approved Operate verification lease belongs to its
+            // direct worker only; nested children must cross their own
+            // approval boundary instead of silently inheriting it.
+            accept_verification: self.accept_verification && self.spawn_depth == 0,
             agent_tool_surface_options: self.agent_tool_surface_options.clone(),
             worker_profile: self.worker_profile.clone(),
             event_tx: self.event_tx.clone(),
@@ -4483,6 +4494,7 @@ impl ToolSpec for AgentTool {
             "Start one focused background worker and return immediately with its agent_id; a prompt is enough. ",
             "Use multiple starts for independent parallel tasks. Add a Fleet profile, role, worktree, or explicit limits only when they improve the task. ",
             "Coordinate later with agents/list, agents/message, agents/followup, agents/interrupt, or agents/wait instead of polling. ",
+            "In Operate, approving a root start delegates workspace edits and built-in non-custom verification for that task; arbitrary shell remains gated. ",
             "Legacy action=status|peek|wait|cancel remain for compatibility."
         )
     }
@@ -5279,12 +5291,14 @@ async fn spawn_subagent_from_input(
 }
 
 /// A root Operate dispatch has already crossed the approval boundary on the
-/// `agent` call. Delegate Suggest-level file edits to its write-capable worker
-/// posture so a normal message can produce work; Required tools such as shell
-/// still follow the active permission posture.
+/// `agent` call. Delegate Suggest-level file edits and the bounded built-in
+/// verification surfaces so a normal message can produce verified work.
+/// Arbitrary shell and custom verifier commands still follow the active
+/// permission posture.
 fn apply_session_spawn_defaults(runtime: &mut SubAgentRuntime) {
     if runtime.spawn_depth == 0 && runtime.parent_mode == AppMode::Operate {
         runtime.accept_edits = true;
+        runtime.accept_verification = true;
     }
 }
 
@@ -8888,6 +8902,10 @@ struct SubAgentToolRegistry {
     auto_approve: bool,
     /// Workflow-spawned children auto-accept Suggest-level file edits.
     accept_edits: bool,
+    /// Root Operate workers may run only the built-in verifier surfaces after
+    /// their parent-approved `agent` start. This never delegates raw shell or
+    /// user-supplied verifier commands.
+    accept_verification: bool,
     /// The role/type of the sub-agent that this registry belongs to. Used to
     /// decide whether `Suggest`-level tools (write/edit/patch) may run inside
     /// the child without the parent runtime being auto-approved (#1828, #1833).
@@ -8960,6 +8978,7 @@ impl SubAgentToolRegistry {
             disallowed_tools: runtime.worker_profile.denied_tools.clone(),
             auto_approve: runtime.context.auto_approve,
             accept_edits: runtime.accept_edits,
+            accept_verification: runtime.accept_verification,
             agent_type,
             runtime_profile: runtime.worker_profile,
             can_spawn_child,
@@ -8978,6 +8997,24 @@ impl SubAgentToolRegistry {
     /// regardless of role (#1828, #1833).
     fn role_can_delegate_writes(agent_type: &SubAgentType) -> bool {
         matches!(agent_type, SubAgentType::Implementer | SubAgentType::Custom)
+    }
+
+    fn is_delegated_builtin_verification(name: &str, input: &Value) -> bool {
+        match name {
+            // `run_tests.args` is raw Cargo argv and can redirect manifests or
+            // inject toolchain config. Only the fixed workspace-root command
+            // (optionally with the structured all_features flag) is delegated.
+            "run_tests" => match input.get("args") {
+                None => true,
+                Some(Value::String(args)) => args.trim().is_empty(),
+                Some(_) => false,
+            },
+            "run_verifiers" => input
+                .get("commands")
+                .map(|commands| commands.as_array().is_some_and(Vec::is_empty))
+                .unwrap_or(true),
+            _ => false,
+        }
     }
 
     /// Whether the role posture permits a given registered tool, independent of
@@ -9113,9 +9150,13 @@ impl SubAgentToolRegistry {
                     }
                 }
                 ApprovalRequirement::Required => {
-                    return Err(anyhow!(
-                        "Tool {name} requires approval and cannot run inside this sub-agent unless the parent session is auto-approved"
-                    ));
+                    if !(self.accept_verification
+                        && Self::is_delegated_builtin_verification(name, &input))
+                    {
+                        return Err(anyhow!(
+                            "Tool {name} requires approval and cannot run inside this sub-agent unless the parent session is auto-approved"
+                        ));
+                    }
                 }
             }
         }

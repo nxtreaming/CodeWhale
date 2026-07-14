@@ -2,8 +2,8 @@
 //!
 //! Replaces the old six-column config matrix (#3791). Fleet is presented as an
 //! agent team: the shortest valid path is role → provider/model → save/apply.
-//! The review step shows resolved provider, model, auth/readiness, scope, and
-//! overwrite consequences once before anything is written. Thinking defaults to
+//! The review step shows resolved provider, model, auth/readiness, profile
+//! availability, and overwrite consequences once before anything is written. Thinking defaults to
 //! inherit and can be adjusted on the review step without an extra wizard
 //! screen. "Save profile" persists the exact rendered TOML bytes.
 //!
@@ -680,7 +680,7 @@ impl FleetSetupView {
             }
             Step::Review => {
                 hints.push(ActionHint::new("↑/↓", "scroll"));
-                hints.push(ActionHint::new("s", "scope"));
+                hints.push(ActionHint::new("s", "save location"));
                 hints.push(ActionHint::new("t", "thinking"));
                 if self.model_draft.is_some() {
                     hints.push(ActionHint::new("Enter", "Save profile"));
@@ -916,7 +916,7 @@ impl FleetSetupView {
             ),
             Step::Review => (
                 "Review & save",
-                "Confirm provider, model, readiness, scope, and overwrite, then save the profile.",
+                "Confirm provider, model, readiness, profile availability, and overwrite, then save the profile.",
             ),
         };
         let lines = vec![
@@ -1009,13 +1009,13 @@ impl FleetSetupView {
         section(&mut lines, "Thinking", self.selected_thinking_label());
         section(
             &mut lines,
-            "Scope",
+            "Profile availability",
             match self.profile_scope {
                 FleetProfileScope::Project => format!(
-                    "Project — shared with this repository at {PROFILE_DIR}. Press s for a personal profile reusable across repositories. Profile scope does not expand the current workspace."
+                    "Project — saved with this repository at {PROFILE_DIR}. Press s for a personal profile reusable across repositories. This choice only controls where the profile is available; active workspace, trusted-path, and permission policy still govern execution."
                 ),
                 FleetProfileScope::Personal => format!(
-                    "Personal — reusable across repositories at {}. Project profiles still override it by id. The current operation stays inside its workspace. Press s for project scope.",
+                    "Personal — reusable across repositories at {}. Project profiles still override it by id. This choice grants no filesystem authority; active workspace, trusted-path, and permission policy still govern execution. Press s for project availability.",
                     self.profile_scope.display_dir()
                 ),
             },
@@ -1253,7 +1253,12 @@ fn choice_window_start(total: usize, selected: usize, visible: usize) -> usize {
 fn profile_file_status(scope: FleetProfileScope, workspace: &Path) -> (String, String) {
     let dir = match crate::fleet::profile::agent_profile_dir_for_scope(scope, workspace) {
         Ok(dir) => dir,
-        Err(err) => return ("blocked".to_string(), format!("scope unavailable: {err:#}")),
+        Err(err) => {
+            return (
+                "blocked".to_string(),
+                format!("profile save location unavailable: {err:#}"),
+            );
+        }
     };
     let display_dir = scope.display_dir();
     if !dir.exists() {
@@ -2015,7 +2020,7 @@ mod tests {
     }
 
     #[test]
-    fn review_lists_model_permissions_tools_and_scope() {
+    fn review_lists_model_permissions_tools_and_profile_availability() {
         // Top of the review: the leading sections are visible without scrolling.
         let top = render_through_stack(
             || {
@@ -2027,16 +2032,23 @@ mod tests {
             40,
         )
         .join("\n");
-        for section in ["Role", "Model", "Auth & readiness", "Permissions", "Tools"] {
+        for section in [
+            "Role",
+            "Model",
+            "Profile availability",
+            "Auth & readiness",
+            "Permissions",
+            "Tools",
+        ] {
             assert!(top.contains(section), "review missing section: {section}");
         }
         assert!(
-            top.contains("does not expand the current workspace"),
-            "profile scope must not imply cross-workspace execution: {top}"
+            top.contains("trusted-path, and permission policy still govern execution"),
+            "profile availability must not imply execution authority: {top}"
         );
 
         // The review is intentionally scrollable; scrolling to the bottom reveals
-        // the workspace/org scope, review policy, and the honest save note.
+        // the workspace/org execution policy, review policy, and honest save note.
         let bottom = render_through_stack(
             || {
                 let mut v = FleetSetupView::from_snapshot(snapshot());

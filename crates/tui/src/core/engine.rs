@@ -669,6 +669,15 @@ pub struct Engine {
     shared_paused: Arc<StdMutex<bool>>,
 }
 
+fn claim_subagent_completion(
+    delivered_ids: &mut HashSet<String>,
+    completion: SubAgentCompletion,
+) -> Option<SubAgentCompletion> {
+    delivered_ids
+        .insert(completion.agent_id.clone())
+        .then_some(completion)
+}
+
 // === Internal tool helpers ===
 
 fn subagent_mailbox_message_is_best_effort(message: &MailboxMessage) -> bool {
@@ -2245,12 +2254,29 @@ impl Engine {
     }
 
     async fn handle_idle_subagent_completion(&mut self, first: SubAgentCompletion) {
-        let mut completions = vec![first];
-        while let Ok(completion) = self.rx_subagent_completion.try_recv() {
+        let mut completions = Vec::new();
+        if let Some(completion) =
+            claim_subagent_completion(&mut self.delivered_subagent_completion_ids, first)
+        {
             completions.push(completion);
+        }
+        while let Ok(completion) = self.rx_subagent_completion.try_recv() {
+            if let Some(completion) =
+                claim_subagent_completion(&mut self.delivered_subagent_completion_ids, completion)
+            {
+                completions.push(completion);
+            }
+        }
+
+        if completions.is_empty() {
+            return;
         }
 
         let count = completions.len();
+        let claimed_ids = completions
+            .iter()
+            .map(|completion| completion.agent_id.clone())
+            .collect::<Vec<_>>();
         let content = completions
             .iter()
             .map(|completion| turn_loop::subagent_completion_runtime_text(&completion.payload))
@@ -2264,32 +2290,38 @@ impl Engine {
             )))
             .await;
 
-        self.handle_send_message(
-            content,
-            self.current_mode,
-            Some(self.api_provider),
-            self.session.model.clone(),
-            self.active_route_limits,
-            self.config.compaction.clone(),
-            self.config.goal_objective.clone(),
-            self.config.goal_token_budget,
-            self.config.goal_status,
-            self.session.reasoning_effort.clone(),
-            self.session.reasoning_effort_auto,
-            self.session.auto_model,
-            self.session.allow_shell,
-            self.session.trust_mode,
-            self.session.auto_approve,
-            self.session.approval_mode,
-            self.config.translation_enabled,
-            self.config.show_thinking,
-            self.config.allowed_tools.clone(),
-            Vec::new(),
-            self.config.hook_executor.clone(),
-            self.config.verbosity.clone(),
-            UserInputProvenance::SubAgentHandoff,
-        )
-        .await;
+        let recorded = self
+            .handle_send_message(
+                content,
+                self.current_mode,
+                Some(self.api_provider),
+                self.session.model.clone(),
+                self.active_route_limits,
+                self.config.compaction.clone(),
+                self.config.goal_objective.clone(),
+                self.config.goal_token_budget,
+                self.config.goal_status,
+                self.session.reasoning_effort.clone(),
+                self.session.reasoning_effort_auto,
+                self.session.auto_model,
+                self.session.allow_shell,
+                self.session.trust_mode,
+                self.session.auto_approve,
+                self.session.approval_mode,
+                self.config.translation_enabled,
+                self.config.show_thinking,
+                self.config.allowed_tools.clone(),
+                Vec::new(),
+                self.config.hook_executor.clone(),
+                self.config.verbosity.clone(),
+                UserInputProvenance::SubAgentHandoff,
+            )
+            .await;
+        if !recorded {
+            for agent_id in claimed_ids {
+                self.delivered_subagent_completion_ids.remove(&agent_id);
+            }
+        }
     }
 
     /// Handle a send message operation
@@ -2411,7 +2443,7 @@ impl Engine {
         hook_executor: Option<std::sync::Arc<crate::hooks::HookExecutor>>,
         verbosity: Option<String>,
         provenance: UserInputProvenance,
-    ) {
+    ) -> bool {
         let input_policy = effective_input_policy(
             provenance,
             mode,
@@ -2510,7 +2542,7 @@ impl Engine {
                     base_url: None,
                 })
                 .await;
-            return;
+            return false;
         }
 
         if self.model_client.is_none() {
@@ -2533,7 +2565,7 @@ impl Engine {
                     base_url: None,
                 })
                 .await;
-            return;
+            return false;
         }
 
         self.session
@@ -2903,6 +2935,7 @@ impl Engine {
                 })
                 .await;
         }
+        true
     }
 
     async fn handle_manual_compaction(&mut self) {

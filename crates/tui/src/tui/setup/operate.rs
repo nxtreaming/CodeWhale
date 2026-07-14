@@ -80,14 +80,30 @@ impl SetupOperateFacts {
         let roster =
             crate::fleet::roster::FleetRoster::load(&config.fleet_config(), &app.workspace);
         let roster_members = roster.members().len();
-        let custom_roster_members = roster
-            .members()
-            .iter()
-            .filter(|member| !matches!(member.origin, crate::fleet::roster::ProfileOrigin::BuiltIn))
-            .count();
+        let origin_count = |origin| {
+            roster
+                .members()
+                .iter()
+                .filter(|member| member.origin == origin)
+                .count()
+        };
+        let config_members = origin_count(crate::fleet::roster::ProfileOrigin::Config);
+        let personal_members = origin_count(crate::fleet::roster::ProfileOrigin::Personal);
+        let project_members = origin_count(crate::fleet::roster::ProfileOrigin::Workspace);
+        let custom_roster_members = config_members + personal_members + project_members;
         let roster_ready = roster_members > 0;
         let roster_result = if custom_roster_members > 0 {
-            format!("{roster_members} Fleet members ({custom_roster_members} config/workspace)")
+            let origins = [
+                ("config", config_members),
+                ("personal", personal_members),
+                ("project", project_members),
+            ]
+            .into_iter()
+            .filter(|(_, count)| *count > 0)
+            .map(|(label, count)| format!("{label}={count}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+            format!("{roster_members} Fleet members (custom: {origins})")
         } else {
             format!("{roster_members} built-in Fleet members; starter roster available")
         };

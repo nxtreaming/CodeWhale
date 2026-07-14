@@ -5073,6 +5073,7 @@ fn stub_runtime() -> SubAgentRuntime {
         context,
         allow_shell: true,
         accept_edits: false,
+        accept_verification: false,
         agent_tool_surface_options: AgentToolSurfaceOptions::new(ShellPolicy::Full),
         worker_profile: WorkerRuntimeProfile::for_role(SubAgentType::General),
         event_tx: None,
@@ -5098,14 +5099,84 @@ fn root_operate_dispatch_delegates_file_edits_without_bypassing_required_tools()
     let mut runtime = stub_runtime();
     runtime.parent_mode = crate::tui::app::AppMode::Operate;
     assert!(!runtime.accept_edits);
+    assert!(!runtime.accept_verification);
     assert!(!runtime.context.auto_approve);
 
     apply_session_spawn_defaults(&mut runtime);
 
     assert!(runtime.accept_edits);
+    assert!(runtime.accept_verification);
     assert!(
         !runtime.context.auto_approve,
         "Operate dispatch must not silently grant Required tools such as shell"
+    );
+}
+
+#[tokio::test]
+async fn root_operate_dispatch_delegates_builtin_verification_but_not_shell() {
+    let tmp = tempdir().expect("tempdir");
+    std::fs::create_dir_all(tmp.path().join("src")).expect("src dir");
+    std::fs::write(
+        tmp.path().join("Cargo.toml"),
+        "[package]\nname = \"operate-verification-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+    )
+    .expect("manifest");
+    std::fs::write(
+        tmp.path().join("src/lib.rs"),
+        "pub fn ready() -> bool { true }\n",
+    )
+    .expect("source");
+
+    let mut runtime = stub_runtime();
+    runtime.context = ToolContext::new(tmp.path().to_path_buf());
+    runtime.context.auto_approve = false;
+    runtime.parent_mode = crate::tui::app::AppMode::Operate;
+    apply_session_spawn_defaults(&mut runtime);
+    let registry = SubAgentToolRegistry::new(
+        runtime.clone(),
+        SubAgentType::General,
+        None,
+        Arc::new(Mutex::new(TodoList::new())),
+        Arc::new(Mutex::new(PlanState::default())),
+    );
+
+    registry
+        .execute("agent_test", "run_tests", json!({}))
+        .await
+        .expect("parent-approved Operate worker should run built-in tests");
+
+    let targeted_err = registry
+        .execute(
+            "agent_test",
+            "run_tests",
+            json!({"args": "--manifest-path ../outside/Cargo.toml"}),
+        )
+        .await
+        .expect_err("raw Cargo argv must stay approval-gated");
+    assert!(targeted_err.to_string().contains("requires approval"));
+
+    let shell_err = registry
+        .execute("agent_test", "exec_shell", json!({"command": "echo nope"}))
+        .await
+        .expect_err("Operate verification delegation must not grant raw shell");
+    assert!(shell_err.to_string().contains("requires approval"));
+
+    let custom_err = registry
+        .execute(
+            "agent_test",
+            "run_verifiers",
+            json!({"commands": [{"name": "custom", "program": "echo", "args": ["nope"]}]}),
+        )
+        .await
+        .expect_err("Operate verification delegation must not grant custom commands");
+    assert!(custom_err.to_string().contains("requires approval"));
+
+    let direct_child = runtime.child_runtime();
+    assert!(direct_child.accept_verification);
+    let grandchild = direct_child.child_runtime();
+    assert!(
+        !grandchild.accept_verification,
+        "Operate verification delegation must not propagate past the direct worker"
     );
 }
 

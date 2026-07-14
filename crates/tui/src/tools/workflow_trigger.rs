@@ -6,9 +6,9 @@
 //! ask setup questions via `request_user_input` (TUI modal) before calling
 //! `workflow` / `plan`.
 //!
-//! Operate uses this as model guidance, not as a prose classifier at the host
-//! boundary. The host enforces actual tool capabilities: parent reads and
-//! coordination are allowed while mutating work stays in workers.
+//! This remains Act/Agent guidance rather than a prose classifier at the host
+//! boundary. Operate sends ordinary work to direct background workers and
+//! reaches for Workflow only when its stronger orchestration properties help.
 
 /// Signals the parent can supply without full conversation replay.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -71,8 +71,9 @@ impl WorkflowTriggerDecision {
 /// Evaluate whether automatic Workflow is appropriate for this user ask.
 ///
 /// Suppression wins over trigger when both could apply (noisy auto-orchestration
-/// is worse than missing a fan-out). Prompt guidance in Agent/Operate modes
-/// should stay aligned with these rules.
+/// is worse than missing a fan-out). Act/Agent soft-auto guidance should stay
+/// aligned with these rules. Operate dispatches direct workers unless stronger
+/// Workflow properties are explicitly useful.
 #[must_use]
 pub fn evaluate_workflow_trigger(
     user_text: &str,
