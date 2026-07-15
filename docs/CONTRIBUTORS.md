@@ -44,6 +44,9 @@ and dead-code removal landed alongside Cursor dogfood evidence for v0.8.67.
   bindgen support for codewhale-workflow-js (PR #4349)
 - **[eugenicum](https://github.com/eugenicum)** — copy-paste rail-pollution
   report with code-aware fix direction (#4208)
+- **[Fushimi Rio / CCChisato](https://github.com/CCChisato)** — inline skill
+  task pass-through fix direction and the exact-name `install` skill collision
+  identified in #3915
 
 - **[Jeffrey Luna / Mr-Moon121](https://github.com/Mr-Moon121)** — anti-polling
   constitution for sub-agent waiting (harvested into #4097 / PR #4229 from

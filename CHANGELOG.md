@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve the trailing task in inline skill invocations: `$<skill> do X`,
+  `/<skill> do X`, and `/skill <skill> do X` now dispatch `do X` immediately
+  with the selected skill instructions attached, while a bare `$<skill>` still
+  arms the next message. A skill literally named `install` remains callable
+  through `$install` and `/install` without shadowing the existing `/skill
+  install` management path (#3915, with fix direction from @CCChisato).
 - Make offline `scorecard` pricing provider-aware: `turn_end` records carry the
   effective route and a non-secret billing surface, runtime exports and
   supported aliases ingest cleanly, legacy/unknown routes remain explicitly
