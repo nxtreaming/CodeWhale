@@ -115,16 +115,14 @@ impl MentionDiscoveryWorker {
         Ok(Self { shared })
     }
 
-    /// Replace the pending slot without waiting. The worker only holds this
-    /// mutex long enough to take one request; filesystem work happens after it
-    /// is released.
+    /// Replace the pending slot without waiting on filesystem work. The worker
+    /// only holds this mutex long enough to take one request; scanning happens
+    /// after it is released, so brief lock contention must not drop the request.
     fn submit(&self, request: MentionDiscoveryRequest) -> bool {
         self.shared
             .latest_generation
             .store(request.generation, Ordering::Release);
-        let Some(mut pending) = self.shared.pending.try_lock() else {
-            return false;
-        };
+        let mut pending = self.shared.pending.lock();
         *pending = Some(request);
         drop(pending);
         self.shared.wake.notify_one();
@@ -224,9 +222,10 @@ struct CachedMentionDiscovery {
 
 /// UI-owned handle for the serialized mention-discovery worker.
 ///
-/// `ensure_requested`, `poll`, and `cached_entries` are all non-blocking. The
-/// only synchronous work on the UI thread is key comparison and cloning an
-/// already-bounded in-memory result.
+/// `ensure_requested`, `poll`, and `cached_entries` never wait on filesystem
+/// discovery. The only synchronous work on the UI thread is key comparison,
+/// cloning an already-bounded in-memory result, and briefly locking a request
+/// slot that the worker never holds while scanning.
 pub(crate) struct MentionDiscovery {
     scanner: Arc<MentionScanner>,
     worker: Option<MentionDiscoveryWorker>,
@@ -376,6 +375,8 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
 
+    const TEST_WORKER_TIMEOUT: Duration = Duration::from_secs(10);
+
     fn key(name: &str) -> MentionDiscoveryKey {
         MentionDiscoveryKey::fuzzy(PathBuf::from(name), None, 10, false)
     }
@@ -406,7 +407,7 @@ mod tests {
             "request submission waited on the blocked scanner"
         );
         started_rx
-            .recv_timeout(Duration::from_secs(1))
+            .recv_timeout(TEST_WORKER_TIMEOUT)
             .expect("scanner should start in the background");
 
         let second_started = Instant::now();
@@ -416,6 +417,50 @@ mod tests {
             "superseding request waited on the blocked scanner"
         );
         release_tx.send(()).unwrap();
+    }
+
+    #[test]
+    fn contended_pending_slot_does_not_drop_request() {
+        let (scan_started_tx, scan_started_rx) = mpsc::channel();
+        let worker = MentionDiscoveryWorker::spawn(Arc::new(move |_, _| {
+            let _ = scan_started_tx.send(());
+            Vec::new()
+        }))
+        .expect("worker should start");
+        let pending_guard = worker.shared.pending.lock();
+        let (attempting_tx, attempting_rx) = mpsc::channel();
+        let (submitted_tx, submitted_rx) = mpsc::channel();
+        let request = MentionDiscoveryRequest {
+            generation: 1,
+            key: key("contended"),
+        };
+
+        thread::scope(|scope| {
+            let worker = &worker;
+            scope.spawn(move || {
+                attempting_tx.send(()).unwrap();
+                submitted_tx.send(worker.submit(request)).unwrap();
+            });
+            attempting_rx
+                .recv_timeout(TEST_WORKER_TIMEOUT)
+                .expect("submission should be attempted");
+            let submitted_while_contended = submitted_rx.recv_timeout(Duration::from_millis(50));
+            drop(pending_guard);
+            let submitted = match submitted_while_contended {
+                Ok(submitted) => submitted,
+                Err(mpsc::RecvTimeoutError::Timeout) => submitted_rx
+                    .recv_timeout(TEST_WORKER_TIMEOUT)
+                    .expect("submission should finish after contention clears"),
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    panic!("submission thread disconnected")
+                }
+            };
+            assert!(submitted, "a contended request must not be dropped");
+        });
+
+        scan_started_rx
+            .recv_timeout(TEST_WORKER_TIMEOUT)
+            .expect("the contended request should reach the scanner");
     }
 
     #[test]
@@ -439,12 +484,12 @@ mod tests {
         let new_key = key("new");
         discovery.ensure_requested(old_key.clone());
         first_started_rx
-            .recv_timeout(Duration::from_secs(1))
+            .recv_timeout(TEST_WORKER_TIMEOUT)
             .expect("old scan should start");
         discovery.ensure_requested(new_key.clone());
         release_first_tx.send(()).unwrap();
 
-        wait_until(Duration::from_secs(1), || discovery.poll());
+        wait_until(TEST_WORKER_TIMEOUT, || discovery.poll());
         assert!(discovery.cached_entries(&old_key).is_none());
         assert_eq!(
             discovery.cached_entries(&new_key),
