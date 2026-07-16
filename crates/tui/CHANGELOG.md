@@ -100,9 +100,12 @@ largest curated model-and-pricing expansion in the project so far.
   goal, and explain how to recover when a previously cached approval is denied.
   Cached-denial recovery is also committed as a settled transcript receipt, so
   tool completion or a later status update cannot erase it from scrollback or
-  accessibility output. Both states remain visible and actionable across all
-  shipped locales instead of looking like unexplained model or tool failure
-  (#4374 and #4375 by @Angel-Hair).
+  accessibility output. The notice now describes matching, process-scoped
+  denials truthfully across all shipped locales; approval audits honor
+  `CODEWHALE_HOME`, and expired status toasts cannot remain trapped behind a
+  persistent entry. Both states remain visible and actionable instead of
+  looking like unexplained model or tool failure (#4374 and #4375 by
+  @Angel-Hair, with the final hardening in #4385 by @nightt5879).
 - Make Fleet launch and teardown deterministic: route flags are placed before
   `exec`, workers are contained in owned Unix sessions or Windows Job Objects,
   and cancellation reaps surviving descendants with bounded escalation before
@@ -116,8 +119,12 @@ largest curated model-and-pricing expansion in the project so far.
   terminal receipt, while per-run manager ownership prevents concurrent
   controllers from launching the same attempt twice.
 - Keep the stopship Workflow fixture bounded to measured 24k-per-turn role
-  budgets and a 360k aggregate. Free-form descriptions no longer fabricate
-  write, shell, or network risk; unknown structured risk remains fail-closed.
+  budgets and a 360k aggregate. Authored child step and wall-time limits now
+  reach the live runtime, including launch-queue wait; promoted evidence stays
+  intact between roles, tool-free handoff consumers omit tool fields on the
+  provider wire, and a terminal `BLOCK` fails the Workflow instead of producing
+  a successful Lane receipt. Free-form descriptions no longer fabricate write,
+  shell, or network risk; unknown structured risk remains fail-closed.
 - Keep repository trust affirmative and explicit: only `1`/`Y` are advertised
   as acceptance keys, while Enter remains non-affirmative and explains the
   required choice.
