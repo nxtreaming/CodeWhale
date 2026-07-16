@@ -5777,17 +5777,30 @@ struct SubAgentTask {
 
 #[allow(clippy::too_many_lines)]
 async fn run_subagent_task(task: SubAgentTask) {
+    let deadline = task.started_at + task.wall_time;
+
     // Interactive launch gate (#3095): direct children acquire a permit
     // before their first model step so a fanout burst beyond the limit
     // queues visibly instead of executing all at once. The permit is held
-    // for the lifetime of the task. Cancellation while queued is handled by
-    // `run_subagent`'s own first-step cancel check.
+    // for the lifetime of the task. The permit wait shares the authored child
+    // deadline with model/tool work, so saturation cannot extend the whole
+    // child beyond its wall-time budget. Cancellation while queued is handled
+    // by `run_subagent`'s own first-step cancel check.
     let mut _launch_permit = None;
+    let mut launch_wait_timed_out = false;
     if let Some(gate) = task.launch_gate.as_ref() {
         match Arc::clone(gate).try_acquire_owned() {
             Ok(permit) => _launch_permit = Some(permit),
             Err(tokio::sync::TryAcquireError::NoPermits) => {
-                _launch_permit = acquire_queued_launch_permit(&task, Arc::clone(gate)).await;
+                match tokio::time::timeout_at(
+                    deadline.into(),
+                    acquire_queued_launch_permit(&task, Arc::clone(gate)),
+                )
+                .await
+                {
+                    Ok(permit) => _launch_permit = permit,
+                    Err(_) => launch_wait_timed_out = true,
+                }
             }
             Err(tokio::sync::TryAcquireError::Closed) => {
                 crate::logging::warn(format!(
@@ -5798,25 +5811,28 @@ async fn run_subagent_task(task: SubAgentTask) {
         }
     }
 
-    let deadline = task.started_at + task.wall_time;
-    let result = tokio::time::timeout_at(
-        deadline.into(),
-        run_subagent(
-            &task.runtime,
-            task.agent_id.clone(),
-            task.agent_type,
-            task.prompt,
-            task.assignment,
-            task.allowed_tools,
-            task.fork_context,
-            task.started_at,
-            task.max_steps,
-            task.token_budget,
-            task.input_rx,
-        ),
-    )
-    .await
-    .unwrap_or_else(|_| Err(anyhow!(child_wall_time_exhausted_reason(task.wall_time))));
+    let result = if launch_wait_timed_out {
+        Err(anyhow!(child_wall_time_exhausted_reason(task.wall_time)))
+    } else {
+        tokio::time::timeout_at(
+            deadline.into(),
+            run_subagent(
+                &task.runtime,
+                task.agent_id.clone(),
+                task.agent_type,
+                task.prompt,
+                task.assignment,
+                task.allowed_tools,
+                task.fork_context,
+                task.started_at,
+                task.max_steps,
+                task.token_budget,
+                task.input_rx,
+            ),
+        )
+        .await
+        .unwrap_or_else(|_| Err(anyhow!(child_wall_time_exhausted_reason(task.wall_time))))
+    };
 
     // Emit BOTH a human-friendly summary (rendered in the parent's
     // sidebar / cell) AND a structured sentinel the model can recognize

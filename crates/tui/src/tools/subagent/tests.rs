@@ -7263,6 +7263,133 @@ async fn launch_gate_queues_extra_direct_children() {
     );
 }
 
+#[tokio::test]
+async fn launch_gate_wait_counts_against_child_wall_timeout() {
+    use tokio::sync::Semaphore;
+    use tokio_util::sync::CancellationToken;
+
+    const WALL_TIME: Duration = Duration::from_millis(150);
+
+    let tmp = tempdir().expect("tempdir");
+    let manager = Arc::new(RwLock::new(SubAgentManager::new(
+        tmp.path().to_path_buf(),
+        2,
+    )));
+    let (input_tx, input_rx) = mpsc::unbounded_channel();
+    let agent_id = "agent_gate_wall_timeout".to_string();
+    let mut agent = SubAgent::new(
+        agent_id.clone(),
+        SubAgentType::General,
+        "Answer".to_string(),
+        make_assignment(),
+        "deepseek-v4-flash".to_string(),
+        None,
+        Some(vec![]),
+        input_tx,
+        tmp.path().to_path_buf(),
+        "boot_test".to_string(),
+    );
+    agent.status = SubAgentStatus::Running;
+
+    let (mailbox, mut mailbox_rx) = Mailbox::new(CancellationToken::new());
+    let mut runtime = stub_runtime();
+    runtime.manager = Arc::clone(&manager);
+    runtime.context = ToolContext::new(tmp.path());
+    runtime.mailbox = Some(mailbox);
+
+    let gate = Arc::new(Semaphore::new(1));
+    let held_launch_permit = Arc::clone(&gate)
+        .acquire_owned()
+        .await
+        .expect("test holds the single launch permit past the wall timeout");
+    let task = SubAgentTask {
+        manager_handle: Arc::clone(&manager),
+        runtime,
+        agent_id: agent_id.clone(),
+        agent_type: SubAgentType::General,
+        prompt: "Answer".to_string(),
+        assignment: make_assignment(),
+        allowed_tools: Some(vec![]),
+        fork_context: false,
+        started_at: Instant::now(),
+        max_steps: 1,
+        token_budget: None,
+        wall_time: WALL_TIME,
+        input_rx,
+        launch_gate: Some(Arc::clone(&gate)),
+    };
+    {
+        let mut manager = manager.write().await;
+        manager.register_worker(make_worker_spec(&agent_id, tmp.path().to_path_buf()));
+        manager.agents.insert(agent_id.clone(), agent);
+    }
+
+    let mut task_handle = tokio::spawn(run_subagent_task(task));
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let envelope = mailbox_rx
+                .recv()
+                .await
+                .expect("queued progress mailbox remains open");
+            if matches!(
+                envelope.message,
+                MailboxMessage::Progress { ref agent_id, ref status }
+                    if agent_id == "agent_gate_wall_timeout" && status.contains("queued")
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("child publishes queued progress before its wall timeout");
+
+    match tokio::time::timeout(Duration::from_secs(1), &mut task_handle).await {
+        Ok(joined) => joined.expect("wall-timed-out child task exits cleanly"),
+        Err(_) => {
+            task_handle.abort();
+            panic!("launch-permit wait escaped the authored child wall timeout");
+        }
+    }
+    assert_eq!(
+        gate.available_permits(),
+        0,
+        "the task must time out while the test still holds the launch permit"
+    );
+
+    let manager = manager.read().await;
+    let snapshot = manager
+        .get_result(&agent_id)
+        .expect("timed-out child remains inspectable");
+    let SubAgentStatus::Failed(error) = &snapshot.status else {
+        panic!("wall timeout must be a typed child failure: {snapshot:?}");
+    };
+    assert!(
+        error.contains("child wall-time budget exhausted"),
+        "{error}"
+    );
+
+    let worker = manager
+        .get_worker_record(&agent_id)
+        .expect("timed-out durable worker remains inspectable");
+    assert_eq!(worker.status, AgentWorkerStatus::Failed);
+    assert_eq!(worker.error.as_deref(), Some(error.as_str()));
+    assert!(
+        worker
+            .events
+            .iter()
+            .any(|event| event.status == AgentWorkerStatus::Queued),
+        "worker receipt must retain the launch-queue phase: {worker:?}"
+    );
+    assert_eq!(
+        worker.events.back().map(|event| event.status),
+        Some(AgentWorkerStatus::Failed),
+        "worker receipt must close with a typed failure: {worker:?}"
+    );
+
+    drop(manager);
+    drop(held_launch_permit);
+}
+
 /// Stub chat server that always replies with a final assistant text whose
 /// `usage` reports the given token counts. Returns the client plus a call
 /// counter so tests can assert how many model turns ran before a budget cap
