@@ -5630,6 +5630,12 @@ pub(crate) async fn spawn_workflow_task(
     if let Some(value) = request.token_budget {
         input["token_budget"] = json!(value);
     }
+    if let Some(value) = request.max_steps {
+        input["max_steps"] = json!(value);
+    }
+    if let Some(value) = request.wall_time_secs {
+        input["wall_time_secs"] = json!(value);
+    }
     // Workflow children inherit the parent tool surface and auto-accept
     // Suggest-level file edits for write-capable roles. Shell / network / MCP
     // still require parent auto-approve (or fail closed).

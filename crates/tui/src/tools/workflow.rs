@@ -1544,6 +1544,8 @@ impl DeclarativeWorkflowLowerer {
                 None,
                 false,
                 None,
+                None,
+                None,
                 &spec.id,
                 Some("reduce"),
                 None,
@@ -1617,6 +1619,8 @@ fn leaf_task_options_expression(
         // Explicit isolation: shared is the approved same-worktree override.
         leaf_wants_worktree(spec, parallel),
         spec.budget.max_tokens,
+        spec.budget.max_steps,
+        spec.budget.timeout_secs,
         &spec.id,
         phase,
         leaf_allowed_tools(spec)?,
@@ -1743,6 +1747,8 @@ fn task_options_expression(
     profile: Option<&str>,
     worktree: bool,
     token_budget: Option<u64>,
+    max_steps: Option<u32>,
+    wall_time_secs: Option<u64>,
     label: &str,
     phase: Option<&str>,
     allowed_tools: Option<Vec<String>>,
@@ -1766,6 +1772,12 @@ fn task_options_expression(
     }
     if let Some(token_budget) = token_budget {
         fields.push(format!("tokenBudget: {token_budget}"));
+    }
+    if let Some(max_steps) = max_steps {
+        fields.push(format!("maxSteps: {max_steps}"));
+    }
+    if let Some(wall_time_secs) = wall_time_secs {
+        fields.push(format!("wallTimeSecs: {wall_time_secs}"));
     }
     if let Some(allowed_tools) = allowed_tools {
         fields.push(format!(
@@ -3320,6 +3332,8 @@ mod tests {
             allowed_tools: None,
             max_depth: None,
             token_budget: None,
+            max_steps: None,
+            wall_time_secs: None,
             response_schema: None,
             label: Some("fix".to_string()),
             phase: Some("implement".to_string()),
@@ -3346,6 +3360,8 @@ mod tests {
             allowed_tools: None,
             max_depth: None,
             token_budget: None,
+            max_steps: None,
+            wall_time_secs: None,
             response_schema: None,
             label: None,
             phase: None,
@@ -3356,6 +3372,88 @@ mod tests {
         assert!(
             err.to_string().contains("unknown fleet role `wizard`"),
             "{err}"
+        );
+    }
+
+    #[test]
+    fn declarative_leaf_budget_reaches_task_runtime_options() {
+        let source = r#"
+workflow({
+  "goal": "bound one child",
+  "nodes": [{
+    "agent": {
+      "id": "bounded",
+      "prompt": "Inspect bounded evidence.",
+      "budget": { "max_tokens": 5000, "max_steps": 4, "timeout_secs": 90 }
+    }
+  }]
+});
+"#;
+
+        let adapted = adapt_workflow_source(source, None).expect("lower bounded leaf");
+        assert!(
+            adapted.source.contains("tokenBudget: 5000"),
+            "{}",
+            adapted.source
+        );
+        assert!(adapted.source.contains("maxSteps: 4"), "{}", adapted.source);
+        assert!(
+            adapted.source.contains("wallTimeSecs: 90"),
+            "{}",
+            adapted.source
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn declarative_max_steps_zero_stops_before_provider_call() {
+        let _retry_guard = workflow_test_retry_guard();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
+        let (client, calls) = fake_chat_client("must not be called").await;
+        let runtime = SubAgentRuntime::new(
+            client,
+            "deepseek-v4-flash".to_string(),
+            ctx.clone(),
+            true,
+            None,
+            manager.clone(),
+        );
+        let tool = WorkflowTool::new(manager, runtime);
+
+        let result = tool
+            .execute(
+                json!({
+                    "action": "run",
+                    "script": r#"
+                    workflow({
+                      "goal": "prove the child step cap reaches runtime",
+                      "nodes": [{
+                        "agent": {
+                          "id": "zero-step",
+                          "prompt": "Do not start a model turn.",
+                          "budget": { "max_steps": 0, "timeout_secs": 90 }
+                        }
+                      }]
+                    });
+                    "#
+                }),
+                &ctx,
+            )
+            .await
+            .expect("failed workflow still returns its terminal receipt");
+        let payload: Value = serde_json::from_str(&result.content).expect("workflow JSON");
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "provider must not be called"
+        );
+        assert_eq!(payload["status"], "failed", "{payload}");
+        assert_eq!(
+            payload["execution"]["leaf_results"][0]["status"], "failed",
+            "{payload}"
         );
     }
 
@@ -4440,6 +4538,8 @@ reviewer = "reviewer"
             allowed_tools: Some(Vec::new()),
             max_depth: None,
             token_budget: None,
+            max_steps: None,
+            wall_time_secs: None,
             response_schema: None,
             label: Some("fix".to_string()),
             phase: None,
@@ -4596,6 +4696,8 @@ reviewer = "reviewer"
             allowed_tools: Some(Vec::new()),
             max_depth: None,
             token_budget: None,
+            max_steps: None,
+            wall_time_secs: None,
             response_schema: None,
             label: Some("blocked".to_string()),
             phase: None,
@@ -4712,6 +4814,8 @@ reviewer = "reviewer"
             allowed_tools: Some(Vec::new()),
             max_depth: None,
             token_budget: None,
+            max_steps: None,
+            wall_time_secs: None,
             response_schema: None,
             label: Some("blocked".to_string()),
             phase: None,
@@ -4884,6 +4988,8 @@ reviewer = "reviewer"
             allowed_tools: Some(Vec::new()),
             max_depth: None,
             token_budget: None,
+            max_steps: None,
+            wall_time_secs: None,
             response_schema: None,
             label: Some("verify".to_string()),
             phase: None,
