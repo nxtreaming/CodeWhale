@@ -1641,6 +1641,48 @@ fn windows_job_kill_on_close_releases_reader_threads_when_terminate_denied() {
     assert_eq!(done.status, ShellStatus::Completed);
 }
 
+#[cfg(windows)]
+#[test]
+fn killed_shell_does_not_wait_for_blocked_reader_threads() {
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let stdout_thread = std::thread::spawn(move || {
+        let _ = release_rx.recv();
+    });
+    let now = std::time::Instant::now();
+    let mut shell = BackgroundShell {
+        id: "killed-reader".to_string(),
+        command: "test".to_string(),
+        working_dir: std::path::PathBuf::from("."),
+        status: ShellStatus::Killed,
+        exit_code: None,
+        started_at: now,
+        last_output_at: now,
+        last_observed_output_len: 0,
+        sandbox_type: SandboxType::None,
+        linked_task_id: None,
+        owner_agent: None,
+        stdout_buffer: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        stderr_buffer: None,
+        stdout_cursor: 0,
+        stderr_cursor: 0,
+        completion_reported: false,
+        stdin: None,
+        child: None,
+        windows_job: None,
+        stdout_thread: Some(stdout_thread),
+        stderr_thread: None,
+    };
+
+    let started = std::time::Instant::now();
+    shell.collect_output();
+
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "killed shell must not synchronously join a blocked reader"
+    );
+    release_tx.send(()).expect("release detached reader");
+}
+
 #[test]
 fn test_list_jobs_cleans_up_completed_old_processes() {
     let tmp = tempdir().expect("tempdir");

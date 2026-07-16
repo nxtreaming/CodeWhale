@@ -608,10 +608,10 @@ impl BackgroundShell {
         #[cfg(windows)]
         terminate_and_close_windows_job(self.windows_job.take());
         if let Some(handle) = self.stdout_thread.take() {
-            let _ = handle.join();
+            finish_background_reader(handle, &self.status);
         }
         if let Some(handle) = self.stderr_thread.take() {
-            let _ = handle.join();
+            finish_background_reader(handle, &self.status);
         }
         self.stdin = None;
         self.child = None;
@@ -827,6 +827,23 @@ impl BackgroundShell {
             stderr,
         }
     }
+}
+
+fn finish_background_reader(handle: std::thread::JoinHandle<()>, status: &ShellStatus) {
+    // A killed Windows process can leave a pipe reader blocked even after its
+    // Job Object has been closed. Cancellation must return promptly instead of
+    // waiting for that reader to observe EOF. Other terminal states still join
+    // so their final output is collected before the shell is discarded.
+    #[cfg(windows)]
+    if *status == ShellStatus::Killed {
+        drop(handle);
+        return;
+    }
+
+    #[cfg(not(windows))]
+    let _ = status;
+
+    let _ = handle.join();
 }
 
 impl Drop for BackgroundShell {
