@@ -673,11 +673,12 @@ workflow({
             );
             if expected_role == "scout" {
                 assert!(
-                    leaf.prompt.contains("`grep_files` first")
+                    leaf.prompt.contains("exactly one `grep_files` call")
                         && leaf
                             .prompt
-                            .contains("`read_file` only on bounded relevant snippets"),
-                    "the scout must constrain source reads"
+                            .contains("Do not call `grep_files` more than once")
+                        && leaf.prompt.contains("do not call `read_file`"),
+                    "the scout must finish discovery in one bounded tool round"
                 );
             } else {
                 assert!(
