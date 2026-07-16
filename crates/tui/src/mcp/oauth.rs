@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 use tiny_http::{Response, Server};
 use tokio::sync::{Mutex, oneshot};
 use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
 use urlencoding::decode;
 
 use super::McpServerConfig;
@@ -397,6 +398,61 @@ pub fn resolve_oauth_scopes(
 }
 
 pub async fn perform_oauth_login_for_server(
+    name: &str,
+    server: &McpServerConfig,
+    explicit_scopes: Option<Vec<String>>,
+    callback_port: Option<u16>,
+    callback_url: Option<&str>,
+) -> Result<()> {
+    perform_oauth_login_for_server_with_cancel(
+        name,
+        server,
+        explicit_scopes,
+        callback_port,
+        callback_url,
+        CancellationToken::new(),
+    )
+    .await
+}
+
+/// Run an MCP OAuth login that can be stopped by the caller.
+///
+/// Cancellation drops the in-flight OAuth future before this function returns,
+/// which also closes its callback listener. A caller that replaces one login
+/// with another should await the cancelled call before starting the replacement.
+pub async fn perform_oauth_login_for_server_with_cancel(
+    name: &str,
+    server: &McpServerConfig,
+    explicit_scopes: Option<Vec<String>>,
+    callback_port: Option<u16>,
+    callback_url: Option<&str>,
+    cancellation_token: CancellationToken,
+) -> Result<()> {
+    run_cancellable_oauth(
+        &cancellation_token,
+        perform_oauth_login_for_server_inner(
+            name,
+            server,
+            explicit_scopes,
+            callback_port,
+            callback_url,
+        ),
+    )
+    .await
+}
+
+async fn run_cancellable_oauth<F, T>(cancellation_token: &CancellationToken, future: F) -> Result<T>
+where
+    F: std::future::Future<Output = Result<T>>,
+{
+    tokio::select! {
+        biased;
+        _ = cancellation_token.cancelled() => bail!("OAuth login was cancelled"),
+        result = future => result,
+    }
+}
+
+async fn perform_oauth_login_for_server_inner(
     name: &str,
     server: &McpServerConfig,
     explicit_scopes: Option<Vec<String>>,
@@ -1013,6 +1069,7 @@ impl McpServerConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     #[test]
     fn resolve_oauth_scopes_prefers_explicit() {
@@ -1065,5 +1122,38 @@ mod tests {
         let hint = auth_required_login_hint("nordic-mcp");
         assert!(hint.contains("nordic-mcp"));
         assert!(hint.contains("codewhale mcp login nordic-mcp"));
+    }
+
+    #[tokio::test]
+    async fn cancellable_oauth_drops_in_flight_flow_before_returning() {
+        struct DropFlag(Arc<AtomicBool>);
+        impl Drop for DropFlag {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let cancellation_token = CancellationToken::new();
+        let cancel_from_task = cancellation_token.clone();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let flow_dropped = Arc::clone(&dropped);
+        let pending_flow = async move {
+            let _guard = DropFlag(flow_dropped);
+            std::future::pending::<Result<()>>().await
+        };
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            cancel_from_task.cancel();
+        });
+
+        let error = run_cancellable_oauth(&cancellation_token, pending_flow)
+            .await
+            .expect_err("cancellation should stop the pending OAuth flow");
+
+        assert!(error.to_string().contains("OAuth login was cancelled"));
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "the callback-server guard must be dropped before cancellation returns"
+        );
     }
 }
