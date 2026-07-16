@@ -258,6 +258,10 @@ pub struct PermissionSpec {
     pub allow_write: bool,
     #[serde(default)]
     pub allow_network: bool,
+    /// Expose no tools to the child. This is distinct from an empty
+    /// `allowed_tools` list, which preserves the role's default tool surface.
+    #[serde(default)]
+    pub deny_all_tools: bool,
     #[serde(default)]
     pub allowed_tools: Vec<String>,
     #[serde(default)]
@@ -2576,6 +2580,7 @@ mod tests {
             permissions: PermissionSpec {
                 allow_write: false,
                 allow_network: false,
+                deny_all_tools: false,
                 allowed_tools: vec!["rg".to_string()],
                 file_scope: vec!["README.md".to_string()],
             },
@@ -2648,6 +2653,7 @@ mod tests {
                             permissions: PermissionSpec {
                                 allow_write: true,
                                 allow_network: false,
+                                deny_all_tools: false,
                                 allowed_tools: Vec::new(),
                                 file_scope: vec!["README.md".to_string()],
                             },

@@ -654,6 +654,11 @@ workflow({
             assert_eq!(leaf.mode, TaskMode::ReadOnly);
             assert!(!leaf.permissions.allow_write);
             assert!(leaf.permissions.allowed_tools.is_empty());
+            assert_eq!(
+                leaf.permissions.deny_all_tools,
+                expected_role != "scout",
+                "only the source-gathering scout should receive tools"
+            );
             assert!(
                 leaf.prompt.contains(
                     "first non-empty line of your response must be exactly APPROVE or exactly BLOCK"
@@ -666,13 +671,21 @@ workflow({
                     && leaf.prompt.contains("Here is the verdict"),
                 "{expected_role} must reject verdict preambles that the host cannot parse"
             );
-            assert!(
-                leaf.prompt.contains("`grep_files` first")
-                    && leaf
-                        .prompt
-                        .contains("`read_file` only on bounded relevant snippets"),
-                "{expected_role} must constrain source reads"
-            );
+            if expected_role == "scout" {
+                assert!(
+                    leaf.prompt.contains("`grep_files` first")
+                        && leaf
+                            .prompt
+                            .contains("`read_file` only on bounded relevant snippets"),
+                    "the scout must constrain source reads"
+                );
+            } else {
+                assert!(
+                    leaf.prompt.contains("Tools are intentionally unavailable")
+                        && leaf.prompt.contains("promoted handoff"),
+                    "{expected_role} must consume promoted evidence without reopening discovery"
+                );
+            }
             assert_eq!(leaf.budget.max_steps, Some(max_steps), "{expected_role}");
             let response_budget = match max_steps {
                 6 => "at most six model responses",

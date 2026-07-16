@@ -1663,6 +1663,12 @@ fn validate_leaf_runtime_contract(spec: &LeafSpec) -> Result<(), ToolError> {
             spec.id
         )));
     }
+    if spec.permissions.deny_all_tools && !spec.permissions.allowed_tools.is_empty() {
+        return Err(ToolError::invalid_input(format!(
+            "Workflow leaf '{}' cannot combine deny_all_tools with allowed_tools",
+            spec.id
+        )));
+    }
     Ok(())
 }
 
@@ -1702,6 +1708,9 @@ fn leaf_subagent_type(spec: &LeafSpec) -> Option<&'static str> {
 }
 
 fn leaf_allowed_tools(spec: &LeafSpec) -> Result<Option<Vec<String>>, ToolError> {
+    if spec.permissions.deny_all_tools {
+        return Ok(Some(Vec::new()));
+    }
     if !spec.permissions.allowed_tools.is_empty() {
         return Ok(Some(spec.permissions.allowed_tools.clone()));
     }
@@ -5333,6 +5342,31 @@ reviewer = "reviewer"
             fleet_dir.join("stopship.toml"),
         )
         .expect("copy stopship fleet");
+
+        let source = std::fs::read_to_string(workflow_dir.join("stopship.workflow.js"))
+            .expect("read stopship acceptance fixture");
+        let compiled =
+            codewhale_workflow::compile_javascript_workflow("stopship.workflow.js", &source)
+                .expect("compile stopship acceptance fixture");
+        let codewhale_workflow::WorkflowNode::Sequence(sequence) = &compiled.nodes[0] else {
+            panic!("stopship fixture should be one ordered role chain");
+        };
+        for (index, node) in sequence.children.iter().enumerate() {
+            let codewhale_workflow::WorkflowNode::Leaf(leaf) = node else {
+                panic!("stopship role chain must contain only leaves");
+            };
+            let tools = leaf_allowed_tools(leaf).expect("lower stopship child tools");
+            if index == 0 {
+                assert!(tools.as_ref().is_some_and(|tools| !tools.is_empty()));
+            } else {
+                assert_eq!(
+                    tools,
+                    Some(Vec::<String>::new()),
+                    "downstream handoff consumer {} must receive no tools",
+                    leaf.id
+                );
+            }
+        }
 
         let ctx = ToolContext::new(tmp.path().to_path_buf());
         let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 8);
