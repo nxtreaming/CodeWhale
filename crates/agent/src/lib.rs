@@ -1391,6 +1391,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn model_registry_new_builds_alias_map_correctly() {
+        let models = vec![
+            ModelInfo {
+                id: "Model-A".to_string(),
+                provider: ProviderKind::Deepseek,
+                aliases: vec!["alias-1".to_string(), " ALIAS-2 ".to_string()],
+                supports_tools: true,
+                supports_reasoning: false,
+            },
+            ModelInfo {
+                id: "model-b".to_string(),
+                provider: ProviderKind::Deepseek,
+                aliases: vec!["alias-1".to_string()], // Duplicate alias, should not override
+                supports_tools: true,
+                supports_reasoning: true,
+            },
+        ];
+
+        let registry = ModelRegistry::new(models);
+
+        assert_eq!(registry.alias_map.len(), 4); // "model-a", "alias-1", "alias-2", "model-b"
+        assert_eq!(registry.alias_map.get("model-a"), Some(&0));
+        assert_eq!(registry.alias_map.get("alias-1"), Some(&0)); // First one wins
+        assert_eq!(registry.alias_map.get("alias-2"), Some(&0)); // Normalized
+        assert_eq!(registry.alias_map.get("model-b"), Some(&1));
+    }
+
+    #[test]
     fn deepseek_v4_pro_alias_stays_deepseek_by_default() {
         let registry = ModelRegistry::default();
         let resolved = registry.resolve(Some("deepseek-v4-pro"), None);
