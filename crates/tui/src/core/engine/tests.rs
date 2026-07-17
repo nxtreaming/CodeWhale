@@ -3719,7 +3719,7 @@ async fn operate_model_shell_uses_normal_approval_and_workspace_sandbox() {
     let tool_call_sse = concat!(
         "data: {\"id\":\"chatcmpl-operate-tools\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[",
         "{\"index\":0,\"id\":\"call_operate_shell\",\"type\":\"function\",\"function\":{\"name\":\"exec_shell\",",
-        "\"arguments\":\"{\\\"command\\\":\\\"printf operate-approved > operate-mode-approved.txt\\\"}\"}}",
+        "\"arguments\":\"{\\\"command\\\":\\\"echo operate-approved > operate-mode-approved.txt\\\"}\"}}",
         "]},\"finish_reason\":null}]}\n\n",
         "data: {\"id\":\"chatcmpl-operate-tools\",\"choices\":[{\"index\":0,\"delta\":{},",
         "\"finish_reason\":\"tool_calls\"}]}\n\n",
@@ -3844,11 +3844,9 @@ async fn operate_model_shell_uses_normal_approval_and_workspace_sandbox() {
     );
     assert!(saw_shell_result);
     assert!(saw_complete);
-    assert_eq!(
-        std::fs::read_to_string(workspace.path().join("operate-mode-approved.txt"))
-            .expect("workspace-scoped shell output"),
-        "operate-approved"
-    );
+    let written = std::fs::read_to_string(workspace.path().join("operate-mode-approved.txt"))
+        .expect("workspace-scoped shell output");
+    assert_eq!(written.trim_end(), "operate-approved");
 }
 
 #[tokio::test]
