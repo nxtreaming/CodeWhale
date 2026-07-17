@@ -259,6 +259,7 @@
     "KbSelectedDetails": "選択したツールまたはメッセージの生の詳細を表示（Ctrl+O でターン全体の概要）",
     "KbToolDetailsPager": "選択した項目の生の詳細を表示（Alt+V）",
     "KbThinkingPager": "ターン インスペクターを開く",
+    "KbExternalEditor": "作成中の下書きを外部エディターで開く",
     "KbLiveTranscript": "ライブ会話履歴オーバーレイを開く（自動追尾スクロール）",
     "KbBacktrackMessage": "前のユーザーメッセージに戻る（左右でステップ、Enter で巻き戻し）",
     "KbCompleteCycleModes": "/command を補完、実行中ターンのフォローアップをキュー、モードを切り替え；Shift+Tab で推論強度を切り替え",

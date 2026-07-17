@@ -925,7 +925,7 @@ pub(super) fn turn_inspector_text(app: &App) -> String {
     push_section(
         &mut out,
         "Final result / status",
-        turn_result_lines(app, start, end),
+        turn_result_lines(app, start, end, ResultDetail::Full),
     );
 
     out.join("\n")
@@ -999,7 +999,7 @@ pub(crate) fn turn_handoff_markdown(app: &App) -> String {
     push_md_section(
         &mut out,
         "Result / status",
-        md_bullets(turn_result_lines(app, start, end)),
+        md_bullets(turn_result_lines(app, start, end, ResultDetail::Compact)),
     );
 
     // Trailing newline keeps the artifact clean when pasted into a PR body.
@@ -1625,8 +1625,27 @@ fn turn_route_lines(app: &App) -> Vec<String> {
     lines
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResultDetail {
+    /// Pager content is the review surface and must retain the complete final
+    /// response. Width wrapping belongs to `PagerView`, not data assembly.
+    Full,
+    /// The exported handoff is intentionally a compact overview.
+    Compact,
+}
+
+fn cleaned_turn_text(text: &str, detail: ResultDetail, max_width: usize) -> String {
+    if detail == ResultDetail::Compact {
+        return one_line_summary(text, max_width);
+    }
+
+    let mut cleaned = String::with_capacity(text.len());
+    crate::tui::osc8::strip_ansi_into(text, &mut cleaned);
+    cleaned.trim().to_string()
+}
+
 /// Section 9 — final result / current status.
-fn turn_result_lines(app: &App, start: usize, end: usize) -> Vec<String> {
+fn turn_result_lines(app: &App, start: usize, end: usize, detail: ResultDetail) -> Vec<String> {
     let mut lines = Vec::new();
 
     let status = match app.runtime_turn_status.as_deref() {
@@ -1640,8 +1659,8 @@ fn turn_result_lines(app: &App, start: usize, end: usize) -> Vec<String> {
         .rev()
         .find_map(|idx| match app.cell_at_virtual_index(idx) {
             Some(HistoryCell::Assistant { content, .. }) => {
-                let summary = one_line_summary(content, 200);
-                (!summary.is_empty()).then_some(summary)
+                let text = cleaned_turn_text(content, detail, 200);
+                (!text.is_empty()).then_some(text)
             }
             _ => None,
         });
@@ -1657,8 +1676,8 @@ fn turn_result_lines(app: &App, start: usize, end: usize) -> Vec<String> {
         .rev()
         .find_map(|idx| match app.cell_at_virtual_index(idx) {
             Some(HistoryCell::Error { message, .. }) => {
-                let summary = one_line_summary(message, 160);
-                (!summary.is_empty()).then_some(summary)
+                let text = cleaned_turn_text(message, detail, 160);
+                (!text.is_empty()).then_some(text)
             }
             _ => None,
         });

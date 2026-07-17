@@ -58,6 +58,9 @@ notes, and relevant issue/PR comments.
 - **[w1w218](https://github.com/w1w218)** — the Windows ARM64 release request
   and cross-compilation report that led to native release, npm, updater, and
   archive support (#4267)
+- **[Sh1Zuku / SparkofSpike](https://github.com/SparkofSpike)** — the Windows
+  Ctrl+O reproduction that exposed pre-pager result truncation and conflicting
+  composer shortcut routing (#4482)
 
 </details>
 

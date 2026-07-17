@@ -221,6 +221,11 @@ pub const KEYBINDINGS: &[KeybindingEntry] = &[
         section: KeybindingSection::Submission,
     },
     KeybindingEntry {
+        chord: "Ctrl+Shift+O",
+        description_id: crate::localization::MessageId::KbExternalEditor,
+        section: KeybindingSection::Editing,
+    },
+    KeybindingEntry {
         // `/transcript` is the reliable fallback when a terminal cannot
         // distinguish Ctrl+Shift+T from Ctrl+T.
         chord: "/transcript / Ctrl+Shift+T",
@@ -465,6 +470,15 @@ mod tests {
         assert_eq!(
             crate::localization::tr(crate::localization::Locale::En, ctrl_o.description_id,),
             "Open Turn Inspector"
+        );
+
+        let editor = KEYBINDINGS
+            .iter()
+            .find(|entry| entry.chord == "Ctrl+Shift+O")
+            .expect("external-editor keybinding should be documented");
+        assert_eq!(
+            crate::localization::tr(crate::localization::Locale::En, editor.description_id,),
+            "Open composer draft in external editor"
         );
     }
 

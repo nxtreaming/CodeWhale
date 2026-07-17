@@ -13334,6 +13334,39 @@ fn turn_inspector_renders_overview_sections_for_active_turn() {
 }
 
 #[test]
+fn turn_inspector_pager_retains_complete_long_final_result() {
+    let mut app = create_test_app();
+    let final_result = format!(
+        "{}\nSecond paragraph remains available.\nTAIL-SENTINEL-4482",
+        "Long final result content. ".repeat(20)
+    );
+    assert!(final_result.len() > 200);
+    app.history = vec![
+        HistoryCell::User {
+            content: "Inspect the complete result".to_string(),
+        },
+        HistoryCell::Assistant {
+            content: final_result,
+            streaming: false,
+        },
+    ];
+    app.runtime_turn_status = Some("completed".to_string());
+
+    assert!(open_turn_inspector_pager(&mut app));
+    let body = pop_pager_body(&mut app);
+
+    assert!(body.contains("TAIL-SENTINEL-4482"), "{body}");
+    assert!(
+        body.contains("Second paragraph remains available."),
+        "{body}"
+    );
+    assert!(
+        !body.contains("Long final result content. ..."),
+        "pager data must not be pre-truncated: {body}"
+    );
+}
+
+#[test]
 fn turn_inspector_timeline_numbers_semantic_entries_and_checkpoint_actions() {
     let _lock = crate::test_support::lock_test_env();
     let tmp = TempDir::new().expect("tempdir");

@@ -259,6 +259,7 @@
     "KbSelectedDetails": "Show raw detail for the selected tool or message; Ctrl+O opens the whole-turn overview",
     "KbToolDetailsPager": "Show raw detail for the selected item (Alt+V)",
     "KbThinkingPager": "Open Turn Inspector",
+    "KbExternalEditor": "Open composer draft in external editor",
     "KbLiveTranscript": "Open live transcript overlay (Ctrl+Shift+T; sticky-tail auto-scroll)",
     "KbBacktrackMessage": "Backtrack to a previous user message (Left/Right step, Enter to rewind)",
     "KbCompleteCycleModes": "Complete /command, queue running-turn follow-up, cycle modes (Plan → Act → Operate)",

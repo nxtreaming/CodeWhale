@@ -259,6 +259,7 @@
     "KbSelectedDetails": "Mostrar el detalle sin procesar de la herramienta o mensaje seleccionado; Ctrl+O abre la vista general de todo el turno",
     "KbToolDetailsPager": "Mostrar el detalle sin procesar del elemento seleccionado (Alt+V)",
     "KbThinkingPager": "Abrir Inspector de turno",
+    "KbExternalEditor": "Abrir borrador en el editor externo",
     "KbLiveTranscript": "Abrir superposición de transcripción en vivo (auto-scroll)",
     "KbBacktrackMessage": "Retroceder al mensaje anterior del usuario (izquierda/derecha, Enter para rebobinar)",
     "KbCompleteCycleModes": "Completar /command, encolar follow-up, ciclar modos; Shift+Tab cicla esfuerzo de razonamiento",

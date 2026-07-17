@@ -5064,10 +5064,8 @@ async fn run_event_loop(
                 {
                     continue;
                 }
-                KeyCode::Char('o')
-                    if key.modifiers.contains(KeyModifiers::CONTROL)
-                        && app.input.is_empty()
-                        && open_turn_inspector_pager(app) =>
+                _ if key_shortcuts::is_turn_inspector_shortcut(&key)
+                    && open_turn_inspector_pager(app) =>
                 {
                     continue;
                 }
@@ -5846,8 +5844,11 @@ async fn run_event_loop(
                     app.move_cursor_end();
                 }
                 _ if handle_composer_alt_word_motion_key(app, key) => {}
-                KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    // Ctrl+O: spawn $EDITOR on the composer contents (#91).
+                _ if key_shortcuts::is_external_editor_shortcut(&key) => {
+                    // Ctrl+Shift+O: spawn $EDITOR on the composer contents
+                    // (#91). Plain Ctrl+O belongs exclusively to the Turn
+                    // Inspector, even while the composer holds a draft
+                    // (#4482).
                     // Only fires when no modal is active (the !view_stack
                     // branch above already returns early in that case) and
                     // the composer is the focused input target. We accept the

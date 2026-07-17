@@ -70,6 +70,30 @@ pub(super) fn activity_shortcut_label() -> &'static str {
     "Ctrl+O"
 }
 
+/// Open the whole-turn inspector. Keep this exact so the shifted variant can
+/// remain available to the external editor and a draft never changes where
+/// plain Ctrl+O routes (#4482).
+pub(super) fn is_turn_inspector_shortcut(key: &KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('o'))
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT | KeyModifiers::SUPER)
+}
+
+/// Open the composer draft in `$VISUAL` / `$EDITOR` without colliding with
+/// the Turn Inspector. Windows console events can report either an uppercase
+/// character or a lowercase character plus SHIFT, so accept both shapes.
+pub(super) fn is_external_editor_shortcut(key: &KeyEvent) -> bool {
+    let is_shifted_o = matches!(key.code, KeyCode::Char('O'))
+        || (matches!(key.code, KeyCode::Char('o')) && key.modifiers.contains(KeyModifiers::SHIFT));
+    is_shifted_o
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::ALT | KeyModifiers::SUPER)
+}
+
 /// Modifier predicate for the v0.8.30 family of `Alt+<key>` transcript-
 /// nav shortcuts (`Alt+G` / `Alt+[` / `Alt+]` / `Alt+?` / `Alt+L`). Requires
 /// `Alt` and disallows `Ctrl` / `Super` so the
@@ -159,5 +183,25 @@ mod tests {
         assert!(is_paste_shortcut(&mac_paste));
         assert!(is_copy_shortcut(&linux_copy));
         assert!(is_paste_shortcut(&linux_paste));
+    }
+
+    #[test]
+    fn ctrl_o_and_ctrl_shift_o_have_stable_distinct_routes() {
+        let inspector = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL);
+        let editor_lower = KeyEvent::new(
+            KeyCode::Char('o'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        let editor_upper = KeyEvent::new(
+            KeyCode::Char('O'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+
+        assert!(is_turn_inspector_shortcut(&inspector));
+        assert!(!is_external_editor_shortcut(&inspector));
+        for editor in [&editor_lower, &editor_upper] {
+            assert!(!is_turn_inspector_shortcut(editor));
+            assert!(is_external_editor_shortcut(editor));
+        }
     }
 }
