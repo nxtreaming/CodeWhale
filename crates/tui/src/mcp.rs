@@ -6,6 +6,7 @@
 //! - Configurable timeouts per-server and globally
 
 use std::collections::HashMap;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::future::Future;
 use std::io::Read;
@@ -98,6 +99,184 @@ fn expand_env_placeholders_map(
         );
     }
     Ok(expanded)
+}
+
+fn expanded_mcp_stdio_env(config: &McpServerConfig) -> Result<HashMap<String, String>> {
+    expand_env_placeholders_map(&config.env, "env")
+}
+
+/// Mirror the exact expanded and sanitized environment applied by the MCP
+/// stdio spawn path, without constructing or starting a process.
+fn mcp_stdio_child_env(config: &McpServerConfig) -> Result<Vec<(OsString, OsString)>> {
+    let expanded_env = expanded_mcp_stdio_env(config)?;
+    Ok(crate::child_env::sanitized_mcp_env(
+        crate::child_env::string_map_env(&expanded_env),
+    ))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum McpCommandAvailability {
+    Available,
+    Missing,
+    NotApplicable,
+    NotChecked,
+}
+
+impl McpCommandAvailability {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Available => "available",
+            Self::Missing => "missing",
+            Self::NotApplicable => "not_applicable",
+            Self::NotChecked => "not_checked",
+        }
+    }
+}
+
+pub(crate) fn is_relative_stdio_path_arg(value: &str) -> bool {
+    if value.is_empty() || value.starts_with('-') || value.contains("://") || value.starts_with('~')
+    {
+        return false;
+    }
+    let looks_like_path = value.contains('/') || value.contains('\\');
+    if !looks_like_path {
+        return false;
+    }
+    let bytes = value.as_bytes();
+    let windows_absolute = value.starts_with("\\\\")
+        || (bytes.len() >= 3 && bytes[1] == b':' && (bytes[2] == b'\\' || bytes[2] == b'/'));
+    !Path::new(value).is_absolute() && !windows_absolute
+}
+
+fn env_value<'a>(env: &'a [(OsString, OsString)], name: &str) -> Option<&'a OsStr> {
+    env.iter()
+        .rev()
+        .find(|(key, _)| {
+            #[cfg(windows)]
+            {
+                key.to_string_lossy().eq_ignore_ascii_case(name)
+            }
+            #[cfg(not(windows))]
+            {
+                key == OsStr::new(name)
+            }
+        })
+        .map(|(_, value)| value.as_os_str())
+}
+
+#[cfg(unix)]
+fn spawnable_command_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    path.is_file()
+        && fs::metadata(path)
+            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn spawnable_command_file(path: &Path) -> bool {
+    path.is_file() || (path.extension().is_none() && path.with_extension("exe").is_file())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn spawnable_command_file(path: &Path) -> bool {
+    path.is_file()
+}
+
+fn path_candidate(dir: &Path, name: &str, cwd: Option<&Path>) -> PathBuf {
+    #[cfg(unix)]
+    {
+        // Unix performs PATH lookup after applying Command::current_dir. That
+        // includes empty PATH entries, which mean the child's current dir.
+        if dir.is_relative()
+            && let Some(cwd) = cwd
+        {
+            return cwd.join(dir).join(name);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = cwd;
+    dir.join(name)
+}
+
+fn command_availability_on_path(
+    name: &str,
+    env: &[(OsString, OsString)],
+    cwd: Option<&Path>,
+) -> McpCommandAvailability {
+    let Some(path) = env_value(env, "PATH") else {
+        // On Unix execvp falls back to an OS-defined path. On Windows Rust's
+        // resolver still checks system and parent locations. We cannot prove a
+        // miss without reproducing platform internals, so remain conservative.
+        return McpCommandAvailability::NotChecked;
+    };
+    for dir in std::env::split_paths(path) {
+        let candidate = path_candidate(&dir, name, cwd);
+        if spawnable_command_file(&candidate) {
+            return McpCommandAvailability::Available;
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        // Windows Command resolution also checks the running executable's
+        // directory, system directories, and the parent PATH after an explicit
+        // child PATH. A static miss in the child PATH is therefore not proof
+        // that spawn will fail. PATHEXT is intentionally not consulted: Rust
+        // only supplies an omitted `.exe`; `.cmd`/`.bat` must be explicit.
+        return McpCommandAvailability::NotChecked;
+    }
+    #[cfg(not(windows))]
+    {
+        McpCommandAvailability::Missing
+    }
+}
+
+/// Inspect an MCP stdio command using the same expanded, sanitized environment
+/// as the real spawn path, without starting the configured process.
+pub(crate) fn static_mcp_command_availability(
+    server: &McpServerConfig,
+) -> Result<McpCommandAvailability> {
+    if server.url.is_some() {
+        return Ok(McpCommandAvailability::NotApplicable);
+    }
+    let Some(cmd) = server.command.as_deref() else {
+        return Ok(McpCommandAvailability::NotChecked);
+    };
+    if cmd.is_empty() {
+        return Ok(McpCommandAvailability::Missing);
+    }
+
+    // StdioTransport expands every configured env value before spawning, even
+    // when the command itself is absolute. Mirror that failure boundary here.
+    let child_env = mcp_stdio_child_env(server)?;
+    let path = Path::new(cmd);
+    let is_absolute = path.is_absolute() || cmd.starts_with('/');
+    if is_absolute {
+        return Ok(if spawnable_command_file(path) {
+            McpCommandAvailability::Available
+        } else {
+            McpCommandAvailability::Missing
+        });
+    }
+
+    if is_relative_stdio_path_arg(cmd) {
+        let Some(cwd) = server.cwd.as_deref() else {
+            return Ok(McpCommandAvailability::NotChecked);
+        };
+        return Ok(if spawnable_command_file(&cwd.join(path)) {
+            McpCommandAvailability::Available
+        } else {
+            McpCommandAvailability::Missing
+        });
+    }
+
+    Ok(command_availability_on_path(
+        cmd,
+        &child_env,
+        server.cwd.as_deref(),
+    ))
 }
 
 /// Mask a URL so any embedded credentials in the userinfo portion (e.g.

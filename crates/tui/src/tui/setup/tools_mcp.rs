@@ -9,7 +9,10 @@ use std::path::{Path, PathBuf};
 
 use crate::config::Config;
 use crate::localization::{Locale, MessageId, tr};
-use crate::mcp::{McpConfig, McpManagerSnapshot, McpServerConfig, McpServerSnapshot};
+use crate::mcp::{
+    McpCommandAvailability, McpConfig, McpManagerSnapshot, McpServerConfig, McpServerSnapshot,
+    static_mcp_command_availability,
+};
 use crate::tui::app::App;
 use crate::tui::hotbar::actions::HotbarActionCategory;
 use crate::utils::display_path;
@@ -391,15 +394,11 @@ fn classify_config_server(server: &McpServerConfig) -> InventoryStatus {
     if server.command.is_none() && server.url.is_none() {
         return InventoryStatus::NeedsConfig;
     }
-    if let Some(cmd) = server.command.as_deref() {
-        if cmd.trim().is_empty() {
-            return InventoryStatus::NeedsConfig;
-        }
-        let path = Path::new(cmd);
-        let is_absolute = path.is_absolute() || cmd.starts_with('/');
-        if is_absolute && !path.exists() {
-            return InventoryStatus::NeedsConfig;
-        }
+    if matches!(
+        static_mcp_command_availability(server),
+        Ok(McpCommandAvailability::Missing) | Ok(McpCommandAvailability::NotChecked) | Err(_)
+    ) {
+        return InventoryStatus::NeedsConfig;
     }
     // Env-backed bearer tokens: missing env is needs_config when URL-based.
     if server.url.is_some()
@@ -670,6 +669,36 @@ mod tests {
         app
     }
 
+    fn write_path_only_command(dir: &Path) -> String {
+        let command = "codewhale-setup-mcp-path-only-test";
+        #[cfg(windows)]
+        let file_name = format!("{command}.exe");
+        #[cfg(not(windows))]
+        let file_name = command.to_string();
+        let path = dir.join(file_name);
+        std::fs::write(&path, b"test executable").expect("write path-only command");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut permissions = std::fs::metadata(&path)
+                .expect("path-only command metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&path, permissions)
+                .expect("make path-only command executable");
+        }
+        command.to_string()
+    }
+
+    fn path_server(command: &str, path: &Path) -> McpServerConfig {
+        serde_json::from_value(serde_json::json!({
+            "command": command,
+            "env": {"PATH": path},
+        }))
+        .expect("stdio server config")
+    }
+
     #[test]
     fn empty_inventory_is_off_not_error() {
         let tmp = TempDir::new().expect("tempdir");
@@ -714,18 +743,20 @@ mod tests {
         let home = tmp.path().join("cw-home");
         std::fs::create_dir_all(&home).expect("home");
         let mcp_path = tmp.path().join("mcp.json");
+        let executable = std::env::current_exe().expect("current test executable");
+        let mcp_config = serde_json::json!({
+            "servers": {
+                "docs": {
+                    "command": executable,
+                    "args": ["-y", "secret-mcp-package"],
+                    "env": {"API_KEY": "sk-mcp-secret-token"},
+                    "headers": {"Authorization": "Bearer sk-header-secret"}
+                }
+            }
+        });
         std::fs::write(
             &mcp_path,
-            r#"{
-              "servers": {
-                "docs": {
-                  "command": "npx",
-                  "args": ["-y", "secret-mcp-package"],
-                  "env": {"API_KEY": "sk-mcp-secret-token"},
-                  "headers": {"Authorization": "Bearer sk-header-secret"}
-                }
-              }
-            }"#,
+            serde_json::to_vec(&mcp_config).expect("serialize mcp config"),
         )
         .expect("write mcp");
 
@@ -790,6 +821,29 @@ mod tests {
         assert!(!blob.contains("secret-mcp-package"));
         assert!(!blob.contains("API_KEY"));
         assert!(!blob.contains("Bearer"));
+    }
+
+    #[test]
+    fn setup_and_doctor_share_static_server_path_classification() {
+        let temp = TempDir::new().expect("tempdir");
+        let command = write_path_only_command(temp.path());
+        let mut server = path_server(&command, temp.path());
+
+        assert_eq!(classify_config_server(&server), InventoryStatus::Healthy);
+        assert!(matches!(
+            crate::doctor_check_mcp_server(&server),
+            crate::McpServerDoctorStatus::Ok(_)
+        ));
+
+        server.command = Some("codewhale-setup-mcp-command-that-does-not-exist".to_string());
+        assert_eq!(
+            classify_config_server(&server),
+            InventoryStatus::NeedsConfig
+        );
+        assert!(matches!(
+            crate::doctor_check_mcp_server(&server),
+            crate::McpServerDoctorStatus::Error(_) | crate::McpServerDoctorStatus::Warning(_)
+        ));
     }
 
     #[test]

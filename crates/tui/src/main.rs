@@ -131,7 +131,10 @@ use crate::config::{Config, DEFAULT_TEXT_MODEL, MAX_SUBAGENTS, effective_home_di
 use crate::eval::{EvalHarness, EvalHarnessConfig, ScenarioStepKind};
 use crate::features::{Feature, render_feature_table};
 use crate::llm_client::LlmClient;
-use crate::mcp::{McpConfig, McpPool, McpServerConfig, McpServerOAuthConfig};
+use crate::mcp::{
+    McpCommandAvailability, McpConfig, McpPool, McpServerConfig, McpServerOAuthConfig,
+    is_relative_stdio_path_arg, static_mcp_command_availability,
+};
 use crate::models::{ContentBlock, Message, MessageRequest, SystemPrompt};
 use crate::session_manager::{SessionManager, create_saved_session, truncate_id};
 use crate::tui::history::{summarize_tool_args, summarize_tool_output};
@@ -6759,78 +6762,9 @@ impl McpServerDoctorStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum McpCommandDoctorStatus {
-    Available,
-    Missing,
-    NotApplicable,
-    NotChecked,
-}
-
-impl McpCommandDoctorStatus {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Available => "available",
-            Self::Missing => "missing",
-            Self::NotApplicable => "not_applicable",
-            Self::NotChecked => "not_checked",
-        }
-    }
-}
-
-fn is_relative_stdio_path_arg(value: &str) -> bool {
-    if value.is_empty() || value.starts_with('-') || value.contains("://") || value.starts_with('~')
-    {
-        return false;
-    }
-    let looks_like_path = value.contains('/') || value.contains('\\');
-    if !looks_like_path {
-        return false;
-    }
-    let bytes = value.as_bytes();
-    let windows_absolute = value.starts_with("\\\\")
-        || (bytes.len() >= 3 && bytes[1] == b':' && (bytes[2] == b'\\' || bytes[2] == b'/'));
-    !Path::new(value).is_absolute() && !windows_absolute
-}
-
 /// Inspect command availability without starting the configured MCP server.
-fn doctor_mcp_command_status(server: &McpServerConfig) -> McpCommandDoctorStatus {
-    if server.url.is_some() {
-        return McpCommandDoctorStatus::NotApplicable;
-    }
-    let Some(cmd) = server.command.as_deref().map(str::trim) else {
-        return McpCommandDoctorStatus::NotChecked;
-    };
-    if cmd.is_empty() {
-        return McpCommandDoctorStatus::Missing;
-    }
-
-    let path = Path::new(cmd);
-    let is_absolute = path.is_absolute() || cmd.starts_with('/');
-    if is_absolute {
-        return if path.is_file() {
-            McpCommandDoctorStatus::Available
-        } else {
-            McpCommandDoctorStatus::Missing
-        };
-    }
-
-    if is_relative_stdio_path_arg(cmd) {
-        let Some(cwd) = server.cwd.as_deref() else {
-            return McpCommandDoctorStatus::NotChecked;
-        };
-        return if cwd.join(path).is_file() {
-            McpCommandDoctorStatus::Available
-        } else {
-            McpCommandDoctorStatus::Missing
-        };
-    }
-
-    if is_command_available(cmd) {
-        McpCommandDoctorStatus::Available
-    } else {
-        McpCommandDoctorStatus::Missing
-    }
+fn doctor_mcp_command_status(server: &McpServerConfig) -> Result<McpCommandAvailability> {
+    static_mcp_command_availability(server)
 }
 
 fn doctor_mcp_server_json(name: &str, server: &McpServerConfig) -> serde_json::Value {
@@ -6851,7 +6785,9 @@ fn doctor_mcp_server_json(name: &str, server: &McpServerConfig) -> serde_json::V
                 "detail": status.detail(),
             },
             "command": {
-                "status": doctor_mcp_command_status(server).as_str(),
+                "status": doctor_mcp_command_status(server)
+                    .map(McpCommandAvailability::as_str)
+                    .unwrap_or("invalid_environment"),
             },
             "process_reachable": {
                 "status": "not_checked",
@@ -6884,9 +6820,17 @@ fn doctor_check_mcp_server(server: &McpServerConfig) -> McpServerDoctorStatus {
         return McpServerDoctorStatus::Error("empty command".to_string());
     }
 
-    if doctor_mcp_command_status(server) == McpCommandDoctorStatus::Missing {
-        return McpServerDoctorStatus::Error(format!("command not found: {cmd}"));
-    }
+    let command_availability = match doctor_mcp_command_status(server) {
+        Ok(McpCommandAvailability::Missing) => {
+            return McpServerDoctorStatus::Error(format!("command not found: {cmd}"));
+        }
+        Err(error) => {
+            return McpServerDoctorStatus::Error(format!(
+                "invalid MCP stdio environment: {error:#}"
+            ));
+        }
+        Ok(status) => status,
+    };
 
     let cmd_path = Path::new(cmd);
     // Also accept Unix-style `/` prefix on Windows, where Path::is_absolute()
@@ -6908,6 +6852,12 @@ fn doctor_check_mcp_server(server: &McpServerConfig) -> McpServerDoctorStatus {
                 "stdio server uses relative path argument \"{arg}\" without cwd; set cwd so headless exec and UI status checks resolve the same path"
             ));
         }
+    }
+
+    if command_availability == McpCommandAvailability::NotChecked {
+        return McpServerDoctorStatus::Warning(format!(
+            "stdio command availability could not be confirmed without starting \"{cmd}\""
+        ));
     }
 
     // Detect self-hosted DeepSeek server entries.
@@ -12900,6 +12850,28 @@ mod doctor_mcp_tests {
         }
     }
 
+    fn write_path_only_command(dir: &Path) -> String {
+        let command = "codewhale-doctor-mcp-path-only-test";
+        #[cfg(windows)]
+        let file_name = format!("{command}.exe");
+        #[cfg(not(windows))]
+        let file_name = command.to_string();
+        let path = dir.join(file_name);
+        std::fs::write(&path, b"test executable").expect("write path-only command");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut permissions = std::fs::metadata(&path)
+                .expect("path-only command metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&path, permissions)
+                .expect("make path-only command executable");
+        }
+        command.to_string()
+    }
+
     #[test]
     fn test_no_command_or_url_is_error() {
         let server = make_server(None, &[], None);
@@ -12927,6 +12899,73 @@ mod doctor_mcp_tests {
             McpServerDoctorStatus::Ok(detail) => assert!(detail.contains("stdio")),
             other => panic!("Expected Ok, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn doctor_uses_server_path_for_bare_command_availability() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let command = write_path_only_command(temp.path());
+        let mut server = make_server(Some(&command), &[], None);
+        server.env.insert(
+            "PATH".to_string(),
+            temp.path().to_string_lossy().into_owned(),
+        );
+
+        assert!(matches!(
+            doctor_check_mcp_server(&server),
+            McpServerDoctorStatus::Ok(_)
+        ));
+        assert_eq!(
+            doctor_mcp_server_json("path-only", &server)["checks"]["command"]["status"],
+            "available"
+        );
+
+        server.command = Some("codewhale-doctor-mcp-command-that-does-not-exist".to_string());
+        #[cfg(not(windows))]
+        assert!(matches!(
+            doctor_check_mcp_server(&server),
+            McpServerDoctorStatus::Error(detail) if detail.contains("command not found")
+        ));
+        #[cfg(windows)]
+        assert!(matches!(
+            doctor_check_mcp_server(&server),
+            McpServerDoctorStatus::Warning(detail) if detail.contains("could not be confirmed")
+        ));
+        #[cfg(not(windows))]
+        assert_eq!(
+            doctor_mcp_server_json("missing", &server)["checks"]["command"]["status"],
+            "missing"
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            doctor_mcp_server_json("missing", &server)["checks"]["command"]["status"],
+            "not_checked"
+        );
+    }
+
+    #[test]
+    fn doctor_reports_path_expansion_errors_without_leaking_values() {
+        let _lock = crate::test_support::lock_test_env();
+        let _missing =
+            crate::test_support::EnvVarGuard::remove("CODEWHALE_DOCTOR_MCP_MISSING_PATH");
+        let mut server = make_server(Some("codewhale-mcp-command"), &[], None);
+        server.env.insert(
+            "PATH".to_string(),
+            "do-not-leak-${CODEWHALE_DOCTOR_MCP_MISSING_PATH}-also-secret".to_string(),
+        );
+
+        match doctor_check_mcp_server(&server) {
+            McpServerDoctorStatus::Error(detail) => {
+                assert!(detail.contains("CODEWHALE_DOCTOR_MCP_MISSING_PATH"));
+                assert!(!detail.contains("do-not-leak"));
+                assert!(!detail.contains("also-secret"));
+            }
+            other => panic!("Expected invalid environment error, got {other:?}"),
+        }
+        assert_eq!(
+            doctor_mcp_server_json("invalid-env", &server)["checks"]["command"]["status"],
+            "invalid_environment"
+        );
     }
 
     #[test]

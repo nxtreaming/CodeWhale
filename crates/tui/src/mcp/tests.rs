@@ -266,6 +266,251 @@ fn expand_env_placeholders_reports_missing_variable_without_secret_value() {
     assert!(!err.contains("Bearer "));
 }
 
+fn write_path_only_test_command(dir: &Path) -> String {
+    let command = "codewhale-mcp-path-only-test";
+    #[cfg(windows)]
+    let file_name = format!("{command}.exe");
+    #[cfg(not(windows))]
+    let file_name = command.to_string();
+    let path = dir.join(file_name);
+    fs::write(&path, b"test executable").expect("write path-only test command");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = fs::metadata(&path)
+            .expect("path-only command metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&path, permissions).expect("make path-only test command executable");
+    }
+    command.to_string()
+}
+
+#[test]
+fn static_mcp_command_uses_expanded_sanitized_stdio_path() {
+    let _lock = crate::test_support::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let command = write_path_only_test_command(temp.path());
+    let _path = crate::test_support::EnvVarGuard::set(
+        "CODEWHALE_MCP_PATH_ONLY_DIR",
+        temp.path().as_os_str(),
+    );
+    let _secret = crate::test_support::EnvVarGuard::set(
+        "CODEWHALE_MCP_STATIC_TEST_SECRET",
+        "must-not-reach-child",
+    );
+    let mut server = test_server_config();
+    server.command = Some(command);
+    server.env.insert(
+        "PATH".to_string(),
+        "${CODEWHALE_MCP_PATH_ONLY_DIR}".to_string(),
+    );
+
+    assert_eq!(
+        static_mcp_command_availability(&server).expect("static command check"),
+        McpCommandAvailability::Available
+    );
+
+    let child_env = mcp_stdio_child_env(&server).expect("stdio child env");
+    assert_eq!(
+        env_value(&child_env, "PATH"),
+        Some(temp.path().as_os_str()),
+        "expanded server PATH must override the inherited PATH"
+    );
+    assert!(
+        child_env
+            .iter()
+            .all(|(key, _)| key != "CODEWHALE_MCP_STATIC_TEST_SECRET"),
+        "static lookup must use the same sanitized parent environment as spawn"
+    );
+
+    let expanded_env = expand_env_placeholders_map(&server.env, "env").expect("expanded env");
+    let mut old_spawn_command = tokio::process::Command::new("unused-test-command");
+    crate::child_env::apply_to_tokio_command_mcp(
+        &mut old_spawn_command,
+        crate::child_env::string_map_env(&expanded_env),
+    );
+    let old_spawn_env = old_spawn_command
+        .as_std()
+        .get_envs()
+        .map(|(key, value)| {
+            (
+                key.to_os_string(),
+                value.expect("spawn env value").to_os_string(),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let static_env = child_env.into_iter().collect::<HashMap<_, _>>();
+    assert_eq!(
+        static_env, old_spawn_env,
+        "static lookup and the pre-fix spawn helper must receive identical environments"
+    );
+}
+
+#[cfg(not(windows))]
+#[test]
+fn static_mcp_command_reports_missing_with_server_path_override() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut server = test_server_config();
+    server.command = Some("codewhale-mcp-command-that-does-not-exist".to_string());
+    server.env.insert(
+        "PATH".to_string(),
+        temp.path().to_string_lossy().into_owned(),
+    );
+
+    assert_eq!(
+        static_mcp_command_availability(&server).expect("static command check"),
+        McpCommandAvailability::Missing
+    );
+}
+
+#[test]
+fn static_mcp_command_reports_invalid_path_expansion() {
+    let _lock = crate::test_support::lock_test_env();
+    let _missing = crate::test_support::EnvVarGuard::remove("CODEWHALE_MCP_MISSING_PATH_DIR");
+    let mut server = test_server_config();
+    server.command = Some("codewhale-mcp-command".to_string());
+    server.env.insert(
+        "PATH".to_string(),
+        "do-not-leak-${CODEWHALE_MCP_MISSING_PATH_DIR}-also-secret".to_string(),
+    );
+
+    let error = static_mcp_command_availability(&server)
+        .expect_err("missing PATH placeholder must fail static validation");
+    let error = format!("{error:#}");
+    assert!(error.contains("CODEWHALE_MCP_MISSING_PATH_DIR"));
+    assert!(!error.contains("codewhale-mcp-command"));
+    assert!(!error.contains("do-not-leak"));
+    assert!(!error.contains("also-secret"));
+}
+
+#[cfg(unix)]
+fn write_unix_test_command(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::write(path, b"#!/bin/sh\nexit 0\n").expect("write Unix test command");
+    let mut permissions = fs::metadata(path)
+        .expect("Unix test command metadata")
+        .permissions();
+    permissions.set_mode(mode);
+    fs::set_permissions(path, permissions).expect("set Unix test command mode");
+}
+
+#[cfg(unix)]
+#[test]
+fn static_mcp_command_anchors_relative_and_empty_path_to_server_cwd() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let cwd = temp.path().join("server-cwd");
+    let bin = cwd.join("relative-bin");
+    fs::create_dir_all(&bin).expect("relative bin dir");
+    let relative_command = "codewhale-mcp-relative-path-test";
+    write_unix_test_command(&bin.join(relative_command), 0o755);
+
+    let mut server = test_server_config();
+    server.command = Some(relative_command.to_string());
+    server.cwd = Some(cwd.clone());
+    server
+        .env
+        .insert("PATH".to_string(), "relative-bin".to_string());
+    assert_eq!(
+        static_mcp_command_availability(&server).expect("relative PATH check"),
+        McpCommandAvailability::Available
+    );
+
+    let empty_path_command = "codewhale-mcp-empty-path-test";
+    write_unix_test_command(&cwd.join(empty_path_command), 0o755);
+    server.command = Some(empty_path_command.to_string());
+    server.env.insert("PATH".to_string(), String::new());
+    assert_eq!(
+        static_mcp_command_availability(&server).expect("empty PATH check"),
+        McpCommandAvailability::Available,
+        "an empty Unix PATH entry resolves from the child's cwd"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn static_mcp_command_preserves_literal_name_and_requires_execute_bits() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let literal_command = " codewhale-mcp-literal-command-test ";
+    write_unix_test_command(&temp.path().join(literal_command), 0o755);
+
+    let mut server = test_server_config();
+    server.command = Some(literal_command.to_string());
+    server.env.insert(
+        "PATH".to_string(),
+        temp.path().to_string_lossy().into_owned(),
+    );
+    assert_eq!(
+        static_mcp_command_availability(&server).expect("literal command check"),
+        McpCommandAvailability::Available,
+        "static validation must not trim the command passed to Command::new"
+    );
+
+    let non_executable = temp.path().join("codewhale-mcp-non-executable-test");
+    write_unix_test_command(&non_executable, 0o644);
+    server.command = Some("codewhale-mcp-non-executable-test".to_string());
+    assert_eq!(
+        static_mcp_command_availability(&server).expect("PATH execute-bit check"),
+        McpCommandAvailability::Missing
+    );
+    server.command = Some(non_executable.to_string_lossy().into_owned());
+    assert_eq!(
+        static_mcp_command_availability(&server).expect("absolute execute-bit check"),
+        McpCommandAvailability::Missing
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn static_mcp_command_matches_windows_path_and_extension_rules() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let command = write_path_only_test_command(temp.path());
+    let mut server = test_server_config();
+    server.command = Some(command);
+    server.env.insert(
+        "Path".to_string(),
+        temp.path().to_string_lossy().into_owned(),
+    );
+
+    assert_eq!(
+        static_mcp_command_availability(&server).expect("case-insensitive PATH check"),
+        McpCommandAvailability::Available
+    );
+
+    server.command = Some(
+        temp.path()
+            .join("codewhale-mcp-path-only-test")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    assert_eq!(
+        static_mcp_command_availability(&server).expect("absolute omitted .exe check"),
+        McpCommandAvailability::Available
+    );
+
+    let pathext_command = "codewhale-mcp-pathext-only-test";
+    fs::write(
+        temp.path().join(format!("{pathext_command}.cmd")),
+        b"@exit /b 0\r\n",
+    )
+    .expect("write PATHEXT-only command");
+    server.command = Some(pathext_command.to_string());
+    server.env.insert("PATHEXT".to_string(), ".CMD".to_string());
+    assert_eq!(
+        static_mcp_command_availability(&server).expect("PATHEXT command check"),
+        McpCommandAvailability::NotChecked,
+        "a child-PATH miss is conservative because Windows still searches implicit fallbacks"
+    );
+    server.command = Some(format!("{pathext_command}.cmd"));
+    assert_eq!(
+        static_mcp_command_availability(&server).expect("explicit .cmd command check"),
+        McpCommandAvailability::Available,
+        "Rust requires non-.exe extensions to be explicit"
+    );
+}
+
 #[tokio::test]
 async fn mcp_http_auth_prefers_static_authorization_over_bearer_env() {
     let mut headers = HashMap::new();

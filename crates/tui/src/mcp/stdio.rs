@@ -80,7 +80,7 @@ impl StdioTransport {
         // from the process environment instead of being stored in cleartext
         // in the MCP config. The child env is allowlist-sanitized below, so
         // these vars would not otherwise be inherited by the child.
-        let expanded_env = super::expand_env_placeholders_map(&config.env, "env")
+        let expanded_env = super::expanded_mcp_stdio_env(config)
             .with_context(|| format!("MCP server '{server_name}' env expansion failed"))?;
 
         // MCP stdio servers are user-configured integrations. Use the
