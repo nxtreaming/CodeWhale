@@ -155,15 +155,63 @@ impl ModelInventory {
                 candidate.provider == self.active_provider && candidate.default_for_provider
             })
             .or_else(|| {
+                self.candidates.iter().find(|candidate| {
+                    candidate.provider == self.active_provider && candidate.readiness.can_attempt()
+                })
+            })
+            .or_else(|| {
                 self.candidates
                     .iter()
-                    .find(|candidate| candidate.provider == self.active_provider)
+                    .find(|candidate| candidate.readiness.can_attempt())
             })
-            .or_else(|| self.candidates.first())
     }
 
     pub(crate) fn router_context_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_else(|_| "{}".to_string())
+        #[derive(Serialize)]
+        struct RouterInventoryContext<'a> {
+            active_provider: ApiProvider,
+            candidates: Vec<RouterCandidateContext<'a>>,
+        }
+
+        #[derive(Serialize)]
+        struct RouterCandidateContext<'a> {
+            provider: ApiProvider,
+            provider_name: &'a str,
+            provider_display_name: &'a str,
+            model: &'a str,
+            context_window: u32,
+            max_output: u32,
+            thinking_supported: bool,
+            cache_telemetry_supported: bool,
+            default_for_provider: bool,
+            tags: &'a [&'static str],
+        }
+
+        // The classifier needs route capabilities, not credentials, endpoint
+        // configuration, or provider error text. Filter to runnable candidates
+        // and project only non-secret routing facts before serializing.
+        let candidates = self
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.readiness.can_attempt())
+            .map(|candidate| RouterCandidateContext {
+                provider: candidate.provider,
+                provider_name: candidate.provider_name,
+                provider_display_name: candidate.provider_display_name,
+                model: &candidate.model,
+                context_window: candidate.context_window,
+                max_output: candidate.max_output,
+                thinking_supported: candidate.thinking_supported,
+                cache_telemetry_supported: candidate.cache_telemetry_supported,
+                default_for_provider: candidate.default_for_provider,
+                tags: &candidate.tags,
+            })
+            .collect();
+        serde_json::to_string(&RouterInventoryContext {
+            active_provider: self.active_provider,
+            candidates,
+        })
+        .unwrap_or_else(|_| "{}".to_string())
     }
 }
 
@@ -512,5 +560,69 @@ mod tests {
         assert!(!candidate.readiness.can_attempt());
         assert!(!candidate.default_for_provider);
         assert!(candidate.tags.contains(&"unready"));
+    }
+
+    #[test]
+    fn active_default_never_falls_back_to_unready_candidate() {
+        let inventory = ModelInventory {
+            active_provider: ApiProvider::Openai,
+            router_provider: ApiProvider::Deepseek,
+            router_model: "deepseek-v4-flash",
+            router_available: false,
+            candidates: vec![ModelRouteCandidate {
+                provider: ApiProvider::Openai,
+                provider_name: "openai",
+                provider_display_name: "OpenAI",
+                model: "unsupported-model".to_string(),
+                context_window: 1,
+                max_output: 1,
+                thinking_supported: false,
+                cache_telemetry_supported: false,
+                auth_source: ModelAuthSource::Config,
+                readiness: crate::provider_readiness::ResolvedProviderReadiness::InvalidRoute,
+                default_for_provider: false,
+                tags: vec!["unready"],
+            }],
+        };
+
+        assert!(inventory.active_default().is_none());
+    }
+
+    #[test]
+    fn router_context_is_runnable_and_redacts_auth_and_failure_details() {
+        let _env_lock = crate::test_support::lock_test_env();
+        let _deepseek = crate::test_support::EnvVarGuard::set("DEEPSEEK_API_KEY", "ds-key");
+        let mut inventory = ModelInventory::from_config(&Config::default());
+        let candidate = inventory
+            .candidates
+            .iter_mut()
+            .find(|candidate| candidate.provider == ApiProvider::Deepseek)
+            .expect("DeepSeek inventory candidate");
+        candidate.readiness =
+            crate::provider_readiness::ResolvedProviderReadiness::SavedLastCheckFailed {
+                category: crate::error_taxonomy::ErrorCategory::Authentication,
+                message: "Bearer super-secret-router-token".to_string(),
+            };
+        inventory.candidates.push(ModelRouteCandidate {
+            provider: ApiProvider::Openai,
+            provider_name: "openai",
+            provider_display_name: "OpenAI",
+            model: "unsupported-model".to_string(),
+            context_window: 1,
+            max_output: 1,
+            thinking_supported: false,
+            cache_telemetry_supported: false,
+            auth_source: ModelAuthSource::Config,
+            readiness: crate::provider_readiness::ResolvedProviderReadiness::InvalidRoute,
+            default_for_provider: false,
+            tags: vec!["unready"],
+        });
+
+        let json = inventory.router_context_json();
+
+        assert!(json.contains("deepseek-v4"));
+        assert!(!json.contains("super-secret-router-token"));
+        assert!(!json.contains("auth_source"));
+        assert!(!json.contains("unsupported-model"));
     }
 }
