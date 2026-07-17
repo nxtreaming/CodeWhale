@@ -86,7 +86,7 @@ pub(crate) fn canonicalize_or_keep(path: &Path) -> PathBuf {
 pub(crate) fn env_config_path() -> Option<PathBuf> {
     #[cfg(test)]
     {
-        return crate::test_support::with_test_env_lock(env_config_path_unlocked);
+        crate::test_support::with_test_env_lock(env_config_path_unlocked)
     }
     #[cfg(not(test))]
     {

@@ -141,46 +141,6 @@ impl EnvVarGuard {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::mpsc;
-    use std::time::Duration;
-
-    #[test]
-    fn config_path_read_waits_for_foreign_env_redirect_to_restore() {
-        let (tx, rx) = mpsc::channel();
-        let redirected = std::env::temp_dir().join(format!(
-            "codewhale-config-path-read-barrier-{}",
-            std::process::id()
-        ));
-
-        let reader = {
-            let lock = lock_test_env();
-            let redirect = EnvVarGuard::set("DEEPSEEK_CONFIG_PATH", &redirected);
-            let reader = std::thread::spawn(move || {
-                tx.send(crate::config_persistence::config_toml_path(None))
-                    .expect("send resolved config path");
-            });
-
-            assert!(
-                rx.recv_timeout(Duration::from_millis(50)).is_err(),
-                "a foreign reader observed the temporary config redirect"
-            );
-            drop(redirect);
-            drop(lock);
-            reader
-        };
-
-        let resolved = rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("reader resumed after the redirect was restored")
-            .expect("resolve config path");
-        reader.join().expect("reader thread");
-        assert_ne!(resolved, redirected);
-    }
-}
-
 impl Drop for EnvVarGuard {
     fn drop(&mut self) {
         // SAFETY: callers hold the process-wide test env mutex until after this
@@ -234,5 +194,45 @@ pub(crate) fn assert_byte_identical(label: &str, a: &str, b: &str) {
             "{label}: prompt construction is non-deterministic — first diff at byte {pos}\n\
              ── side A (±32B) ──\n{a_ctx:?}\n── side B (±32B) ──\n{b_ctx:?}",
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    #[test]
+    fn config_path_read_waits_for_foreign_env_redirect_to_restore() {
+        let (tx, rx) = mpsc::channel();
+        let redirected = std::env::temp_dir().join(format!(
+            "codewhale-config-path-read-barrier-{}",
+            std::process::id()
+        ));
+
+        let reader = {
+            let lock = lock_test_env();
+            let redirect = EnvVarGuard::set("DEEPSEEK_CONFIG_PATH", &redirected);
+            let reader = std::thread::spawn(move || {
+                tx.send(crate::config_persistence::config_toml_path(None))
+                    .expect("send resolved config path");
+            });
+
+            assert!(
+                rx.recv_timeout(Duration::from_millis(50)).is_err(),
+                "a foreign reader observed the temporary config redirect"
+            );
+            drop(redirect);
+            drop(lock);
+            reader
+        };
+
+        let resolved = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("reader resumed after the redirect was restored")
+            .expect("resolve config path");
+        reader.join().expect("reader thread");
+        assert_ne!(resolved, redirected);
     }
 }
