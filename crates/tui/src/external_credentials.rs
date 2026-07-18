@@ -249,7 +249,7 @@ fn open_secure_regular_file(path: &Path, require_owner_only: bool) -> io::Result
     use std::os::windows::io::AsRawHandle;
     use std::path::Component;
     use windows_sys::Win32::Storage::FileSystem::{
-        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT, FILE_NAME_NORMALIZED,
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT, FILE_NAME_OPENED,
         GetFinalPathNameByHandleW, VOLUME_NAME_DOS,
     };
 
@@ -285,7 +285,13 @@ fn open_secure_regular_file(path: &Path, require_owner_only: bool) -> io::Result
     reject_windows_reparse_components(path)?;
 
     let handle = file.as_raw_handle();
-    let flags = FILE_NAME_NORMALIZED | VOLUME_NAME_DOS;
+    // Compare the spelling Windows actually opened rather than asking it to
+    // expand the path into its normalized long form. A valid caller path can
+    // contain an 8.3 component such as `RUNNER~1`; normalizing only the handle
+    // side would make that exact path look redirected. FILE_NAME_OPENED keeps
+    // the comparison handle-relative while the pre/post component checks above
+    // continue to reject reparse points and swaps.
+    let flags = FILE_NAME_OPENED | VOLUME_NAME_DOS;
     // SAFETY: the handle remains owned by `file`; null output asks Windows for
     // the required UTF-16 buffer length.
     let needed = unsafe { GetFinalPathNameByHandleW(handle, std::ptr::null_mut(), 0, flags) };
@@ -827,21 +833,33 @@ mod tests {
     }
 
     #[cfg(windows)]
-    #[test]
-    fn owned_read_requires_a_current_user_only_dacl_and_is_bounded() {
-        let _env = crate::test_support::lock_test_env();
+    fn secured_owned_windows_fixture(contents: &[u8]) -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().expect("tempdir");
         secure_codewhale_owned_windows_path(dir.path(), true).expect("owner-only directory");
         let path = dir.path().join("owned.json");
-        std::fs::write(&path, "owned-secret").expect("fixture");
+        std::fs::write(&path, contents).expect("fixture");
         secure_codewhale_owned_windows_path(&path, false).expect("owner-only file");
+        (dir, path)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn owned_read_accepts_current_user_only_dacl_with_opened_path_spelling() {
+        let _env = crate::test_support::lock_test_env();
+        let (_dir, path) = secured_owned_windows_fixture(b"owned-secret");
         assert_eq!(
             read_codewhale_owned_to_string(&path)
                 .expect("secure owned read")
                 .as_deref(),
             Some("owned-secret")
         );
+    }
 
+    #[cfg(windows)]
+    #[test]
+    fn owned_read_rejects_hardlinks_on_windows() {
+        let _env = crate::test_support::lock_test_env();
+        let (dir, path) = secured_owned_windows_fixture(b"owned-secret");
         let hardlink = dir.path().join("owned-hardlink.json");
         std::fs::hard_link(&path, &hardlink).expect("hardlink fixture");
         assert!(
@@ -849,7 +867,13 @@ mod tests {
             "owned reads must reject multiply-linked files"
         );
         std::fs::remove_file(hardlink).expect("remove hardlink fixture");
+    }
 
+    #[cfg(windows)]
+    #[test]
+    fn owned_read_is_bounded_on_windows() {
+        let _env = crate::test_support::lock_test_env();
+        let (_dir, path) = secured_owned_windows_fixture(b"owned-secret");
         let file = File::options()
             .write(true)
             .open(&path)
@@ -858,7 +882,13 @@ mod tests {
             .expect("oversize fixture");
         let error = read_codewhale_owned_to_string(&path).expect_err("oversized owned file");
         assert!(error.to_string().contains("safety limit"), "{error:#}");
+    }
 
+    #[cfg(windows)]
+    #[test]
+    fn owned_read_rejects_leaf_reparse_points_on_windows() {
+        let _env = crate::test_support::lock_test_env();
+        let (dir, path) = secured_owned_windows_fixture(b"owned-secret");
         let link = dir.path().join("owned-link.json");
         if std::os::windows::fs::symlink_file(&path, &link).is_ok() {
             assert!(
