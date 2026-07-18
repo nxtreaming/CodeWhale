@@ -109,9 +109,6 @@ function windowsLauncherContents() {
 }
 
 function intermediateArtifactPath(inputDirectory, name) {
-  if (name === "CodeWhaleSetup.exe") {
-    return path.join(inputDirectory, "CodeWhaleSetup.exe", name);
-  }
   if (name === BUNDLE_CHECKSUM_MANIFEST || BUNDLE_ASSET_NAMES.includes(name)) {
     return path.join(inputDirectory, "codewhale-bundles", name);
   }

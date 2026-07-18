@@ -55,7 +55,7 @@ for (const command of [
   "npx tsc --noEmit",
   "npm run build",
 ]) {
-  assert.match(candidate, new RegExp(`run: ${command.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&")}`));
+  assert.match(candidate, new RegExp(`run: ${command.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
 }
 assert.match(candidate, /^    needs: \[resolve, web\]$/m);
 assert.match(candidate, /needs\.web\.result == 'success'/);
