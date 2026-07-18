@@ -2083,11 +2083,26 @@ impl ProviderPickerView {
             let owner_path = self
                 .tr(MessageId::ProviderExternalOwnerPath)
                 .replace("{owner}", status.owner)
-                .replace("{path}", &status.path.to_string_lossy());
-            lines.push(Line::from(Span::styled(
+                .replace("{path}", &codewhale_config::quote_os_path(&status.path));
+            let mut owner_path_spans = vec![Span::styled(
                 owner_path,
                 Style::default().fg(palette::TEXT_MUTED),
-            )));
+            )];
+            if status.ambient_path_changed {
+                let warning = self
+                    .tr(MessageId::ProviderExternalPinnedPathWarning)
+                    .replace("{owner}", status.owner)
+                    .replace("{path}", &codewhale_config::quote_os_path(&status.path));
+                owner_path_spans.push(Span::styled(
+                    " | ",
+                    Style::default().fg(palette::TEXT_MUTED),
+                ));
+                owner_path_spans.push(Span::styled(
+                    warning,
+                    Style::default().fg(palette::STATUS_WARNING),
+                ));
+            }
+            lines.push(Line::from(owner_path_spans));
             let semantics = match status.access {
                 codewhale_config::ExternalCredentialAccess::Disabled => {
                     self.tr(MessageId::ProviderExternalDisabledDetail)
@@ -2099,12 +2114,15 @@ impl ProviderPickerView {
                     self.tr(MessageId::ProviderExternalManagedDetail)
                 }
             };
-            let semantics_revoke = self
-                .tr(MessageId::ProviderExternalSemanticsRevoke)
-                .replace("{semantics}", &semantics)
+            lines.push(Line::from(Span::styled(
+                semantics,
+                Style::default().fg(palette::TEXT_MUTED),
+            )));
+            let revoke = self
+                .tr(MessageId::ProviderExternalRevoke)
                 .replace("{revoke}", &status.revoke_command);
             lines.push(Line::from(Span::styled(
-                semantics_revoke,
+                revoke,
                 Style::default().fg(palette::TEXT_MUTED),
             )));
         }
@@ -2366,7 +2384,10 @@ impl ProviderPickerView {
                 source.owner_label(),
                 source.as_str()
             )),
-            Line::from(format!("{exact_path_label}: {}", path.display())),
+            Line::from(format!(
+                "{exact_path_label}: {}",
+                codewhale_config::quote_os_path(&path)
+            )),
             Line::from(""),
             Line::from(format!(
                 "{semantics_label}: {}.",
@@ -5128,7 +5149,8 @@ mod tests {
         let confirm = render_text(&picker, 120, 22);
         assert!(confirm.contains("Owning CLI: Codex CLI"), "{confirm}");
         assert!(confirm.contains("Exact resolved path:"), "{confirm}");
-        assert!(confirm.contains("no refresh, network requests, writes, or rewrites"));
+        assert!(confirm.contains("no refresh, identity-provider or discovery requests"));
+        assert!(confirm.contains("normal requests to the selected provider"));
         assert!(confirm.contains("external-revoke --provider openai-codex"));
         assert!(matches!(
             picker.handle_key(key(KeyCode::Enter)),
@@ -5315,7 +5337,10 @@ mod tests {
             let visible = render_text(&picker, 140, 32);
             assert!(visible.contains("External: access=read_only"), "{visible}");
             assert!(visible.contains("Owner/path:"), "{visible}");
-            assert!(visible.contains("revoke: codewhale auth external-revoke"));
+            assert!(
+                visible.contains("revoke: codewhale auth external-revoke"),
+                "{visible}"
+            );
             assert!(
                 picker.selected_has_key(),
                 "selecting {provider:?} should activate the consented route before checking it"

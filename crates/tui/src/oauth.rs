@@ -107,8 +107,12 @@ fn load_credentials(grant: &ExternalCredentialReadGrant) -> Result<Option<CodexC
     let Some(contents) = crate::external_credentials::read_to_string(grant)? else {
         return Ok(None);
     };
-    let auth: CodexAuthFile = serde_json::from_str(&contents)
-        .with_context(|| format!("parsing Codex auth file: {}", grant.path().display()))?;
+    let auth: CodexAuthFile = serde_json::from_str(&contents).map_err(|_| {
+        anyhow::anyhow!(
+            "Codex credential file {} is not valid credential JSON",
+            codewhale_config::quote_os_path(grant.path())
+        )
+    })?;
     let tokens = match auth.tokens {
         Some(t) => t,
         None => return Ok(None),
@@ -162,7 +166,7 @@ pub fn get_credentials(grant: &ExternalCredentialReadGrant) -> Result<CodexCrede
 
     bail!(
         "Codex access token in {} is expired. Read-only consent never refreshes or rewrites another CLI's credentials. Run `codex login`, or provide OPENAI_CODEX_ACCESS_TOKEN for this process.",
-        grant.path().display()
+        codewhale_config::quote_os_path(grant.path())
     )
 }
 
@@ -175,7 +179,7 @@ pub fn missing_auth_message() -> String {
          Access to the Codex CLI file is disabled by default. After `codex login`, grant read-only access explicitly with:\n\
          `codewhale auth external-consent --provider openai-codex --mode read-only --path {}`\n\
          Read-only access never refreshes or rewrites the Codex CLI file.",
-        auth_file_path().display()
+        codewhale_config::quote_os_path(&auth_file_path())
     )
 }
 
@@ -262,6 +266,10 @@ mod tests {
             crate::external_credentials::side_effect_trap_counts(),
             (1, 1)
         );
+        assert_eq!(
+            crate::external_credentials::complete_side_effect_trap_counts(),
+            (1, 1, 0, 0, 0)
+        );
         std::fs::write(&auth_path, "{not-json").expect("malformed auth");
         crate::external_credentials::reset_side_effect_trap();
         assert!(!stored_credentials_present(&grant));
@@ -340,9 +348,27 @@ mod tests {
         assert!(message.contains("OpenAI Codex OAuth credentials are unavailable"));
         assert!(message.contains("OPENAI_CODEX_ACCESS_TOKEN"));
         assert!(message.contains("CODEX_ACCESS_TOKEN"));
-        assert!(message.contains(&auth_file_path().display().to_string()));
+        assert!(message.contains(&codewhale_config::quote_os_path(&auth_file_path())));
         assert!(message.contains("codex login"));
         assert!(message.contains("external-consent"));
         assert!(message.contains("disabled by default"));
+    }
+
+    #[test]
+    fn malformed_codex_credential_errors_never_echo_file_contents() {
+        let _lock = crate::test_support::lock_test_env();
+        let home = tempfile::tempdir().expect("temp Codex home");
+        let path = home.path().canonicalize().unwrap().join("auth.json");
+        let sentinel = "must-not-appear-in-diagnostics";
+        std::fs::write(
+            &path,
+            format!(r#"{{"tokens":{{"access_token":{{"secret":"{sentinel}"}}}}}}"#),
+        )
+        .unwrap();
+
+        let error = load_credentials(&grant(&path)).expect_err("malformed schema");
+        let message = format!("{error:#}");
+        assert!(message.contains("not valid credential JSON"), "{message}");
+        assert!(!message.contains(sentinel), "{message}");
     }
 }

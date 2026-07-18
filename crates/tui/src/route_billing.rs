@@ -659,6 +659,12 @@ mod tests {
         let owned_path = temp.path().join("credentials/xai-auth.json");
         std::fs::create_dir_all(owned_path.parent().expect("owned credential parent"))
             .expect("create owned credential directory");
+        #[cfg(windows)]
+        crate::external_credentials::secure_codewhale_owned_windows_path(
+            owned_path.parent().expect("owned credential parent"),
+            true,
+        )
+        .expect("secure owned credential directory");
         let scope = format!(
             "{}::{}",
             crate::xai_oauth::XAI_OIDC_ISSUER,
@@ -675,6 +681,15 @@ mod tests {
             .to_string(),
         )
         .expect("write Codewhale-owned xAI credential");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&owned_path, std::fs::Permissions::from_mode(0o600))
+                .expect("secure owned credential file");
+        }
+        #[cfg(windows)]
+        crate::external_credentials::secure_codewhale_owned_windows_path(&owned_path, false)
+            .expect("secure owned credential file");
         let oauth = config_with(
             ApiProvider::Xai,
             ProviderConfig {

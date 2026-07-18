@@ -4963,28 +4963,52 @@ fn doctor_external_credential_consent_lines(config: &Config) -> Vec<String> {
     doctor_external_credential_consent_statuses(config)
         .into_iter()
         .flat_map(|status| {
-            [
+            let mut lines = vec![
                 format!(
-                    "{}: access={}, provider={}, source={}, owner={}, path={}, version={}, state={}",
+                    "{}: access={}, provider={}, source={}, owner={}, path={}, version={}, state={}, ambient_path_changed={}",
                     status.provider,
                     status.access.as_str(),
                     status.provider,
                     status.source.as_str(),
                     status.owner,
-                    status.path.display(),
+                    codewhale_config::quote_os_path(&status.path),
                     status.consent_version,
                     status.route_state,
+                    status.ambient_path_changed,
                 ),
                 format!("  semantics: {}", status.semantics),
                 format!("  revoke: {}", status.revoke_command),
-            ]
+            ];
+            if let Some(warning) = status.ambient_path_warning() {
+                lines.push(format!("  {warning}"));
+            }
+            lines
         })
         .collect()
 }
 
 fn doctor_external_credential_consent_json(config: &Config) -> serde_json::Value {
-    serde_json::to_value(doctor_external_credential_consent_statuses(config))
-        .unwrap_or_else(|_| serde_json::Value::Array(Vec::new()))
+    serde_json::Value::Array(
+        doctor_external_credential_consent_statuses(config)
+            .into_iter()
+            .map(|status| {
+                serde_json::json!({
+                    "provider": status.provider,
+                    "access": status.access.as_str(),
+                    "source": status.source.as_str(),
+                    "owner": status.owner,
+                    "path": codewhale_config::quote_os_path(&status.path),
+                    "consent_version": status.consent_version,
+                    "scope_valid": status.scope_valid,
+                    "ambient_path_changed": status.ambient_path_changed,
+                    "ambient_path_warning": status.ambient_path_warning(),
+                    "route_state": status.route_state,
+                    "semantics": status.semantics,
+                    "revoke_command": status.revoke_command,
+                })
+            })
+            .collect(),
+    )
 }
 
 fn doctor_setup_report_json(config: &Config, workspace: &Path) -> serde_json::Value {
@@ -6224,11 +6248,12 @@ fn run_logout() -> Result<()> {
 }
 
 async fn run_xai_device_auth(config_path: Option<&Path>) -> Result<()> {
-    let _credentials = xai_oauth::device_code_login().await?;
-    let saved = config::finalize_xai_device_login_for_at(config_path, None)?;
+    let pending = xai_oauth::device_code_login().await?;
+    let activation = xai_oauth::activate_device_login(pending, config_path, None)?;
     println!(
-        "xAI OAuth is ready; saved [providers.xai] auth_mode = \"oauth\" to {}",
-        saved.display()
+        "xAI OAuth is ready; activated {} via {}",
+        codewhale_config::quote_os_path(&activation.auth_path),
+        codewhale_config::quote_os_path(&activation.config_path)
     );
     Ok(())
 }
@@ -7213,8 +7238,12 @@ fn load_mcp_config(path: &Path) -> Result<McpConfig> {
     }
     let contents = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("Failed to read MCP config {}: {}", path.display(), e))?;
-    let cfg: McpConfig = serde_json::from_str(&contents)
-        .map_err(|e| anyhow::anyhow!("Failed to parse MCP config: {e}"))?;
+    let cfg: McpConfig = serde_json::from_str(&contents).map_err(|_| {
+        anyhow::anyhow!(
+            "Failed to parse MCP config {}; file contents were omitted",
+            codewhale_config::quote_os_path(path)
+        )
+    })?;
     Ok(cfg)
 }
 
@@ -10497,6 +10526,9 @@ mod doctor_setup_state_tests {
             }),
             ..Config::default()
         };
+        let changed_ambient_path = tmp.path().join("new-ambient-codex-auth.json");
+        let _changed_codex_auth =
+            crate::test_support::EnvVarGuard::set("OPENAI_CODEX_AUTH_FILE", &changed_ambient_path);
         crate::external_credentials::reset_side_effect_trap();
         let codex_read_only_report = doctor_setup_report_json(&codex_read_only, &workspace);
         assert_eq!(
@@ -10516,6 +10548,12 @@ mod doctor_setup_state_tests {
         assert_eq!(codex_status["provider"], "openai-codex");
         assert_eq!(codex_status["source"], "codex_cli");
         assert_eq!(codex_status["route_state"], "active");
+        assert_eq!(codex_status["ambient_path_changed"], true);
+        assert!(
+            codex_status["ambient_path_warning"]
+                .as_str()
+                .is_some_and(|warning| warning.contains("remains pinned"))
+        );
         assert_eq!(
             codex_status["revoke_command"],
             "codewhale auth external-revoke --provider openai-codex"
@@ -10523,7 +10561,14 @@ mod doctor_setup_state_tests {
         let human = doctor_external_credential_consent_lines(&codex_read_only).join("\n");
         assert!(human.contains("path="), "{human}");
         assert!(human.contains("version=1"), "{human}");
-        assert!(human.contains("no refresh, network requests, writes, or rewrites"));
+        assert!(human.contains("no refresh, identity-provider or discovery requests"));
+        assert!(human.contains("normal requests to the explicitly selected provider"));
+        assert!(human.contains("consent remains pinned"), "{human}");
+        assert!(
+            human.contains(&codewhale_config::quote_os_path(&codex_auth_path)),
+            "{human}"
+        );
+        assert!(!human.contains(&changed_ambient_path.display().to_string()));
         assert_eq!(
             crate::external_credentials::complete_side_effect_trap_counts(),
             (0, 0, 0, 0, 0),

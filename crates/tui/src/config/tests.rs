@@ -8,6 +8,27 @@ use std::os::unix::fs::PermissionsExt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
+fn malformed_config_error_omits_secret_contents_and_keys() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    let secret = "cw-secret-tui-config-4507";
+    fs::write(
+        &path,
+        format!("[providers.xai]\napi_key = \"{secret}\" trailing-junk\n"),
+    )
+    .expect("write malformed config");
+
+    let error = Config::load(Some(path), None).expect_err("malformed config must fail");
+    let diagnostic = format!("{error:#}");
+    assert!(!diagnostic.contains(secret), "{diagnostic}");
+    assert!(!diagnostic.contains("api_key"), "{diagnostic}");
+    assert!(
+        diagnostic.contains("file contents were omitted"),
+        "{diagnostic}"
+    );
+}
+
+#[test]
 fn api_provider_metadata_helpers_follow_config_provider_metadata() {
     let sorted = ApiProvider::sorted_for_display();
     let expected_sorted: Vec<ApiProvider> =
@@ -9650,78 +9671,6 @@ fn session_provider_identity_fails_closed_for_removed_or_invalid_custom_table() 
 }
 
 #[test]
-fn xai_device_login_finalizer_atomically_revokes_consent_on_disk_and_in_memory() {
-    let dir = tempfile::TempDir::new().expect("tempdir");
-    let path = dir.path().join("config.toml");
-    let external_path = dir.path().join("external-grok-auth.json");
-    let external_raw = "external owner bytes must remain unchanged";
-    std::fs::write(&external_path, external_raw).expect("seed external trap");
-    std::fs::write(
-        &path,
-        format!(
-            r#"# keep this operator note
-[providers.xai]
-model = "grok-code-fast-1" # keep model note
-auth_mode = "api_key"
-
-[providers.xai.external_credentials]
-access = "read_only"
-provider = "xai"
-source = "grok_cli"
-path = "{}"
-consent_version = 1
-"#,
-            external_path.display()
-        ),
-    )
-    .expect("seed config");
-    let mut live = Config {
-        providers: Some(ProvidersConfig {
-            xai: ProviderConfig {
-                model: Some("grok-code-fast-1".to_string()),
-                auth_mode: Some("api_key".to_string()),
-                external_credentials: Some(
-                    codewhale_config::ExternalCredentialConsentToml::read_only(
-                        codewhale_config::ProviderKind::Xai,
-                        codewhale_config::ExternalCredentialSource::GrokCli,
-                        external_path.clone(),
-                    ),
-                ),
-                ..Default::default()
-            },
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-
-    crate::external_credentials::reset_side_effect_trap();
-    let saved = finalize_xai_device_login_for_at(Some(&path), Some(&mut live))
-        .expect("finalize native xAI login");
-
-    assert_eq!(saved, path);
-    let contents = std::fs::read_to_string(&saved).expect("read finalized config");
-    assert!(contents.contains("# keep this operator note"));
-    assert!(contents.contains("model = \"grok-code-fast-1\" # keep model note"));
-    assert!(contents.contains("auth_mode = \"oauth\""));
-    assert!(!contents.contains("external_credentials"));
-    assert!(!contents.contains(&external_path.display().to_string()));
-    let live_xai = live
-        .provider_config_for(ApiProvider::Xai)
-        .expect("live xAI");
-    assert_eq!(live_xai.auth_mode.as_deref(), Some("oauth"));
-    assert!(live_xai.external_credentials.is_none());
-    assert_eq!(
-        crate::external_credentials::side_effect_trap_counts(),
-        (0, 0),
-        "native login finalization never inspects another CLI's file"
-    );
-    assert_eq!(
-        std::fs::read_to_string(&external_path).expect("external trap unchanged"),
-        external_raw
-    );
-}
-
-#[test]
 fn picker_consent_persists_only_confirmed_exact_scope_and_revoke_is_one_step() {
     let dir = tempfile::TempDir::new().expect("tempdir");
     let config_path = dir.path().join("config.toml");
@@ -9779,77 +9728,5 @@ fn picker_consent_persists_only_confirmed_exact_scope_and_revoke_is_one_step() {
     assert_eq!(
         crate::external_credentials::complete_side_effect_trap_counts(),
         (0, 0, 0, 0, 0)
-    );
-}
-
-#[test]
-fn xai_device_login_finalizer_failure_leaves_disk_and_live_consent_unchanged() {
-    let _env = lock_test_env();
-    let dir = tempfile::TempDir::new().expect("tempdir");
-    let owned_home = dir.path().join("codewhale-home");
-    let _home = EnvVarGuard::set("CODEWHALE_HOME", &owned_home);
-    let owned_path = owned_home.join("credentials/xai-auth.json");
-    std::fs::create_dir_all(owned_path.parent().expect("owned parent"))
-        .expect("create owned parent");
-    std::fs::write(
-        &owned_path,
-        r#"{"https://accounts.x.ai::grok-cli":{"key":"fresh-owned-token","expires_at":9999999999000,"auth_mode":"oidc"}}"#,
-    )
-    .expect("model device login already wrote owned OAuth");
-    let path = dir.path().join("config.toml");
-    let malformed = "[providers.xai\nauth_mode = \"api_key\"\n";
-    std::fs::write(&path, malformed).expect("seed malformed config");
-    let consent = codewhale_config::ExternalCredentialConsentToml::read_only(
-        codewhale_config::ProviderKind::Xai,
-        codewhale_config::ExternalCredentialSource::GrokCli,
-        dir.path().join("external-grok-auth.json"),
-    );
-    let mut live = Config {
-        provider: Some(ApiProvider::Xai.as_str().to_string()),
-        providers: Some(ProvidersConfig {
-            xai: ProviderConfig {
-                auth_mode: Some("api_key".to_string()),
-                api_key: Some("xai-supported-api-key".to_string()),
-                external_credentials: Some(consent.clone()),
-                ..Default::default()
-            },
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-
-    let error = finalize_xai_device_login_for_at(Some(&path), Some(&mut live))
-        .expect_err("malformed config must fail before the live mirror changes");
-    assert!(
-        error.to_string().contains("Failed to write config"),
-        "{error}"
-    );
-    assert_eq!(
-        std::fs::read_to_string(&path).expect("malformed disk bytes retained"),
-        malformed
-    );
-    let live_xai = live
-        .provider_config_for(ApiProvider::Xai)
-        .expect("live xAI");
-    assert_eq!(live_xai.auth_mode.as_deref(), Some("api_key"));
-    assert_eq!(live_xai.external_credentials.as_ref(), Some(&consent));
-    assert!(
-        !crate::xai_oauth::credentials_valid(&live),
-        "owned OAuth written before a failed finalizer must remain inert"
-    );
-    let oauth_error = crate::xai_oauth::get_credentials(&live)
-        .expect_err("API-key mode cannot consume newly written owned OAuth");
-    assert!(
-        oauth_error.to_string().contains("inactive"),
-        "{oauth_error}"
-    );
-    assert_eq!(
-        live.deepseek_api_key()
-            .expect("API-key route remains selected"),
-        "xai-supported-api-key"
-    );
-    assert!(
-        owned_path.exists(),
-        "inert owned bytes may remain for retry"
     );
 }

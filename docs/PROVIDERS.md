@@ -283,15 +283,19 @@ codewhale auth external-revoke --provider openai-codex
 Pass `--path /absolute/path/to/auth.json` when the external CLI uses a custom
 location. Consent persists the provider, external owner, exact absolute path,
 and consent schema version. Later environment-variable changes do not redirect
-that authority to a different file. Read-only grants never refresh or rewrite
-the external file; an expired token fails with login guidance. Doctor may read
-an explicitly granted file to report readiness, but remains non-mutating.
+that authority to a different file. Read-only grants never refresh, contact an
+identity/discovery service, or rewrite the external file; normal requests to
+the explicitly selected provider may use its token. An expired token fails
+with login guidance. Doctor reports structural consent/config state without
+opening credential files and is always non-mutating.
 
 `managed` is reserved for a future provider-specific preservation adapter.
 v0.9.1 rejects it before file or network I/O because no reviewed adapter can
 yet preserve every unknown external schema field safely. Codewhale-started xAI
-device login instead writes Codewhale-owned
-`$CODEWHALE_HOME/credentials/xai-auth.json` and revokes any Grok-file grant.
+device login instead atomically activates a Codewhale-owned generation named
+`$CODEWHALE_HOME/credentials/xai-auth-<generation>.json`, stores only that
+validated basename in config, and revokes any Grok-file grant. Superseded
+generations are cleaned only after the new config pointer commits.
 Kimi remains API-key-only; external consent for Kimi is rejected.
 
 ## Shipped Providers

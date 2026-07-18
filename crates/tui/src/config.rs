@@ -2,8 +2,6 @@
 
 use std::collections::HashMap;
 use std::fs;
-#[cfg(unix)]
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -11,7 +9,7 @@ use codewhale_execpolicy::ExecPolicyEngine;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 #[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 
 use crate::audit::log_sensitive_event;
 use crate::features::{Feature, Features, FeaturesToml, is_known_feature_key};
@@ -2640,6 +2638,10 @@ pub struct ProviderConfig {
     pub mode: Option<String>,
     #[serde(alias = "authMode")]
     pub auth_mode: Option<String>,
+    /// Validated basename of the active Codewhale-owned xAI OAuth generation.
+    /// The file always lives below Codewhale's private credentials directory.
+    #[serde(default, alias = "oauthCredentialGeneration")]
+    pub oauth_credential_generation: Option<String>,
     #[serde(alias = "insecureSkipTlsVerify")]
     pub insecure_skip_tls_verify: Option<bool>,
     #[serde(alias = "httpHeaders")]
@@ -3460,8 +3462,12 @@ impl Config {
             if path.exists() {
                 let contents = fs::read_to_string(path)
                     .with_context(|| format!("Failed to read config file: {}", path.display()))?;
-                let parsed: ConfigFile = toml::from_str(&contents)
-                    .with_context(|| format!("Failed to parse config file: {}", path.display()))?;
+                let parsed: ConfigFile = toml::from_str(&contents).map_err(|_| {
+                    anyhow::anyhow!(
+                        "Failed to parse config file {}; file contents were omitted",
+                        codewhale_config::quote_os_path(path)
+                    )
+                })?;
                 if let Some(msg) = warn_on_misplaced_top_level_keys(&contents) {
                     tracing::warn!("{msg}");
                 }
@@ -4220,9 +4226,10 @@ impl Config {
 
     /// Mirror a successful native xAI login into the live route config.
     /// Codewhale-owned OAuth storage supersedes any dormant Grok CLI consent.
-    pub(crate) fn mark_codewhale_owned_xai_oauth(&mut self) {
+    pub(crate) fn mark_codewhale_owned_xai_oauth(&mut self, generation: String) {
         let entry = self.provider_config_for_mut(ApiProvider::Xai);
         entry.auth_mode = Some("oauth".to_string());
+        entry.oauth_credential_generation = Some(generation);
         entry.external_credentials = None;
     }
 
@@ -4760,7 +4767,7 @@ impl Config {
                     source.as_str(),
                     provider.display_name(),
                     kind.as_str(),
-                    suggested_path.display()
+                    codewhale_config::quote_os_path(suggested_path)
                 )
             })?;
         consent
@@ -7408,13 +7415,12 @@ fn load_sibling_exec_policy_engine(config_path: Option<&Path>) -> Result<ExecPol
             permissions_path.display()
         )
     })?;
-    let permissions: codewhale_config::PermissionsToml =
-        toml::from_str(&raw).with_context(|| {
-            format!(
-                "Failed to parse permissions file: {}",
-                permissions_path.display()
-            )
-        })?;
+    let permissions: codewhale_config::PermissionsToml = toml::from_str(&raw).map_err(|_| {
+        anyhow::anyhow!(
+            "Failed to parse permissions file {}; file contents were omitted",
+            codewhale_config::quote_os_path(&permissions_path)
+        )
+    })?;
     if permissions.is_empty() {
         Ok(ExecPolicyEngine::new(Vec::new(), Vec::new()))
     } else {
@@ -7450,6 +7456,9 @@ fn merge_provider_config(base: ProviderConfig, override_cfg: ProviderConfig) -> 
         context_window: override_cfg.context_window.or(base.context_window),
         mode: override_cfg.mode.or(base.mode),
         auth_mode: override_cfg.auth_mode.or(base.auth_mode),
+        oauth_credential_generation: override_cfg
+            .oauth_credential_generation
+            .or(base.oauth_credential_generation),
         insecure_skip_tls_verify: override_cfg
             .insecure_skip_tls_verify
             .or(base.insecure_skip_tls_verify),
@@ -7543,8 +7552,12 @@ fn merge_providers(
 fn load_single_config_file(path: &Path) -> Result<Config> {
     let contents = fs::read_to_string(path)
         .with_context(|| format!("Failed to read config file: {}", path.display()))?;
-    let parsed: ConfigFile = toml::from_str(&contents)
-        .with_context(|| format!("Failed to parse config file: {}", path.display()))?;
+    let parsed: ConfigFile = toml::from_str(&contents).map_err(|_| {
+        anyhow::anyhow!(
+            "Failed to parse config file {}; file contents were omitted",
+            codewhale_config::quote_os_path(path)
+        )
+    })?;
     Ok(parsed.base)
 }
 
@@ -7696,8 +7709,12 @@ fn apply_requirements(config: &mut Config) -> Result<()> {
     }
     let contents = fs::read_to_string(&path)
         .with_context(|| format!("Failed to read requirements file: {}", path.display()))?;
-    let requirements: RequirementsFile = toml::from_str(&contents)
-        .with_context(|| format!("Failed to parse requirements file: {}", path.display()))?;
+    let requirements: RequirementsFile = toml::from_str(&contents).map_err(|_| {
+        anyhow::anyhow!(
+            "Failed to parse requirements file {}; file contents were omitted",
+            codewhale_config::quote_os_path(&path)
+        )
+    })?;
 
     if !requirements.allowed_approval_policies.is_empty()
         && let Some(policy) = config.approval_policy.as_ref()
@@ -7791,39 +7808,7 @@ pub fn ensure_parent_dir(path: &Path) -> Result<()> {
 /// Write content to a config file with restrictive permissions (owner-only read/write).
 /// On Unix this sets mode 0o600 before writing.
 fn write_config_file_secure(path: &Path, content: &str) -> Result<()> {
-    #[cfg(unix)]
-    {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)?;
-        file.write_all(content.as_bytes())?;
-        // The file was already opened with mode 0o600; the explicit
-        // set_permissions re-asserts that on filesystems where mode-at-open
-        // didn't take effect (or where the file already existed with broader
-        // bits). Filesystems that don't accept Unix chmod at all (Docker
-        // bind-mounts of NTFS, network shares — #897) return EPERM. Treat
-        // that as a warning rather than failing the whole save: the file
-        // contents are written, and on Windows/macOS hosts the parent file
-        // system's native ACL model is doing the access control.
-        if let Err(err) = file.set_permissions(fs::Permissions::from_mode(0o600)) {
-            tracing::warn!(
-                target: "codewhale::config",
-                path = %path.display(),
-                error = %err,
-                "could not enforce 0o600 on config file; filesystem may \
-                 not support Unix chmod. File contents written; rely on \
-                 host ACLs for access control."
-            );
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        fs::write(path, content)?;
-    }
-    Ok(())
+    codewhale_config::create_config_document(path, content)
 }
 
 /// Where a saved credential ended up. Returned by [`save_api_key`] so
@@ -8386,6 +8371,7 @@ fn provider_config_is_explicit(entry: &ProviderConfig) -> bool {
         || non_empty(entry.kind.as_ref())
         || non_empty(entry.api_key_env.as_ref())
         || entry.external_credentials.is_some()
+        || non_empty(entry.oauth_credential_generation.as_ref())
 }
 
 /// Save an API key to the appropriate place for the given provider.
@@ -8490,6 +8476,12 @@ pub(crate) fn save_api_key_for_identity(
                                 doc,
                                 &["providers", key_inside, "external_credentials"],
                             )?;
+                            if provider == ApiProvider::Xai {
+                                crate::config_persistence::unset_document_value(
+                                    doc,
+                                    &["providers", key_inside, "oauth_credential_generation"],
+                                )?;
+                            }
                             crate::config_persistence::unset_document_value(
                                 doc,
                                 &["providers", key_inside, "api_key"],
@@ -8565,6 +8557,12 @@ pub(crate) fn save_api_key_for_identity(
             doc,
             &["providers", key_inside, "external_credentials"],
         )?;
+        if provider == ApiProvider::Xai {
+            crate::config_persistence::unset_document_value(
+                doc,
+                &["providers", key_inside, "oauth_credential_generation"],
+            )?;
+        }
         crate::config_persistence::set_document_value(
             doc,
             &["providers", key_inside, "api_key"],
@@ -8632,51 +8630,6 @@ pub(crate) fn save_provider_model_for_identity(
     Ok(config_path)
 }
 
-/// Finalize a successful native xAI login in one config-file mutation.
-///
-/// Native login writes Codewhale-owned OAuth storage first. This update then
-/// selects that auth mode and revokes any previous permission to inspect Grok
-/// CLI storage so later routing cannot silently fall back to another owner.
-pub fn finalize_xai_device_login_for_at(
-    config_path: Option<&Path>,
-    live_config: Option<&mut Config>,
-) -> Result<PathBuf> {
-    let config_path = match config_path {
-        Some(path) => path.to_path_buf(),
-        None => default_config_path()
-            .context("Failed to resolve config path: home directory not found.")?,
-    };
-    ensure_parent_dir(&config_path)?;
-    let key_inside = provider_config_key(ApiProvider::Xai).context("xAI auth mode key")?;
-    crate::config_persistence::mutate_config_document(&config_path, |doc| {
-        crate::config_persistence::set_document_value(
-            doc,
-            &["providers", key_inside, "auth_mode"],
-            "oauth",
-        )?;
-        crate::config_persistence::unset_document_value(
-            doc,
-            &["providers", key_inside, "external_credentials"],
-        )?;
-        Ok(())
-    })
-    .with_context(|| format!("Failed to write config to {}", config_path.display()))?;
-    log_sensitive_event(
-        "credential.auth_mode.set",
-        json!({
-            "backend": "config_file",
-            "provider": ApiProvider::Xai.as_str(),
-            "auth_mode": "oauth",
-            "external_consent": "revoked",
-            "config_path": config_path.display().to_string(),
-        }),
-    );
-    if let Some(config) = live_config {
-        config.mark_codewhale_owned_xai_oauth();
-    }
-    Ok(config_path)
-}
-
 /// Persist an explicitly confirmed read-only external credential grant and
 /// update the live mirror only after the comment-preserving disk mutation
 /// succeeds. This function never inspects the external path.
@@ -8708,6 +8661,9 @@ pub(crate) fn persist_external_credential_consent_for_at(
         provider.as_str()
     );
     let path = codewhale_config::resolve_external_credential_path(path)?;
+    let path_value = path.to_str().context(
+        "external credential path cannot be persisted losslessly because it is not valid UTF-8",
+    )?;
     let config_path = match config_path {
         Some(path) => path.to_path_buf(),
         None => default_config_path()
@@ -8740,7 +8696,7 @@ pub(crate) fn persist_external_credential_consent_for_at(
         crate::config_persistence::set_document_value(
             doc,
             &[prefix[0], prefix[1], prefix[2], "path"],
-            path.to_string_lossy().as_ref(),
+            path_value,
         )?;
         crate::config_persistence::set_document_value(
             doc,
@@ -8794,7 +8750,7 @@ pub(crate) fn revoke_external_credential_consent_for_at(
     Ok(config_path)
 }
 
-fn provider_config_key(provider: ApiProvider) -> Result<&'static str> {
+pub(crate) fn provider_config_key(provider: ApiProvider) -> Result<&'static str> {
     if matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN) {
         anyhow::bail!("DeepSeek stores auth at the root config level");
     }
@@ -8916,14 +8872,28 @@ pub fn clear_api_key() -> Result<()> {
         .context("Failed to resolve config path: home directory not found.")?;
 
     if !config_path.exists() {
+        codewhale_config::clear_all_xai_oauth_credentials()
+            .context("config was absent, but owned xAI OAuth cleanup did not complete")?;
         return Ok(());
     }
 
     crate::config_persistence::mutate_config_document(&config_path, |doc| {
         crate::config_persistence::remove_document_key_recursive(doc.as_table_mut(), "api_key");
+        crate::config_persistence::unset_document_value(
+            doc,
+            &["providers", "xai", "oauth_credential_generation"],
+        )?;
+        crate::config_persistence::unset_document_value(doc, &["providers", "xai", "auth_mode"])?;
+        crate::config_persistence::unset_document_value(
+            doc,
+            &["providers", "xai", "external_credentials"],
+        )?;
         Ok(())
     })
     .with_context(|| format!("Failed to write config to {}", config_path.display()))?;
+    codewhale_config::clear_all_xai_oauth_credentials().context(
+        "credential authority was revoked, but owned xAI OAuth cleanup did not complete",
+    )?;
     log_sensitive_event(
         "credential.clear",
         json!({
@@ -8945,6 +8915,10 @@ pub fn clear_active_provider_api_key(provider: &str) -> Result<()> {
         .context("Failed to resolve config path: home directory not found.")?;
 
     if !config_path.exists() {
+        if provider == ApiProvider::Xai.as_str() {
+            codewhale_config::clear_all_xai_oauth_credentials()
+                .context("config was absent, but owned xAI OAuth cleanup did not complete")?;
+        }
         return Ok(());
     }
 
@@ -8953,8 +8927,12 @@ pub fn clear_active_provider_api_key(provider: &str) -> Result<()> {
     // mutation so logout clears exactly one credential scope.
     let persisted = fs::read_to_string(&config_path)
         .with_context(|| format!("Failed to read config from {}", config_path.display()))?;
-    let persisted_config: Config = toml::from_str(&persisted)
-        .with_context(|| format!("Failed to parse config from {}", config_path.display()))?;
+    let persisted_config: Config = toml::from_str(&persisted).map_err(|_| {
+        anyhow::anyhow!(
+            "Failed to parse config from {}; file contents were omitted",
+            codewhale_config::quote_os_path(&config_path)
+        )
+    })?;
     let exact_literal_custom_table = provider == ApiProvider::Custom.as_str()
         && persisted_config
             .providers
@@ -8980,9 +8958,28 @@ pub fn clear_active_provider_api_key(provider: &str) -> Result<()> {
                 &["providers", provider, "api_key"],
             )?;
         }
+        if provider == ApiProvider::Xai.as_str() {
+            crate::config_persistence::unset_document_value(
+                doc,
+                &["providers", "xai", "oauth_credential_generation"],
+            )?;
+            crate::config_persistence::unset_document_value(
+                doc,
+                &["providers", "xai", "auth_mode"],
+            )?;
+            crate::config_persistence::unset_document_value(
+                doc,
+                &["providers", "xai", "external_credentials"],
+            )?;
+        }
         Ok(())
     })
     .with_context(|| format!("Failed to write config to {}", config_path.display()))?;
+    if provider == ApiProvider::Xai.as_str() {
+        codewhale_config::clear_all_xai_oauth_credentials().context(
+            "xAI provider authority was revoked, but owned OAuth cleanup did not complete",
+        )?;
+    }
     log_sensitive_event(
         "credential.clear",
         json!({

@@ -1632,7 +1632,12 @@ impl ConfigView {
                             .replace("{state}", &state);
                         let owner_path = tr(app.ui_locale, MessageId::ProviderExternalOwnerPath)
                             .replace("{owner}", status.owner)
-                            .replace("{path}", &status.path.to_string_lossy());
+                            .replace("{path}", &codewhale_config::quote_os_path(&status.path));
+                        let pinned_warning = status.ambient_path_changed.then(|| {
+                            tr(app.ui_locale, MessageId::ProviderExternalPinnedPathWarning)
+                                .replace("{owner}", status.owner)
+                                .replace("{path}", &codewhale_config::quote_os_path(&status.path))
+                        });
                         let semantics = match status.access {
                             codewhale_config::ExternalCredentialAccess::Disabled => {
                                 tr(app.ui_locale, MessageId::ProviderExternalDisabledDetail)
@@ -1651,7 +1656,12 @@ impl ConfigView {
                         ConfigRow {
                             section: ConfigSection::Provider,
                             key: format!("external_credentials.{}", provider.as_str()),
-                            value: format!("{scope} · {owner_path} · {semantics_revoke}"),
+                            value: match pinned_warning {
+                                Some(warning) => format!(
+                                    "{scope} · {owner_path} · {warning} · {semantics_revoke}"
+                                ),
+                                None => format!("{scope} · {owner_path} · {semantics_revoke}"),
+                            },
                             editable: false,
                             scope: ConfigScope::Saved,
                         }
@@ -4487,7 +4497,8 @@ consent_version = 1
             ),
         )
         .expect("config fixture");
-        let _path = crate::test_support::EnvVarGuard::set("OPENAI_CODEX_AUTH_FILE", &auth_path);
+        let ambient_path = temp.path().join("new-ambient-codex-auth.json");
+        let _path = crate::test_support::EnvVarGuard::set("OPENAI_CODEX_AUTH_FILE", &ambient_path);
         let mut app = create_test_app();
         app.config_path = Some(config_path);
         crate::external_credentials::reset_side_effect_trap();
@@ -4501,6 +4512,18 @@ consent_version = 1
         assert!(row.value.contains("source=codex_cli"), "{}", row.value);
         assert!(row.value.contains("version=1"), "{}", row.value);
         assert!(row.value.contains("active"), "{}", row.value);
+        assert!(row.value.contains("remains pinned"), "{}", row.value);
+        assert!(
+            row.value
+                .contains(&codewhale_config::quote_os_path(&auth_path)),
+            "{}",
+            row.value
+        );
+        assert!(
+            !row.value.contains(&ambient_path.display().to_string()),
+            "{}",
+            row.value
+        );
         assert!(
             row.value
                 .contains("external-revoke --provider openai-codex")

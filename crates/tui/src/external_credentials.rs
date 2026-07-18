@@ -17,9 +17,6 @@ use codewhale_config::ExternalCredentialReadGrant;
 /// file cannot turn read-only consent into unbounded memory consumption.
 const MAX_EXTERNAL_CREDENTIAL_BYTES: u64 = 1024 * 1024;
 
-#[cfg(test)]
-use std::sync::atomic::{AtomicUsize, Ordering};
-
 #[cfg(all(test, unix))]
 thread_local! {
     static BEFORE_LEAF_OPEN_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
@@ -27,23 +24,31 @@ thread_local! {
 }
 
 #[cfg(test)]
-static OPEN_CALLS: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    /// Per-test-thread real sink counters. Keeping the trap thread-local makes
+    /// parallel tests unable to contaminate one another while still counting
+    /// the exact production functions reached by the code under test.
+    static SIDE_EFFECT_TRAP: std::cell::Cell<[usize; 5]> = const {
+        std::cell::Cell::new([0; 5])
+    };
+}
+
 #[cfg(test)]
-static READ_CALLS: AtomicUsize = AtomicUsize::new(0);
-#[cfg(test)]
-static WRITE_CALLS: AtomicUsize = AtomicUsize::new(0);
-#[cfg(test)]
-static REFRESH_CALLS: AtomicUsize = AtomicUsize::new(0);
-#[cfg(test)]
-static NETWORK_CALLS: AtomicUsize = AtomicUsize::new(0);
+fn increment_side_effect(index: usize) {
+    SIDE_EFFECT_TRAP.with(|trap| {
+        let mut counts = trap.get();
+        counts[index] += 1;
+        trap.set(counts);
+    });
+}
 
 /// Open and read the exact granted file once. Missing files are reported as
 /// `Ok(None)`; every other unsafe or malformed filesystem shape fails closed.
 pub(crate) fn read_to_string(grant: &ExternalCredentialReadGrant) -> Result<Option<String>> {
     #[cfg(test)]
-    OPEN_CALLS.fetch_add(1, Ordering::SeqCst);
+    increment_side_effect(0);
 
-    let mut file = match open_secure_regular_file(grant.path()) {
+    let mut file = match open_secure_regular_file(grant.path(), false) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
@@ -51,14 +56,14 @@ pub(crate) fn read_to_string(grant: &ExternalCredentialReadGrant) -> Result<Opti
                 format!(
                     "securely opening external {} credential file {}",
                     grant.source().as_str(),
-                    grant.path().display()
+                    codewhale_config::quote_os_path(grant.path())
                 )
             });
         }
     };
 
     #[cfg(test)]
-    READ_CALLS.fetch_add(1, Ordering::SeqCst);
+    increment_side_effect(1);
 
     let mut bytes = Vec::new();
     file.by_ref()
@@ -68,14 +73,14 @@ pub(crate) fn read_to_string(grant: &ExternalCredentialReadGrant) -> Result<Opti
             format!(
                 "reading external {} credential file {}",
                 grant.source().as_str(),
-                grant.path().display()
+                codewhale_config::quote_os_path(grant.path())
             )
         })?;
     if bytes.len() as u64 > MAX_EXTERNAL_CREDENTIAL_BYTES {
         bail!(
             "external {} credential file {} exceeds the {} byte safety limit",
             grant.source().as_str(),
-            grant.path().display(),
+            codewhale_config::quote_os_path(grant.path()),
             MAX_EXTERNAL_CREDENTIAL_BYTES
         );
     }
@@ -83,14 +88,57 @@ pub(crate) fn read_to_string(grant: &ExternalCredentialReadGrant) -> Result<Opti
         format!(
             "external {} credential file {} is not valid UTF-8",
             grant.source().as_str(),
-            grant.path().display()
+            codewhale_config::quote_os_path(grant.path())
         )
     })?;
     Ok(Some(contents))
 }
 
+/// Read one Codewhale-owned credential file through the same no-follow,
+/// bounded I/O boundary used for external grants. On Unix the opened handle
+/// must belong to the effective user and have no group/other permission bits.
+/// The caller is responsible for constraining `path` to a validated basename
+/// below Codewhale's credentials directory before invoking this function.
+pub(crate) fn read_codewhale_owned_to_string(path: &Path) -> Result<Option<String>> {
+    let mut file = match open_secure_regular_file(path, true) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "securely opening Codewhale-owned credential file {}",
+                    codewhale_config::quote_os_path(path)
+                )
+            });
+        }
+    };
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(MAX_EXTERNAL_CREDENTIAL_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| {
+            format!(
+                "reading Codewhale-owned credential file {}",
+                codewhale_config::quote_os_path(path)
+            )
+        })?;
+    if bytes.len() as u64 > MAX_EXTERNAL_CREDENTIAL_BYTES {
+        bail!(
+            "Codewhale-owned credential file {} exceeds the {} byte safety limit",
+            codewhale_config::quote_os_path(path),
+            MAX_EXTERNAL_CREDENTIAL_BYTES
+        );
+    }
+    String::from_utf8(bytes).map(Some).with_context(|| {
+        format!(
+            "Codewhale-owned credential file {} is not valid UTF-8",
+            codewhale_config::quote_os_path(path)
+        )
+    })
+}
+
 #[cfg(unix)]
-fn open_secure_regular_file(path: &Path) -> io::Result<File> {
+fn open_secure_regular_file(path: &Path, require_owner_only: bool) -> io::Result<File> {
     use std::ffi::CString;
     use std::os::fd::FromRawFd;
     use std::os::unix::ffi::OsStrExt;
@@ -171,17 +219,27 @@ fn open_secure_regular_file(path: &Path) -> io::Result<File> {
             "external credential path must name a file",
         ));
     }
-    if !current.metadata()?.file_type().is_file() {
+    let metadata = current.metadata()?;
+    if !metadata.file_type().is_file() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "external credential path must name a regular file",
         ));
     }
+    if require_owner_only {
+        use std::os::unix::fs::MetadataExt as _;
+        if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Codewhale-owned credential file must be owned by this user with mode 0600 or stricter",
+            ));
+        }
+    }
     Ok(current)
 }
 
 #[cfg(windows)]
-fn open_secure_regular_file(path: &Path) -> io::Result<File> {
+fn open_secure_regular_file(path: &Path, require_owner_only: bool) -> io::Result<File> {
     use std::ffi::OsString;
     use std::os::windows::ffi::OsStringExt;
     use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
@@ -241,20 +299,273 @@ fn open_secure_regular_file(path: &Path) -> io::Result<File> {
         return Err(io::Error::last_os_error());
     }
     let final_path = OsString::from_wide(&buffer[..written as usize]);
-    let normalize = |value: &Path| {
-        value
-            .to_string_lossy()
-            .trim_start_matches(r"\\?\")
-            .trim_end_matches(['\\', '/'])
-            .to_ascii_lowercase()
-    };
-    if normalize(Path::new(&final_path)) != normalize(path) {
+    let actual = normalize_windows_path_for_comparison(Path::new(&final_path))?;
+    let expected = normalize_windows_path_for_comparison(path)?;
+    if actual != expected {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "external credential path was redirected while opening",
         ));
     }
+    if require_owner_only {
+        verify_windows_owner_only_handle(handle)?;
+    }
     Ok(file)
+}
+
+/// Normalize a Windows path without replacement characters. Unpaired UTF-16
+/// is rejected so two distinct paths can never compare equal after a lossy
+/// conversion. This is intentionally stricter than filesystem display.
+#[cfg(windows)]
+fn normalize_windows_path_for_comparison(path: &Path) -> io::Result<String> {
+    let text = path.to_str().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "credential path contains invalid Unicode and cannot be compared safely",
+        )
+    })?;
+    let without_device_prefix = text.strip_prefix(r"\\?\").unwrap_or(text);
+    let normalized_prefix = without_device_prefix.strip_prefix("UNC\\").map_or_else(
+        || without_device_prefix.to_string(),
+        |rest| format!(r"\\{rest}"),
+    );
+    Ok(normalized_prefix
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_string())
+}
+
+/// Apply a protected DACL granting only the current Windows user full access.
+/// Directories propagate that owner-only policy to newly staged generations.
+#[cfg(windows)]
+pub(crate) fn secure_codewhale_owned_windows_path(
+    path: &Path,
+    inherit_to_children: bool,
+) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+    use windows_sys::Win32::Security::Authorization::{
+        EXPLICIT_ACCESS_W, SE_FILE_OBJECT, SET_ACCESS, SetEntriesInAclW, SetNamedSecurityInfoW,
+        TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
+    };
+    use windows_sys::Win32::Security::{
+        DACL_SECURITY_INFORMATION, NO_INHERITANCE, PROTECTED_DACL_SECURITY_INFORMATION,
+        SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+    };
+    use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
+
+    let user = CurrentWindowsUser::open()?;
+    let entry = EXPLICIT_ACCESS_W {
+        grfAccessPermissions: FILE_ALL_ACCESS,
+        grfAccessMode: SET_ACCESS,
+        grfInheritance: if inherit_to_children {
+            SUB_CONTAINERS_AND_OBJECTS_INHERIT
+        } else {
+            NO_INHERITANCE
+        },
+        Trustee: TRUSTEE_W {
+            pMultipleTrustee: std::ptr::null_mut(),
+            MultipleTrusteeOperation: 0,
+            TrusteeForm: TRUSTEE_IS_SID,
+            TrusteeType: TRUSTEE_IS_USER,
+            ptstrName: user.sid().cast::<u16>(),
+        },
+    };
+    let mut acl = std::ptr::null_mut();
+    // SAFETY: `entry` and the returned ACL stay live through the security-info
+    // update; the ACL is released with LocalFree below.
+    let result = unsafe { SetEntriesInAclW(1, &entry, std::ptr::null(), &mut acl) };
+    if result != ERROR_SUCCESS {
+        return Err(io::Error::from_raw_os_error(result as i32));
+    }
+    let _acl = WindowsLocalAllocation(acl.cast());
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    // SAFETY: `wide` is NUL terminated and `acl` remains allocated for the
+    // duration of this call. Owner/group/SACL are intentionally unchanged.
+    let result = unsafe {
+        SetNamedSecurityInfoW(
+            wide.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            acl,
+            std::ptr::null(),
+        )
+    };
+    if result != ERROR_SUCCESS {
+        return Err(io::Error::from_raw_os_error(result as i32));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn verify_windows_owner_only_handle(
+    handle: windows_sys::Win32::Foundation::HANDLE,
+) -> io::Result<()> {
+    use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+    use windows_sys::Win32::Security::Authorization::{
+        EXPLICIT_ACCESS_W, GRANT_ACCESS, GetExplicitEntriesFromAclW, GetSecurityInfo,
+        SE_FILE_OBJECT, SET_ACCESS, TRUSTEE_IS_SID,
+    };
+    use windows_sys::Win32::Security::{
+        ACL, DACL_SECURITY_INFORMATION, EqualSid, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+        PSID,
+    };
+    use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
+
+    let user = CurrentWindowsUser::open()?;
+    let mut owner: PSID = std::ptr::null_mut();
+    let mut dacl: *mut ACL = std::ptr::null_mut();
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: the opened file handle remains valid and all output pointers are
+    // writable. Windows allocates `descriptor`, released below.
+    let result = unsafe {
+        GetSecurityInfo(
+            handle,
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            &mut owner,
+            std::ptr::null_mut(),
+            &mut dacl,
+            std::ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    if result != ERROR_SUCCESS {
+        return Err(io::Error::from_raw_os_error(result as i32));
+    }
+    let _descriptor = WindowsLocalAllocation(descriptor.cast());
+    if owner.is_null() || unsafe { EqualSid(owner, user.sid()) } == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Codewhale-owned credential file owner is not the current user",
+        ));
+    }
+    if dacl.is_null() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Codewhale-owned credential file must have an owner-only DACL",
+        ));
+    }
+    let mut count = 0;
+    let mut entries: *mut EXPLICIT_ACCESS_W = std::ptr::null_mut();
+    // SAFETY: `dacl` is owned by the live security descriptor; Windows
+    // allocates the returned entries, released below.
+    let result = unsafe { GetExplicitEntriesFromAclW(dacl, &mut count, &mut entries) };
+    if result != ERROR_SUCCESS {
+        return Err(io::Error::from_raw_os_error(result as i32));
+    }
+    let _entries = WindowsLocalAllocation(entries.cast());
+    if count != 1 || entries.is_null() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Codewhale-owned credential file DACL must grant only one user",
+        ));
+    }
+    // SAFETY: `count == 1` proves the first returned entry is initialized.
+    let entry = unsafe { &*entries };
+    let trustee_sid: PSID = entry.Trustee.ptstrName.cast();
+    let current_user_only = entry.Trustee.TrusteeForm == TRUSTEE_IS_SID
+        && !trustee_sid.is_null()
+        && unsafe { EqualSid(trustee_sid, user.sid()) } != 0
+        && matches!(entry.grfAccessMode, SET_ACCESS | GRANT_ACCESS)
+        && entry.grfAccessPermissions == FILE_ALL_ACCESS;
+    if !current_user_only {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Codewhale-owned credential file DACL is not current-user-only",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+struct CurrentWindowsUser {
+    token: windows_sys::Win32::Foundation::HANDLE,
+    token_info: Vec<usize>,
+}
+
+#[cfg(windows)]
+impl CurrentWindowsUser {
+    fn open() -> io::Result<Self> {
+        use windows_sys::Win32::Foundation::{GetLastError, HANDLE};
+        use windows_sys::Win32::Security::{
+            GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser,
+        };
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+        let mut token: HANDLE = std::ptr::null_mut();
+        // SAFETY: the pseudo-process handle is valid and `token` is writable.
+        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut needed = 0;
+        // SAFETY: the null buffer/zero length call obtains the required size.
+        let _ =
+            unsafe { GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut needed) };
+        if needed == 0 {
+            let error = io::Error::from_raw_os_error(unsafe { GetLastError() } as i32);
+            unsafe { windows_sys::Win32::Foundation::CloseHandle(token) };
+            return Err(error);
+        }
+        let words = (needed as usize).div_ceil(std::mem::size_of::<usize>());
+        let mut token_info = vec![0usize; words];
+        // SAFETY: the word buffer is aligned and contains at least `needed`
+        // writable bytes; `token` remains open.
+        if unsafe {
+            GetTokenInformation(
+                token,
+                TokenUser,
+                token_info.as_mut_ptr().cast(),
+                needed,
+                &mut needed,
+            )
+        } == 0
+        {
+            let error = io::Error::last_os_error();
+            unsafe { windows_sys::Win32::Foundation::CloseHandle(token) };
+            return Err(error);
+        }
+        let user = unsafe { &*token_info.as_ptr().cast::<TOKEN_USER>() };
+        if user.User.Sid.is_null() {
+            unsafe { windows_sys::Win32::Foundation::CloseHandle(token) };
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "current Windows user token has no SID",
+            ));
+        }
+        Ok(Self { token, token_info })
+    }
+
+    fn sid(&self) -> windows_sys::Win32::Security::PSID {
+        use windows_sys::Win32::Security::TOKEN_USER;
+        // SAFETY: `token_info` is aligned, initialized by GetTokenInformation,
+        // and remains owned by `self` while the returned SID is used.
+        unsafe { (*self.token_info.as_ptr().cast::<TOKEN_USER>()).User.Sid }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for CurrentWindowsUser {
+    fn drop(&mut self) {
+        // SAFETY: `token` is owned by this guard and closed exactly once.
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.token) };
+    }
+}
+
+#[cfg(windows)]
+struct WindowsLocalAllocation(*mut core::ffi::c_void);
+
+#[cfg(windows)]
+impl Drop for WindowsLocalAllocation {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // SAFETY: Windows returned this allocation to a caller documented
+            // to release it with LocalFree; the guard frees it exactly once.
+            unsafe { windows_sys::Win32::Foundation::LocalFree(self.0) };
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -277,7 +588,7 @@ fn reject_windows_reparse_components(path: &Path) -> io::Result<()> {
                 io::ErrorKind::PermissionDenied,
                 format!(
                     "external credential path contains reparse point {}",
-                    current.display()
+                    codewhale_config::quote_os_path(&current)
                 ),
             ));
         }
@@ -286,7 +597,7 @@ fn reject_windows_reparse_components(path: &Path) -> io::Result<()> {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn open_secure_regular_file(_path: &Path) -> io::Result<File> {
+fn open_secure_regular_file(_path: &Path, _require_owner_only: bool) -> io::Result<File> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "secure external credential reads are unsupported on this platform",
@@ -295,32 +606,40 @@ fn open_secure_regular_file(_path: &Path) -> io::Result<File> {
 
 #[cfg(test)]
 pub(crate) fn reset_side_effect_trap() {
-    OPEN_CALLS.store(0, Ordering::SeqCst);
-    READ_CALLS.store(0, Ordering::SeqCst);
-    WRITE_CALLS.store(0, Ordering::SeqCst);
-    REFRESH_CALLS.store(0, Ordering::SeqCst);
-    NETWORK_CALLS.store(0, Ordering::SeqCst);
+    SIDE_EFFECT_TRAP.with(|trap| trap.set([0; 5]));
 }
 
 #[cfg(test)]
 #[must_use]
 pub(crate) fn side_effect_trap_counts() -> (usize, usize) {
-    (
-        OPEN_CALLS.load(Ordering::SeqCst),
-        READ_CALLS.load(Ordering::SeqCst),
-    )
+    SIDE_EFFECT_TRAP.with(|trap| {
+        let counts = trap.get();
+        (counts[0], counts[1])
+    })
 }
 
 #[cfg(test)]
 #[must_use]
 pub(crate) fn complete_side_effect_trap_counts() -> (usize, usize, usize, usize, usize) {
-    (
-        OPEN_CALLS.load(Ordering::SeqCst),
-        READ_CALLS.load(Ordering::SeqCst),
-        WRITE_CALLS.load(Ordering::SeqCst),
-        REFRESH_CALLS.load(Ordering::SeqCst),
-        NETWORK_CALLS.load(Ordering::SeqCst),
-    )
+    SIDE_EFFECT_TRAP.with(|trap| {
+        let counts = trap.get();
+        (counts[0], counts[1], counts[2], counts[3], counts[4])
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn record_owned_credential_write() {
+    increment_side_effect(2);
+}
+
+#[cfg(test)]
+pub(crate) fn record_oauth_refresh() {
+    increment_side_effect(3);
+}
+
+#[cfg(test)]
+pub(crate) fn record_oauth_network() {
+    increment_side_effect(4);
 }
 
 #[cfg(test)]
@@ -425,5 +744,119 @@ mod tests {
             .expect("oversize fixture");
         let error = read_to_string(&grant(&path)).expect_err("oversized file");
         assert!(error.to_string().contains("safety limit"), "{error:#}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owned_read_requires_owner_only_regular_file_and_never_follows_symlinks() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+        let _env = crate::test_support::lock_test_env();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().canonicalize().expect("canonical temp root");
+        let path = root.join("owned.json");
+        std::fs::write(&path, "owned-secret").expect("fixture");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("loose mode");
+        assert!(
+            read_codewhale_owned_to_string(&path).is_err(),
+            "group/other-readable owned credentials must fail closed"
+        );
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .expect("owner-only mode");
+        assert_eq!(
+            read_codewhale_owned_to_string(&path)
+                .expect("secure owned read")
+                .as_deref(),
+            Some("owned-secret")
+        );
+
+        let link = root.join("owned-link.json");
+        symlink(&path, &link).expect("symlink");
+        assert!(read_codewhale_owned_to_string(&link).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owned_read_is_bounded() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let _env = crate::test_support::lock_test_env();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("oversized-owned.json");
+        let file = File::create(&path).expect("fixture");
+        file.set_len(MAX_EXTERNAL_CREDENTIAL_BYTES + 1).unwrap();
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+        let error = read_codewhale_owned_to_string(&path).expect_err("oversized owned file");
+        assert!(error.to_string().contains("safety limit"), "{error:#}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn owned_read_requires_a_current_user_only_dacl_and_is_bounded() {
+        let _env = crate::test_support::lock_test_env();
+        let dir = tempfile::tempdir().expect("tempdir");
+        secure_codewhale_owned_windows_path(dir.path(), true).expect("owner-only directory");
+        let path = dir.path().join("owned.json");
+        std::fs::write(&path, "owned-secret").expect("fixture");
+        secure_codewhale_owned_windows_path(&path, false).expect("owner-only file");
+        assert_eq!(
+            read_codewhale_owned_to_string(&path)
+                .expect("secure owned read")
+                .as_deref(),
+            Some("owned-secret")
+        );
+
+        let file = File::options()
+            .write(true)
+            .open(&path)
+            .expect("reopen fixture");
+        file.set_len(MAX_EXTERNAL_CREDENTIAL_BYTES + 1)
+            .expect("oversize fixture");
+        let error = read_codewhale_owned_to_string(&path).expect_err("oversized owned file");
+        assert!(error.to_string().contains("safety limit"), "{error:#}");
+
+        let link = dir.path().join("owned-link.json");
+        if std::os::windows::fs::symlink_file(&path, &link).is_ok() {
+            assert!(
+                read_codewhale_owned_to_string(&link).is_err(),
+                "owned reads must reject leaf reparse points"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_handle_path_comparison_is_lossless_and_fails_closed() {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt as _;
+
+        let expected = PathBuf::from(r"C:\Users\Alice\credential.json");
+        let kernel = PathBuf::from(r"\\?\C:\Users\Alice\credential.json");
+        assert_eq!(
+            normalize_windows_path_for_comparison(&expected).unwrap(),
+            normalize_windows_path_for_comparison(&kernel).unwrap()
+        );
+        assert_ne!(
+            normalize_windows_path_for_comparison(Path::new(r"C:\Users\Alice\A\credential.json"))
+                .unwrap(),
+            normalize_windows_path_for_comparison(Path::new(r"C:\Users\Alice\a\credential.json"))
+                .unwrap(),
+            "case-distinct paths must never collapse at an exact-path authority boundary"
+        );
+
+        let invalid = PathBuf::from(OsString::from_wide(&[
+            b'C' as u16,
+            b':' as u16,
+            b'\\' as u16,
+            0xd800,
+        ]));
+        assert!(normalize_windows_path_for_comparison(&invalid).is_err());
     }
 }

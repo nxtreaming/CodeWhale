@@ -54,7 +54,7 @@ use crate::commands;
 use crate::compaction::estimate_input_tokens_conservative;
 use crate::config::{
     ApiProvider, Config, ProviderConfig, ProviderIdentity, ProvidersConfig, StatusItem,
-    UpdateConfig, finalize_xai_device_login_for_at, persist_external_credential_consent_for_at,
+    UpdateConfig, persist_external_credential_consent_for_at,
     revoke_external_credential_consent_for_at,
 };
 use crate::config_ui::{self, ConfigUiMode, WebConfigSession, WebConfigSessionEvent};
@@ -10289,6 +10289,12 @@ fn clear_active_provider_api_key_from_memory(app: &App, config: &mut Config) {
         config.api_key = None;
     }
     config.set_provider_api_key_override(app.api_provider, None);
+    if app.api_provider == ApiProvider::Xai {
+        let entry = config.provider_config_for_mut(ApiProvider::Xai);
+        entry.auth_mode = None;
+        entry.oauth_credential_generation = None;
+        entry.external_credentials = None;
+    }
 }
 
 fn parse_queue_send_command(input: &str) -> Option<Result<usize, String>> {
@@ -13283,17 +13289,29 @@ fn mirror_saved_api_key_in_config(config: &mut Config, provider: ApiProvider, ap
     entry.auth_mode = Some("api_key".to_string());
     entry.api_key = Some(api_key);
     entry.external_credentials = None;
+    if provider == ApiProvider::Xai {
+        entry.oauth_credential_generation = None;
+    }
 }
 
 async fn apply_codewhale_owned_xai_login(
     app: &mut App,
     engine_handle: &mut EngineHandle,
     config: &mut Config,
+    pending: crate::xai_oauth::PendingXaiDeviceLogin,
     status_prefix: &str,
 ) {
-    match finalize_xai_device_login_for_at(app.config_path.as_deref(), Some(&mut *config)) {
-        Ok(path) => {
-            app.status_message = Some(format!("{status_prefix}; saved to {}", path.display()));
+    match crate::xai_oauth::activate_device_login(
+        pending,
+        app.config_path.as_deref(),
+        Some(&mut *config),
+    ) {
+        Ok(activation) => {
+            app.status_message = Some(format!(
+                "{status_prefix}; activated {} via {}",
+                codewhale_config::quote_os_path(&activation.auth_path),
+                codewhale_config::quote_os_path(&activation.config_path)
+            ));
             app.api_key_env_only = false;
         }
         Err(err) => {
@@ -13332,11 +13350,12 @@ async fn run_xai_device_login_from_tui(
     )?;
 
     match login_result {
-        Ok(_) => {
+        Ok(pending) => {
             apply_codewhale_owned_xai_login(
                 app,
                 engine_handle,
                 config,
+                pending,
                 "xAI device login complete",
             )
             .await;

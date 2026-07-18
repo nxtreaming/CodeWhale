@@ -125,6 +125,28 @@ pub struct XaiOAuthCredentials {
     pub client_id: String,
 }
 
+/// A successful device-code exchange that has not yet been made active.
+///
+/// Keeping the bearer material in memory until activation lets the config
+/// pointer and a uniquely named owned credential generation commit as one
+/// logical operation. A cancelled or failed finalization never leaves a
+/// canonical token file that becomes active on a later launch.
+#[derive(Debug)]
+pub struct PendingXaiDeviceLogin {
+    issuer: String,
+    client_id: String,
+    token: TokenResponse,
+}
+
+/// Receipt for the committed Codewhale-owned xAI OAuth generation.
+#[derive(Debug)]
+pub struct XaiDeviceActivation {
+    #[allow(dead_code)]
+    pub credentials: XaiOAuthCredentials,
+    pub config_path: PathBuf,
+    pub auth_path: PathBuf,
+}
+
 /// Whether `[providers.xai] auth_mode` selects the OAuth path.
 #[must_use]
 pub fn auth_mode_uses_xai_oauth(mode: &str) -> bool {
@@ -179,9 +201,17 @@ pub fn auth_file_path() -> PathBuf {
 /// Codewhale-owned xAI token file. Native login and refresh never target the
 /// Grok CLI's file.
 pub fn codewhale_auth_file_path() -> Result<PathBuf> {
-    Ok(codewhale_config::codewhale_home()?
-        .join("credentials")
-        .join("xai-auth.json"))
+    codewhale_config::legacy_xai_oauth_path()
+}
+
+fn configured_owned_auth_file_path(config: &Config) -> Result<Option<PathBuf>> {
+    let generation = config
+        .provider_config_for(ApiProvider::Xai)
+        .and_then(|entry| entry.oauth_credential_generation.as_deref());
+    match generation {
+        Some(generation) => codewhale_config::xai_oauth_generation_path(generation).map(Some),
+        None => Ok(None),
+    }
 }
 
 #[must_use]
@@ -204,9 +234,28 @@ pub fn credentials_valid(config: &Config) -> bool {
     {
         return false;
     }
+    if let Ok(Some(path)) = configured_owned_auth_file_path(config)
+        && let Ok(Some(mut file)) = load_owned_auth_file(&path)
+        && let Some((_, entry)) = select_entry(&mut file)
+        && (entry_access_token_is_fresh(&entry)
+            || entry
+                .refresh_token
+                .as_deref()
+                .is_some_and(|token| !token.trim().is_empty()))
+    {
+        return true;
+    }
+    if config
+        .provider_config_for(ApiProvider::Xai)
+        .and_then(|entry| entry.oauth_credential_generation.as_deref())
+        .is_some()
+    {
+        // A configured generation is authoritative. Invalid, missing, unsafe,
+        // or malformed owned storage must not fall through to an external CLI.
+        return false;
+    }
     if let Ok(path) = codewhale_auth_file_path()
-        && path.exists()
-        && let Ok(mut file) = load_auth_file(&path)
+        && let Ok(Some(mut file)) = load_owned_auth_file(&path)
         && let Some((_, entry)) = select_entry(&mut file)
         && (entry_access_token_is_fresh(&entry)
             || entry
@@ -246,8 +295,11 @@ pub fn get_credentials(config: &Config) -> Result<XaiOAuthCredentials> {
                 .is_some_and(auth_mode_uses_xai_oauth),
         "Codewhale-owned xAI OAuth credentials are inactive until the xAI route explicitly selects OAuth"
     );
+    if let Some(owned_path) = configured_owned_auth_file_path(config)? {
+        return get_owned_credentials(&owned_path);
+    }
     let owned_path = codewhale_auth_file_path()?;
-    if owned_path.exists() {
+    if load_owned_auth_file(&owned_path)?.is_some() {
         return get_owned_credentials(&owned_path);
     }
 
@@ -261,13 +313,13 @@ pub fn get_credentials(config: &Config) -> Result<XaiOAuthCredentials> {
     let (scope, entry) = select_entry(&mut file).ok_or_else(|| {
         anyhow::anyhow!(
             "xAI OAuth credentials at {} have no usable entry. Run `grok login` again or use `codewhale auth xai-device` for Codewhale-owned storage.",
-            grant.path().display()
+            codewhale_config::quote_os_path(grant.path())
         )
     })?;
     if !entry_access_token_is_fresh(&entry) {
         bail!(
             "xAI OAuth access token in {} is expired. Read-only consent never refreshes or rewrites another CLI's credentials. Run `grok login` again or use `codewhale auth xai-device`.",
-            grant.path().display()
+            codewhale_config::quote_os_path(grant.path())
         );
     }
     let token = entry
@@ -279,11 +331,16 @@ pub fn get_credentials(config: &Config) -> Result<XaiOAuthCredentials> {
 }
 
 fn get_owned_credentials(path: &Path) -> Result<XaiOAuthCredentials> {
-    let mut file = load_auth_file(path)?;
+    let mut file = load_owned_auth_file(path)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Codewhale-owned xAI OAuth credentials were not found at {}. Run `codewhale auth xai-device` again.",
+            codewhale_config::quote_os_path(path)
+        )
+    })?;
     let (scope, mut entry) = select_entry(&mut file).ok_or_else(|| {
         anyhow::anyhow!(
             "Codewhale-owned xAI OAuth credentials at {} have no usable entry. Run `codewhale auth xai-device` again.",
-            path.display()
+            codewhale_config::quote_os_path(path)
         )
     })?;
 
@@ -329,12 +386,14 @@ fn get_owned_credentials(path: &Path) -> Result<XaiOAuthCredentials> {
 }
 
 /// Interactive device-code login. Prints verification URL + user code to
-/// `stderr`, polls until approved, and writes Codewhale-owned storage.
+/// `stderr` and polls until approved. The returned bearer material remains
+/// pending in memory until [`activate_device_login`] commits an owned
+/// generation and its config pointer.
 ///
 /// Public residual entry point for CLI/TUI wiring (`codewhale auth` /
 /// slash command). Call from a headless or TUI surface that can print the
 /// verification URL.
-pub async fn device_code_login() -> Result<XaiOAuthCredentials> {
+pub async fn device_code_login() -> Result<PendingXaiDeviceLogin> {
     let issuer = std::env::var("GROK_OIDC_ISSUER")
         .or_else(|_| std::env::var("XAI_OIDC_ISSUER"))
         .unwrap_or_else(|_| XAI_OIDC_ISSUER.to_string());
@@ -344,21 +403,19 @@ pub async fn device_code_login() -> Result<XaiOAuthCredentials> {
     let scopes = std::env::var("GROK_OIDC_SCOPES")
         .or_else(|_| std::env::var("XAI_OIDC_SCOPES"))
         .unwrap_or_else(|_| DEFAULT_SCOPES.to_string());
-    let auth_path = codewhale_auth_file_path()?;
     let open_browser = std::env::var_os("CODEWHALE_XAI_OAUTH_NO_BROWSER").is_none();
 
-    device_code_login_on_blocking_thread(issuer, client_id, scopes, auth_path, open_browser).await
+    device_code_login_on_blocking_thread(issuer, client_id, scopes, open_browser).await
 }
 
 async fn device_code_login_on_blocking_thread(
     issuer: String,
     client_id: String,
     scopes: String,
-    auth_path: PathBuf,
     open_browser: bool,
-) -> Result<XaiOAuthCredentials> {
+) -> Result<PendingXaiDeviceLogin> {
     tokio::task::spawn_blocking(move || {
-        device_code_login_with(&issuer, &client_id, &scopes, &auth_path, open_browser)
+        device_code_login_with(&issuer, &client_id, &scopes, open_browser)
     })
     .await
     .context("xAI device-code login worker failed")?
@@ -368,9 +425,8 @@ fn device_code_login_with(
     issuer: &str,
     client_id: &str,
     scopes: &str,
-    auth_path: &Path,
     open_browser: bool,
-) -> Result<XaiOAuthCredentials> {
+) -> Result<PendingXaiDeviceLogin> {
     let endpoints = resolve_device_oauth_endpoints(issuer);
     let device = request_device_code(&endpoints.device_authorization_endpoint, client_id, scopes)?;
     let verify = device
@@ -403,39 +459,11 @@ fn device_code_login_with(
         thread::sleep(Duration::from_secs(interval).min(deadline - now));
         match poll_device_token(&endpoints.token_endpoint, client_id, &device.device_code) {
             Ok(token) => {
-                let mut file = if auth_path.exists() {
-                    load_auth_file(auth_path).unwrap_or_default()
-                } else {
-                    BTreeMap::new()
-                };
-                let scope = format!("{issuer}::{client_id}");
-                let mut entry = file.remove(&scope).unwrap_or(GrokAuthEntry {
-                    key: None,
-                    refresh_token: None,
-                    expires_at: None,
-                    oidc_issuer: Some(issuer.to_string()),
-                    oidc_client_id: Some(client_id.to_string()),
-                    auth_mode: Some("oidc".to_string()),
-                    extra: BTreeMap::new(),
+                return Ok(PendingXaiDeviceLogin {
+                    issuer: issuer.to_string(),
+                    client_id: client_id.to_string(),
+                    token,
                 });
-                apply_token_response(&mut entry, issuer, client_id, &token)?;
-                file.insert(scope.clone(), entry.clone());
-                if let Some(parent) = auth_path.parent() {
-                    fs::create_dir_all(parent).with_context(|| {
-                        format!("creating xAI OAuth auth directory {}", parent.display())
-                    })?;
-                }
-                write_auth_file(auth_path, &file)?;
-                let access = entry
-                    .key
-                    .clone()
-                    .filter(|t| !t.trim().is_empty())
-                    .context("xAI device-code login returned an empty access token")?;
-                eprintln!(
-                    "Signed in. Tokens stored at {} (mode 0600).",
-                    auth_path.display()
-                );
-                return Ok(credentials_from_entry(scope, &entry, access));
             }
             Err(err) => {
                 let msg = err.to_string();
@@ -451,6 +479,154 @@ fn device_code_login_with(
     }
 }
 
+/// Commit a pending device login as a uniquely named owned generation and
+/// atomically point `[providers.xai]` at it under the shared config lock.
+///
+/// The credential file is staged while the config lock is held. If config
+/// persistence fails, the unreferenced stage is removed. Only after the new
+/// pointer commits is the previously selected generation removed best-effort.
+pub fn activate_device_login(
+    pending: PendingXaiDeviceLogin,
+    config_path: Option<&Path>,
+    live_config: Option<&mut Config>,
+) -> Result<XaiDeviceActivation> {
+    let config_path = crate::config_persistence::config_toml_path(config_path)?;
+    let generation = format!(
+        "{}{}{}",
+        codewhale_config::XAI_OAUTH_GENERATION_PREFIX,
+        uuid::Uuid::new_v4().simple(),
+        codewhale_config::XAI_OAUTH_GENERATION_SUFFIX
+    );
+    codewhale_config::validate_xai_oauth_generation(&generation)?;
+    let auth_path = codewhale_config::xai_oauth_generation_path(&generation)?;
+    let key_inside =
+        crate::config::provider_config_key(ApiProvider::Xai).context("xAI auth mode key")?;
+    let mut stage_written = false;
+
+    let activation = codewhale_config::mutate_config_document(&config_path, |document| {
+        let previous_generation_item = document
+            .get("providers")
+            .and_then(toml_edit::Item::as_table_like)
+            .and_then(|providers| providers.get(key_inside))
+            .and_then(toml_edit::Item::as_table_like)
+            .and_then(|provider| provider.get("oauth_credential_generation"));
+        let previous_generation = previous_generation_item
+            .map(|item| {
+                item.as_str()
+                    .context(
+                        "refusing xAI login because the existing credential generation pointer is not a string",
+                    )
+                    .map(ToOwned::to_owned)
+            })
+            .transpose()?;
+        if let Some(previous) = previous_generation.as_deref() {
+            codewhale_config::validate_xai_oauth_generation(previous).with_context(|| {
+                "refusing xAI login because the existing credential generation pointer is invalid"
+            })?;
+        }
+
+        let previous_path = match previous_generation.as_deref() {
+            Some(previous) => Some(codewhale_config::xai_oauth_generation_path(previous)?),
+            None => {
+                let legacy = codewhale_auth_file_path()?;
+                load_owned_auth_file(&legacy)?.is_some().then_some(legacy)
+            }
+        };
+        let mut file = match previous_path.as_deref() {
+            Some(path) => load_owned_auth_file(path)?.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "the active Codewhale-owned xAI OAuth generation is missing at {}",
+                    codewhale_config::quote_os_path(path)
+                )
+            })?,
+            None => BTreeMap::new(),
+        };
+        let scope = format!("{}::{}", pending.issuer, pending.client_id);
+        let mut entry = file.remove(&scope).unwrap_or(GrokAuthEntry {
+            key: None,
+            refresh_token: None,
+            expires_at: None,
+            oidc_issuer: Some(pending.issuer.clone()),
+            oidc_client_id: Some(pending.client_id.clone()),
+            auth_mode: Some("oidc".to_string()),
+            extra: BTreeMap::new(),
+        });
+        apply_token_response(
+            &mut entry,
+            &pending.issuer,
+            &pending.client_id,
+            &pending.token,
+        )?;
+        let access = entry
+            .key
+            .clone()
+            .filter(|token| !token.trim().is_empty())
+            .context("xAI device-code login returned an empty access token")?;
+        file.insert(scope.clone(), entry.clone());
+        write_new_auth_file(&auth_path, &file)?;
+        stage_written = true;
+
+        codewhale_config::set_config_document_value(
+            document,
+            &["providers", key_inside, "auth_mode"],
+            "oauth",
+        )?;
+        codewhale_config::set_config_document_value(
+            document,
+            &["providers", key_inside, "oauth_credential_generation"],
+            generation.clone(),
+        )?;
+        codewhale_config::unset_config_document_value(
+            document,
+            &["providers", key_inside, "external_credentials"],
+        )?;
+        Ok((
+            previous_generation,
+            credentials_from_entry(scope, &entry, access),
+        ))
+    });
+
+    let (previous_generation, credentials) = match activation {
+        Ok(activation) => activation,
+        Err(error) => {
+            if stage_written
+                && let Err(cleanup_error) = fs::remove_file(&auth_path)
+                && cleanup_error.kind() != std::io::ErrorKind::NotFound
+            {
+                return Err(error).context(format!(
+                    "xAI login was not activated; also failed to remove unreferenced staged credentials at {}: {cleanup_error}",
+                    codewhale_config::quote_os_path(&auth_path)
+                ));
+            }
+            return Err(error)
+                .context("xAI login was not activated; provider configuration is unchanged");
+        }
+    };
+
+    if let Some(config) = live_config {
+        config.mark_codewhale_owned_xai_oauth(generation.clone());
+    }
+    if let Some(previous) = previous_generation
+        && previous != generation
+        && let Err(error) = codewhale_config::remove_xai_oauth_generation(&previous)
+    {
+        tracing::warn!(
+            target: "codewhale::xai_oauth",
+            error = %error,
+            "new xAI OAuth generation committed but superseded generation cleanup failed"
+        );
+    }
+    eprintln!(
+        "Signed in. Codewhale-owned credentials activated at {}.",
+        codewhale_config::quote_os_path(&auth_path)
+    );
+    Ok(XaiDeviceActivation {
+        credentials,
+        config_path,
+        auth_path,
+    })
+}
+
 #[must_use]
 pub fn missing_auth_message() -> String {
     format!(
@@ -461,7 +637,7 @@ pub fn missing_auth_message() -> String {
          `codewhale auth external-consent --provider xai --mode read-only --path {}`\n\
          3. Or use API-key auth: export XAI_API_KEY=... / \
          codewhale auth set --provider xai",
-        auth_file_path().display()
+        codewhale_config::quote_os_path(&auth_file_path())
     )
 }
 
@@ -469,10 +645,23 @@ pub fn missing_auth_message() -> String {
 
 type AuthFile = BTreeMap<String, GrokAuthEntry>;
 
-fn load_auth_file(path: &Path) -> Result<AuthFile> {
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("reading xAI/Grok auth file {}", path.display()))?;
-    parse_auth_file(&raw, path)
+fn load_owned_auth_file(path: &Path) -> Result<Option<AuthFile>> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "inspecting Codewhale-owned credential file {}",
+                    codewhale_config::quote_os_path(path)
+                )
+            });
+        }
+    }
+    let Some(raw) = crate::external_credentials::read_codewhale_owned_to_string(path)? else {
+        return Ok(None);
+    };
+    parse_auth_file(&raw, path).map(Some)
 }
 
 fn load_external_auth_file(
@@ -481,19 +670,23 @@ fn load_external_auth_file(
     let Some(raw) = crate::external_credentials::read_to_string(grant)? else {
         bail!(
             "external xAI/Grok credential file not found at {}",
-            grant.path().display()
+            codewhale_config::quote_os_path(grant.path())
         );
     };
     parse_auth_file(&raw, grant.path())
 }
 
 fn parse_auth_file(raw: &str, path: &Path) -> Result<AuthFile> {
-    let value: Value = serde_json::from_str(raw)
-        .with_context(|| format!("parsing xAI/Grok auth file {}", path.display()))?;
-    let obj = value.as_object().with_context(|| {
-        format!(
-            "xAI/Grok auth file {} must be a JSON object of scope → entry",
-            path.display()
+    let value: Value = serde_json::from_str(raw).map_err(|_| {
+        anyhow::anyhow!(
+            "xAI/Grok credential file {} is not valid credential JSON",
+            codewhale_config::quote_os_path(path)
+        )
+    })?;
+    let obj = value.as_object().ok_or_else(|| {
+        anyhow::anyhow!(
+            "xAI/Grok credential file {} must be a JSON object of entries",
+            codewhale_config::quote_os_path(path)
         )
     })?;
     let mut out = BTreeMap::new();
@@ -502,11 +695,9 @@ fn parse_auth_file(raw: &str, path: &Path) -> Result<AuthFile> {
             Ok(entry) => {
                 out.insert(k.clone(), entry);
             }
-            Err(err) => {
+            Err(_) => {
                 tracing::warn!(
                     target: "codewhale::xai_oauth",
-                    scope = %k,
-                    error = %err,
                     "skipping unreadable xAI auth entry"
                 );
             }
@@ -516,18 +707,157 @@ fn parse_auth_file(raw: &str, path: &Path) -> Result<AuthFile> {
 }
 
 fn write_auth_file(path: &Path, file: &AuthFile) -> Result<()> {
+    write_auth_file_with_policy(path, file, true)
+}
+
+fn write_new_auth_file(path: &Path, file: &AuthFile) -> Result<()> {
+    write_auth_file_with_policy(path, file, false)
+}
+
+fn write_auth_file_with_policy(path: &Path, file: &AuthFile, allow_replace: bool) -> Result<()> {
+    ensure_owned_auth_destination(path, allow_replace)?;
     let serialized =
         serde_json::to_vec_pretty(file).context("serializing xAI OAuth credentials")?;
-    crate::utils::write_atomic(path, &serialized)
-        .with_context(|| format!("writing xAI OAuth credentials to {}", path.display()))?;
+    codewhale_config::persistence::atomic_write(path, &serialized).with_context(|| {
+        format!(
+            "writing xAI OAuth credentials to {}",
+            codewhale_config::quote_os_path(path)
+        )
+    })?;
     #[cfg(unix)]
-    if let Err(err) = fs::set_permissions(path, fs::Permissions::from_mode(0o600)) {
-        tracing::warn!(
-            target: "codewhale::xai_oauth",
-            path = %path.display(),
-            error = %err,
-            "could not enforce 0o600 on xAI OAuth credentials; relying on host ACLs"
+    let secure_result = {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).with_context(|| {
+            format!(
+                "securing xAI OAuth credentials at {}",
+                codewhale_config::quote_os_path(path)
+            )
+        })
+    };
+    #[cfg(windows)]
+    let secure_result = crate::external_credentials::secure_codewhale_owned_windows_path(
+        path, false,
+    )
+    .with_context(|| {
+        format!(
+            "securing xAI OAuth credentials at {}",
+            codewhale_config::quote_os_path(path)
+        )
+    });
+    #[cfg(not(any(unix, windows)))]
+    let secure_result: Result<()> = Ok(());
+    if let Err(error) = secure_result {
+        if !allow_replace {
+            match fs::remove_file(path) {
+                Ok(()) => {}
+                Err(cleanup) if cleanup.kind() == std::io::ErrorKind::NotFound => {}
+                Err(cleanup) => {
+                    return Err(error).context(format!(
+                        "also failed to remove unsecured staged credentials at {}: {cleanup}",
+                        codewhale_config::quote_os_path(path)
+                    ));
+                }
+            }
+        }
+        return Err(error);
+    }
+    #[cfg(test)]
+    crate::external_credentials::record_owned_credential_write();
+    Ok(())
+}
+
+fn ensure_owned_auth_destination(path: &Path, allow_replace: bool) -> Result<()> {
+    let directory = codewhale_config::xai_oauth_credentials_dir()?;
+    anyhow::ensure!(
+        path.parent() == Some(directory.as_path()),
+        "xAI OAuth destination must be inside Codewhale's credentials directory"
+    );
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("xAI OAuth destination must have a UTF-8 basename")?;
+    anyhow::ensure!(
+        file_name == codewhale_config::LEGACY_XAI_OAUTH_FILE_NAME
+            || codewhale_config::is_valid_xai_oauth_generation(file_name),
+        "xAI OAuth destination has an invalid owned basename"
+    );
+    fs::create_dir_all(&directory).with_context(|| {
+        format!(
+            "creating Codewhale credentials directory {}",
+            codewhale_config::quote_os_path(&directory)
+        )
+    })?;
+    let canonical_directory = fs::canonicalize(&directory).with_context(|| {
+        format!(
+            "resolving Codewhale credentials directory {}",
+            codewhale_config::quote_os_path(&directory)
+        )
+    })?;
+    anyhow::ensure!(
+        canonical_directory == directory,
+        "Codewhale credentials directory changed through a symlink or reparse point"
+    );
+    let metadata = fs::symlink_metadata(&directory).with_context(|| {
+        format!(
+            "inspecting Codewhale credentials directory {}",
+            codewhale_config::quote_os_path(&directory)
+        )
+    })?;
+    anyhow::ensure!(
+        metadata.file_type().is_dir() && !metadata.file_type().is_symlink(),
+        "Codewhale credentials directory must be a non-symlink directory"
+    );
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+        anyhow::ensure!(
+            metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0,
+            "Codewhale credentials directory must not be a reparse point"
         );
+        crate::external_credentials::secure_codewhale_owned_windows_path(&directory, true)
+            .with_context(|| {
+                format!(
+                    "securing Codewhale credentials directory {}",
+                    codewhale_config::quote_os_path(&directory)
+                )
+            })?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        anyhow::ensure!(
+            metadata.uid() == unsafe { libc::geteuid() },
+            "Codewhale credentials directory must be owned by the current user"
+        );
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).with_context(|| {
+            format!(
+                "securing Codewhale credentials directory {}",
+                codewhale_config::quote_os_path(&directory)
+            )
+        })?;
+    }
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            anyhow::ensure!(
+                allow_replace,
+                "refusing to replace an existing xAI OAuth generation"
+            );
+            anyhow::ensure!(
+                metadata.file_type().is_file() && !metadata.file_type().is_symlink(),
+                "xAI OAuth destination must be a non-symlink regular file"
+            );
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt as _;
+                use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+                anyhow::ensure!(
+                    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0,
+                    "xAI OAuth destination must not be a reparse point"
+                );
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("inspecting xAI OAuth destination"),
     }
     Ok(())
 }
@@ -687,6 +1017,8 @@ fn discover_device_oauth_endpoints(issuer: &str) -> Result<DeviceOauthEndpoints>
         .timeout(Duration::from_secs(20))
         .build()
         .context("Failed to build xAI OIDC discovery client")?;
+    #[cfg(test)]
+    crate::external_credentials::record_oauth_network();
     let response = client
         .get(&discovery_url)
         .header(reqwest::header::ACCEPT, "application/json")
@@ -832,6 +1164,8 @@ fn refresh_access_token(
     client_id: &str,
     refresh_token: &str,
 ) -> Result<TokenResponse> {
+    #[cfg(test)]
+    crate::external_credentials::record_oauth_refresh();
     let token_endpoint = resolve_device_oauth_endpoints(issuer).token_endpoint;
     let client = crate::tls::reqwest_blocking_client_builder()
         .timeout(Duration::from_secs(20))
@@ -842,6 +1176,8 @@ fn refresh_access_token(
         ("grant_type", "refresh_token"),
         ("refresh_token", refresh_token),
     ];
+    #[cfg(test)]
+    crate::external_credentials::record_oauth_network();
     let response = client
         .post(token_endpoint)
         .form(&params)
@@ -871,6 +1207,8 @@ fn request_device_code(
         .build()
         .context("Failed to build xAI device-code client")?;
     let params = [("client_id", client_id), ("scope", scopes)];
+    #[cfg(test)]
+    crate::external_credentials::record_oauth_network();
     let response = client
         .post(device_authorization_endpoint)
         .form(&params)
@@ -918,6 +1256,8 @@ fn poll_device_token(
         ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
         ("device_code", device_code),
     ];
+    #[cfg(test)]
+    crate::external_credentials::record_oauth_network();
     let response = client
         .post(token_endpoint)
         .form(&params)
@@ -1112,6 +1452,11 @@ mod tests {
             crate::external_credentials::side_effect_trap_counts(),
             (0, 0)
         );
+        assert_eq!(
+            crate::external_credentials::complete_side_effect_trap_counts(),
+            (0, 0, 0, 0, 0),
+            "disabled external authority must reach no credential or OAuth sink"
+        );
         assert_eq!(fs::read_to_string(&path).unwrap(), raw);
     }
 
@@ -1169,6 +1514,11 @@ mod tests {
             crate::external_credentials::side_effect_trap_counts(),
             (1, 1)
         );
+        assert_eq!(
+            crate::external_credentials::complete_side_effect_trap_counts(),
+            (1, 1, 0, 0, 0),
+            "read-only external expiry must not reach write, refresh, or network sinks"
+        );
         assert_eq!(fs::read_to_string(&path).unwrap(), raw);
         assert!(!owned_home.join("credentials/xai-auth.json").exists());
         assert!(
@@ -1190,8 +1540,242 @@ mod tests {
         let _grok = crate::test_support::EnvVarGuard::set("GROK_AUTH_PATH", &grok_path);
 
         let owned = codewhale_auth_file_path().expect("Codewhale-owned auth path");
-        assert_eq!(owned, dir.path().join("credentials/xai-auth.json"));
+        assert_eq!(
+            owned,
+            dir.path()
+                .canonicalize()
+                .expect("canonical Codewhale home")
+                .join("credentials/xai-auth.json")
+        );
         assert_ne!(owned, auth_file_path());
+    }
+
+    fn pending_login(access: &str, refresh: &str) -> PendingXaiDeviceLogin {
+        PendingXaiDeviceLogin {
+            issuer: XAI_OIDC_ISSUER.to_string(),
+            client_id: GROK_OIDC_CLIENT_ID.to_string(),
+            token: TokenResponse {
+                access_token: Some(access.to_string()),
+                refresh_token: Some(refresh.to_string()),
+                expires_in: Some(3600),
+                error: None,
+            },
+        }
+    }
+
+    #[test]
+    fn activation_commits_unique_generation_pointer_and_revokes_external_consent() {
+        let _guard = crate::test_support::lock_test_env();
+        let dir = TempDir::new().unwrap();
+        let home = dir.path().join("owned-home");
+        let config_path = dir.path().join("config.toml");
+        let external_path = dir.path().join("grok-external.json");
+        fs::write(&external_path, "external owner bytes").unwrap();
+        fs::write(
+            &config_path,
+            format!(
+                r#"# operator note
+[providers.xai]
+model = "grok-code-fast-1" # model note
+future_setting = "preserve"
+
+[providers.xai.external_credentials]
+access = "read_only"
+provider = "xai"
+source = "grok_cli"
+path = {}
+consent_version = 1
+"#,
+                toml::Value::String(external_path.display().to_string())
+            ),
+        )
+        .unwrap();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &home);
+        let consent = codewhale_config::ExternalCredentialConsentToml::read_only(
+            codewhale_config::ProviderKind::Xai,
+            codewhale_config::ExternalCredentialSource::GrokCli,
+            external_path.clone(),
+        );
+        let mut live = Config {
+            providers: Some(crate::config::ProvidersConfig {
+                xai: crate::config::ProviderConfig {
+                    model: Some("grok-code-fast-1".to_string()),
+                    external_credentials: Some(consent),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        crate::external_credentials::reset_side_effect_trap();
+        let activation = activate_device_login(
+            pending_login("activation-access", "activation-refresh"),
+            Some(&config_path),
+            Some(&mut live),
+        )
+        .expect("activate login");
+
+        assert_eq!(activation.config_path, config_path);
+        let generation = activation
+            .auth_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("generation basename");
+        assert!(codewhale_config::is_valid_xai_oauth_generation(generation));
+        let persisted = fs::read_to_string(&config_path).unwrap();
+        assert!(persisted.contains("# operator note"));
+        assert!(persisted.contains("model = \"grok-code-fast-1\" # model note"));
+        assert!(persisted.contains("future_setting = \"preserve\""));
+        assert!(persisted.contains("auth_mode = \"oauth\""));
+        assert!(persisted.contains(&format!("oauth_credential_generation = \"{generation}\"")));
+        assert!(!persisted.contains("external_credentials"));
+        assert_eq!(
+            fs::read_to_string(&external_path).unwrap(),
+            "external owner bytes"
+        );
+        let owned = fs::read_to_string(&activation.auth_path).unwrap();
+        assert!(owned.contains("activation-access"));
+        assert!(owned.contains("activation-refresh"));
+        #[cfg(unix)]
+        assert_eq!(
+            fs::metadata(&activation.auth_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        let live_xai = live.provider_config_for(ApiProvider::Xai).unwrap();
+        assert_eq!(live_xai.auth_mode.as_deref(), Some("oauth"));
+        assert_eq!(
+            live_xai.oauth_credential_generation.as_deref(),
+            Some(generation)
+        );
+        assert!(live_xai.external_credentials.is_none());
+        assert_eq!(
+            crate::external_credentials::complete_side_effect_trap_counts(),
+            (0, 0, 1, 0, 0),
+            "activation must reach exactly the owned write sink"
+        );
+    }
+
+    #[test]
+    fn activation_rotation_cleans_only_the_superseded_generation_after_commit() {
+        let _guard = crate::test_support::lock_test_env();
+        let dir = TempDir::new().unwrap();
+        let home = dir.path().join("owned-home");
+        let config_path = dir.path().join("config.toml");
+        fs::write(&config_path, "[providers.xai]\nmodel = \"grok-4.5\"\n").unwrap();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &home);
+        let mut live = Config::default();
+
+        let first = activate_device_login(
+            pending_login("first-access", "first-refresh"),
+            Some(&config_path),
+            Some(&mut live),
+        )
+        .expect("first activation");
+        assert!(first.auth_path.exists());
+        let first_name = first
+            .auth_path
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        let second = activate_device_login(
+            pending_login("second-access", "second-refresh"),
+            Some(&config_path),
+            Some(&mut live),
+        )
+        .expect("second activation");
+        assert_ne!(first.auth_path, second.auth_path);
+        assert!(second.auth_path.exists());
+        assert!(
+            !first.auth_path.exists(),
+            "superseded generation must be removed only after the new pointer commits"
+        );
+        let persisted = fs::read_to_string(&config_path).unwrap();
+        assert!(!persisted.contains(&first_name));
+        assert!(persisted.contains(second.auth_path.file_name().unwrap().to_str().unwrap()));
+        assert!(
+            fs::read_to_string(second.auth_path)
+                .unwrap()
+                .contains("second-access")
+        );
+    }
+
+    #[test]
+    fn activation_rejects_a_non_string_generation_pointer_without_staging_credentials() {
+        let _guard = crate::test_support::lock_test_env();
+        let dir = TempDir::new().unwrap();
+        let home = dir.path().join("owned-home");
+        let config_path = dir.path().join("config.toml");
+        let original = "[providers.xai]\noauth_credential_generation = { path = \"attacker\" }\n";
+        fs::write(&config_path, original).unwrap();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &home);
+
+        let error = activate_device_login(
+            pending_login("must-not-stage", "must-not-persist"),
+            Some(&config_path),
+            None,
+        )
+        .expect_err("non-string generation pointers must fail closed");
+        assert!(error.to_string().contains("not activated"), "{error:#}");
+        assert_eq!(fs::read_to_string(&config_path).unwrap(), original);
+        assert!(!home.join("credentials").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn activation_failure_cleans_unreferenced_stage_and_keeps_live_config_inert() {
+        let _guard = crate::test_support::lock_test_env();
+        let dir = TempDir::new().unwrap();
+        let home = dir.path().join("owned-home");
+        let config_dir = dir.path().join("config-parent");
+        fs::create_dir(&config_dir).unwrap();
+        let config_path = config_dir.join("config.toml");
+        fs::write(&config_path, "[providers.xai]\nauth_mode = \"api_key\"\n").unwrap();
+        fs::write(config_dir.join("config.toml.lock"), "").unwrap();
+        fs::set_permissions(&config_dir, fs::Permissions::from_mode(0o500)).unwrap();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &home);
+        let mut live = Config {
+            providers: Some(crate::config::ProvidersConfig {
+                xai: crate::config::ProviderConfig {
+                    auth_mode: Some("api_key".to_string()),
+                    api_key: Some("still-selected".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let result = activate_device_login(
+            pending_login("must-be-cleaned", "must-not-persist"),
+            Some(&config_path),
+            Some(&mut live),
+        );
+        fs::set_permissions(&config_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let error = result.expect_err("read-only config directory must fail activation");
+        assert!(error.to_string().contains("not activated"), "{error:#}");
+        let live_xai = live.provider_config_for(ApiProvider::Xai).unwrap();
+        assert_eq!(live_xai.auth_mode.as_deref(), Some("api_key"));
+        assert!(live_xai.oauth_credential_generation.is_none());
+        let credentials = home.join("credentials");
+        if credentials.exists() {
+            assert!(
+                fs::read_dir(credentials).unwrap().next().is_none(),
+                "failed activation must remove every unreferenced generation"
+            );
+        }
+        assert!(
+            !fs::read_to_string(config_path)
+                .unwrap()
+                .contains("must-be-cleaned")
+        );
     }
 
     #[test]
@@ -1279,13 +1863,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let auth_dir = TempDir::new().unwrap();
-        let auth_path = auth_dir.path().join("unused-auth.json");
         let error = device_code_login_on_blocking_thread(
             server.uri(),
             "test-public-client".to_string(),
             "openid".to_string(),
-            auth_path.clone(),
             false,
         )
         .await
@@ -1294,7 +1875,6 @@ mod tests {
 
         assert!(message.contains("invalid_scope"), "{message}");
         assert!(message.contains("HTTP 400"), "{message}");
-        assert!(!auth_path.exists());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1506,31 +2086,18 @@ mod tests {
             .mount(&server)
             .await;
 
-        let dir = TempDir::new().unwrap();
-        let auth_path = dir.path().join("grok-auth.json");
         let result = tokio::task::block_in_place(|| {
-            device_code_login_with(
-                &server.uri(),
-                GROK_OIDC_CLIENT_ID,
-                DEFAULT_SCOPES,
-                &auth_path,
-                false,
-            )
+            device_code_login_with(&server.uri(), GROK_OIDC_CLIENT_ID, DEFAULT_SCOPES, false)
         });
 
-        let credentials = result.expect("device login");
-        assert_eq!(credentials.access_token, "test-xai-access");
+        let pending = result.expect("device login");
         assert_eq!(
-            credentials.refresh_token.as_deref(),
-            Some("test-xai-refresh")
+            pending.token.access_token.as_deref(),
+            Some("test-xai-access")
         );
-        let persisted = fs::read_to_string(&auth_path).expect("persisted auth file");
-        assert!(persisted.contains("test-xai-access"));
-        assert!(persisted.contains("test-xai-refresh"));
-        #[cfg(unix)]
         assert_eq!(
-            fs::metadata(&auth_path).unwrap().permissions().mode() & 0o777,
-            0o600
+            pending.token.refresh_token.as_deref(),
+            Some("test-xai-refresh")
         );
     }
 
@@ -1669,20 +2236,15 @@ mod tests {
             .mount(&server)
             .await;
 
-        let dir = TempDir::new().unwrap();
-        let auth_path = dir.path().join("grok-auth.json");
         let result = tokio::task::block_in_place(|| {
-            device_code_login_with(
-                &server.uri(),
-                GROK_OIDC_CLIENT_ID,
-                DEFAULT_SCOPES,
-                &auth_path,
-                false,
-            )
+            device_code_login_with(&server.uri(), GROK_OIDC_CLIENT_ID, DEFAULT_SCOPES, false)
         });
 
-        let credentials = result.expect("device login after pending and slow_down");
-        assert_eq!(credentials.access_token, "test-xai-access");
+        let pending = result.expect("device login after pending and slow_down");
+        assert_eq!(
+            pending.token.access_token.as_deref(),
+            Some("test-xai-access")
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1720,16 +2282,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        let dir = TempDir::new().unwrap();
-        let auth_path = dir.path().join("grok-auth.json");
         let result = tokio::task::block_in_place(|| {
-            device_code_login_with(
-                &server.uri(),
-                GROK_OIDC_CLIENT_ID,
-                DEFAULT_SCOPES,
-                &auth_path,
-                false,
-            )
+            device_code_login_with(&server.uri(), GROK_OIDC_CLIENT_ID, DEFAULT_SCOPES, false)
         });
 
         let error = result.expect_err("user denial must stop polling");
@@ -1737,8 +2291,6 @@ mod tests {
         assert!(message.contains("access_denied"), "{message}");
         assert!(message.contains("HTTP 400"), "{message}");
         assert!(!message.contains("authorization_pending"), "{message}");
-        // The denial must not leave a partial credential on disk.
-        assert!(!auth_path.exists());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

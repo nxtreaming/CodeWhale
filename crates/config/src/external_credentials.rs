@@ -9,8 +9,96 @@ use crate::ProviderKind;
 pub const EXTERNAL_CREDENTIAL_CONSENT_VERSION: u32 = 1;
 
 /// The complete side-effect contract for read-only external credentials.
-pub const EXTERNAL_CREDENTIAL_READ_ONLY_SEMANTICS: &str =
-    "read only; no refresh, network requests, writes, or rewrites";
+pub const EXTERNAL_CREDENTIAL_READ_ONLY_SEMANTICS: &str = "read this exact file; no refresh, identity-provider or discovery requests, external-file writes, or rewrites; normal requests to the explicitly selected provider may use the token";
+
+/// Quote an OS path for terminals, logs, JSON display fields, and errors.
+///
+/// The result is always one line. Terminal controls, line separators, bidi
+/// formatting controls, quotes, and backslashes are escaped. Unix paths keep
+/// non-UTF-8 bytes exact as `\xNN`; Windows preserves unpaired UTF-16 units as
+/// `\u{NNNN}`.
+#[must_use]
+pub fn quote_os_path(path: &Path) -> String {
+    quote_os_path_inner(path)
+}
+
+#[cfg(unix)]
+fn quote_os_path_inner(path: &Path) -> String {
+    use std::os::unix::ffi::OsStrExt as _;
+    let bytes = path.as_os_str().as_bytes();
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return quote_path_text(text);
+    }
+    let mut out = String::from("\"");
+    for byte in bytes {
+        match byte {
+            b'"' => out.push_str("\\\""),
+            b'\\' => out.push_str("\\\\"),
+            0x20..=0x7e => out.push(char::from(*byte)),
+            _ => out.push_str(&format!("\\x{byte:02x}")),
+        }
+    }
+    out.push('"');
+    out
+}
+
+#[cfg(windows)]
+fn quote_os_path_inner(path: &Path) -> String {
+    use std::os::windows::ffi::OsStrExt as _;
+    let mut out = String::from("\"");
+    for decoded in char::decode_utf16(path.as_os_str().encode_wide()) {
+        match decoded {
+            Ok(character) => push_escaped_path_character(&mut out, character),
+            Err(error) => out.push_str(&format!("\\u{{{:04x}}}", error.unpaired_surrogate())),
+        }
+    }
+    out.push('"');
+    out
+}
+
+#[cfg(not(any(unix, windows)))]
+fn quote_os_path_inner(path: &Path) -> String {
+    quote_path_text(&path.to_string_lossy())
+}
+
+#[cfg(not(windows))]
+fn quote_path_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for character in text.chars() {
+        push_escaped_path_character(&mut out, character);
+    }
+    out.push('"');
+    out
+}
+
+fn push_escaped_path_character(out: &mut String, character: char) {
+    match character {
+        '"' => out.push_str("\\\""),
+        '\\' => out.push_str("\\\\"),
+        '\n' => out.push_str("\\n"),
+        '\r' => out.push_str("\\r"),
+        '\t' => out.push_str("\\t"),
+        '\u{1b}' => out.push_str("\\x1b"),
+        character if character.is_control() || is_bidi_format_control(character) => {
+            out.extend(character.escape_unicode());
+        }
+        character => out.push(character),
+    }
+}
+
+fn is_bidi_format_control(character: char) -> bool {
+    matches!(
+        character,
+        '\u{061c}'
+            | '\u{200e}'
+            | '\u{200f}'
+            | '\u{2028}'
+            | '\u{2029}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2066}'..='\u{2069}'
+    )
+}
 
 /// Resolve a user-selected path without touching the filesystem.
 ///
@@ -40,7 +128,7 @@ pub fn resolve_external_credential_path(path: impl AsRef<Path>) -> Result<PathBu
                 if !normalized.pop() {
                     bail!(
                         "external credential path escapes its absolute root: {}",
-                        absolute.display()
+                        quote_os_path(&absolute)
                     );
                 }
             }
@@ -50,7 +138,7 @@ pub fn resolve_external_credential_path(path: impl AsRef<Path>) -> Result<PathBu
     if !normalized.is_absolute() {
         bail!(
             "external credential path must resolve to an absolute path: {}",
-            normalized.display()
+            quote_os_path(&normalized)
         );
     }
     Ok(normalized)
@@ -111,7 +199,7 @@ impl ExternalCredentialSource {
 }
 
 /// Side-effect-free projection used by picker, config, and doctor surfaces.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalCredentialConsentStatus {
     pub access: ExternalCredentialAccess,
     pub provider: String,
@@ -121,9 +209,27 @@ pub struct ExternalCredentialConsentStatus {
     pub consent_version: u32,
     pub configured: bool,
     pub scope_valid: bool,
+    /// True when the ambient CLI path now differs from the persisted pinned
+    /// path. This is informational; it never redirects or deactivates consent.
+    pub ambient_path_changed: bool,
     pub route_state: &'static str,
     pub semantics: &'static str,
     pub revoke_command: String,
+}
+
+impl ExternalCredentialConsentStatus {
+    /// Warn without displaying the untrusted ambient replacement. The
+    /// persisted path remains authoritative and is escaped for one line.
+    #[must_use]
+    pub fn ambient_path_warning(&self) -> Option<String> {
+        self.ambient_path_changed.then(|| {
+            format!(
+                "warning: ambient {} credential path changed; consent remains pinned to {} and was not redirected",
+                self.owner,
+                quote_os_path(&self.path)
+            )
+        })
+    }
 }
 
 /// Describe persisted external-credential policy without filesystem or network
@@ -138,10 +244,11 @@ pub fn external_credential_consent_status(
 ) -> ExternalCredentialConsentStatus {
     let configured = consent.is_some();
     let access = consent.map_or(ExternalCredentialAccess::Disabled, |value| value.access);
-    let reported_provider = consent
-        .map(|value| value.provider.clone())
-        .unwrap_or_else(|| provider.as_str().to_string());
-    let reported_source = consent.map_or(source, |value| value.source);
+    // User-facing status identifies the route being inspected. Persisted
+    // provider/source fields are untrusted config input and are represented by
+    // `scope_valid` rather than echoed into a terminal surface.
+    let reported_provider = provider.as_str().to_string();
+    let reported_source = source;
     let reported_path = consent
         .map(|value| value.path.clone())
         .unwrap_or_else(|| expected_path.to_path_buf());
@@ -150,15 +257,16 @@ pub fn external_credential_consent_status(
     });
     let scope_valid = consent.is_some_and(|value| {
         value
-            .validate_read_scope(provider, source, expected_path)
+            .validate_read_scope(provider, source, &value.path)
             .is_ok()
     });
+    let ambient_path_changed = consent.is_some_and(|value| value.path != expected_path);
     let active =
         provider == active_provider && access == ExternalCredentialAccess::ReadOnly && scope_valid;
     let route_state = if active { "active" } else { "dormant" };
     let semantics = match access {
         ExternalCredentialAccess::Disabled => {
-            "disabled; no probing, reading, refreshing, network requests, writes, or rewrites"
+            "disabled; no external-credential probing, reading, refresh, discovery, identity-provider or network acquisition, writes, or rewrites; normal requests to the explicitly selected provider may use Codewhale-owned credentials"
         }
         ExternalCredentialAccess::ReadOnly => EXTERNAL_CREDENTIAL_READ_ONLY_SEMANTICS,
         ExternalCredentialAccess::Managed => {
@@ -175,6 +283,7 @@ pub fn external_credential_consent_status(
         consent_version,
         configured,
         scope_valid,
+        ambient_path_changed,
         route_state,
         semantics,
         revoke_command: format!(
@@ -246,7 +355,7 @@ impl ExternalCredentialConsentToml {
         }
         if self.provider != provider.as_str() {
             bail!(
-                "external credential consent is scoped to provider {}, not {}",
+                "external credential consent is scoped to provider {:?}, not {}",
                 self.provider,
                 provider.as_str()
             );
@@ -264,12 +373,20 @@ impl ExternalCredentialConsentToml {
                 provider.as_str()
             );
         }
+        let normalized = resolve_external_credential_path(&self.path)?;
+        if normalized != self.path {
+            bail!(
+                "external credential consent path for {} must be lexically normalized: {}",
+                provider.as_str(),
+                quote_os_path(&self.path)
+            );
+        }
         if self.path != resolved_path {
             bail!(
                 "external credential path changed for {}; consent covers {}, current path is {}",
                 provider.as_str(),
-                self.path.display(),
-                resolved_path.display()
+                quote_os_path(&self.path),
+                quote_os_path(resolved_path)
             );
         }
         Ok(())
@@ -377,16 +494,56 @@ mod tests {
         );
 
         let changed_path = absolute_test_path("moved-auth.json");
-        let stale = external_credential_consent_status(
+        let pinned = external_credential_consent_status(
             Some(&consent),
             ProviderKind::OpenaiCodex,
             ExternalCredentialSource::CodexCli,
             &changed_path,
             ProviderKind::OpenaiCodex,
         );
-        assert!(!stale.scope_valid);
-        assert_eq!(stale.route_state, "dormant");
-        assert_eq!(stale.path, path, "report the stale persisted grant path");
+        assert!(pinned.scope_valid);
+        assert_eq!(pinned.route_state, "active");
+        assert!(pinned.ambient_path_changed);
+        assert_eq!(pinned.path, path, "report the pinned persisted grant path");
+        let warning = pinned
+            .ambient_path_warning()
+            .expect("ambient mismatch warning");
+        assert!(warning.contains("remains pinned"), "{warning}");
+        assert!(warning.contains(&quote_os_path(&path)), "{warning}");
+    }
+
+    #[test]
+    fn displayed_paths_escape_terminal_and_bidi_controls_on_one_line() {
+        let path = PathBuf::from(
+            "/safe/line\nmanaged\u{1b}[2J\u{2028}first\u{2029}second\u{202e}name.json",
+        );
+        let quoted = quote_os_path(&path);
+        assert!(quoted.starts_with('"') && quoted.ends_with('"'));
+        assert!(quoted.contains("\\n"), "{quoted}");
+        assert!(quoted.contains("\\x1b"), "{quoted}");
+        assert!(quoted.contains("\\u{2028}"), "{quoted}");
+        assert!(quoted.contains("\\u{2029}"), "{quoted}");
+        assert!(quoted.contains("\\u{202e}"), "{quoted}");
+        assert!(!quoted.contains('\n'));
+        assert!(!quoted.contains('\u{1b}'));
+        assert!(!quoted.contains('\u{2028}'));
+        assert!(!quoted.contains('\u{2029}'));
+        assert!(!quoted.contains('\u{202e}'));
+    }
+
+    #[test]
+    fn disabled_disclosure_does_not_imply_normal_provider_network_is_disabled() {
+        let path = absolute_test_path("codex-auth.json");
+        let status = external_credential_consent_status(
+            None,
+            ProviderKind::OpenaiCodex,
+            ExternalCredentialSource::CodexCli,
+            &path,
+            ProviderKind::OpenaiCodex,
+        );
+        assert!(status.semantics.contains("no external-credential"));
+        assert!(status.semantics.contains("normal requests"));
+        assert!(!status.semantics.contains("no network requests"));
     }
 
     #[test]
@@ -427,6 +584,29 @@ mod tests {
                     ProviderKind::OpenaiCodex,
                     ExternalCredentialSource::CodexCli,
                     &path.with_file_name("other.json")
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn persisted_consent_path_must_be_lexically_normalized() {
+        let raw_path = if cfg!(windows) {
+            PathBuf::from(r"C:\Users\test\credentials\..\auth.json")
+        } else {
+            PathBuf::from("/tmp/credentials/../auth.json")
+        };
+        let consent = ExternalCredentialConsentToml::read_only(
+            ProviderKind::Xai,
+            ExternalCredentialSource::GrokCli,
+            raw_path.clone(),
+        );
+        assert!(
+            consent
+                .read_grant(
+                    ProviderKind::Xai,
+                    ExternalCredentialSource::GrokCli,
+                    &raw_path
                 )
                 .is_err()
         );
