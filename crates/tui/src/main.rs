@@ -1404,6 +1404,13 @@ async fn run_async_main(cli: Cli, command: Option<Commands>) -> Result<()> {
     // consistent. Missing files are a no-op (bundled defaults). See #3638.
     crate::prompts::load_prompt_overrides_from_config_home();
 
+    // Plugins own one read-only discovery snapshot per process. Initialize it
+    // before the subcommand match so plain launch, resume, fork, exec, serve,
+    // and every other runtime surface feed Skills and MCP from the same trust
+    // decision (#3916, #4399). Discovery never enables, trusts, executes, or
+    // persists a bundle.
+    initialize_plugin_registry(&cli);
+
     // Handle subcommands first
     if let Some(command) = command {
         return match command {
@@ -2747,47 +2754,85 @@ fn init_tools_dir(tools_dir: &Path, force: bool) -> Result<(PathBuf, WriteStatus
 
 fn plugins_readme_template() -> &'static str {
     "# Local plugins\n\n\
-     Plugins are richer than tools: each one lives in its own subdirectory\n\
-     with a `PLUGIN.md` describing what it does and how to enable it. The\n\
-     directory is created so users have a documented place to drop\n\
-     experiments without touching `~/.codewhale/skills/`.\n\n\
-     A plugin layout looks like:\n\n\
+     Each Codewhale plugin bundle lives in its own subdirectory with a\n\
+     versioned `plugin.toml`. User bundles live here; workspace bundles live\n\
+     under `<workspace>/.codewhale/plugins/`. Both are discovered read-only,\n\
+     untrusted, and disabled by default.\n\n\
+     A v0.9.1 bundle layout looks like:\n\n\
      ```\n\
      plugins/\n\
        my-plugin/\n\
-         PLUGIN.md   # frontmatter + body, same shape as SKILL.md\n\
-         scripts/    # optional helpers invoked by the plugin\n\
+         plugin.toml\n\
+         skills/\n\
+           my-skill/SKILL.md\n\
      ```\n\n\
-     Plugins are not loaded automatically. Wire them up through skills,\n\
-     hooks, or MCP servers when you want them active in a session.\n"
+     Run `/plugin validate`, `/plugin show <name>`, then `/plugin enable <name>`.\n\
+     Enablement opens a content- and capability-bound trust review;\n\
+     confirm the displayed `/plugin trust` command, then enable the bundle.\n\n\
+     v0.9.1 activates only declarative Skills and MCP servers through their\n\
+     existing engines. Commands, agents, hooks, LSP, native extensions,\n\
+     filesystem grants, and lifecycle mutation are inventoried but inactive.\n\
+     There is no marketplace, install, update, ambient compatibility scan, or\n\
+     automatic trust surface in this release.\n"
 }
 
-fn plugin_example_template() -> &'static str {
+fn plugin_example_manifest_template() -> &'static str {
+    "schema_version = 1\n\n\
+     [plugin]\n\
+     name = \"example\"\n\
+     version = \"0.1.0\"\n\
+     description = \"Starter Codewhale plugin bundle\"\n\n\
+     [skills]\n\
+     path = \"skills\"\n"
+}
+
+fn plugin_example_skill_template() -> &'static str {
     "---\n\
-     name: example\n\
-     description: Placeholder plugin so /skills and doctor have something to show\n\
-     status: example\n\
+     name: hello\n\
+     description: Explain that the example plugin bundle is active.\n\
      ---\n\n\
-     This is a starter plugin layout. Edit or replace it once you have a\n\
-     real plugin. The agent does not load this file directly; reference it\n\
-     from a skill or MCP wrapper if you want it active in a session.\n"
+     Tell the user this instruction came from the namespaced\n\
+     `example:hello` plugin skill. Do not perform side effects.\n"
 }
 
 fn init_plugins_dir(
     plugins_dir: &Path,
     force: bool,
-) -> Result<(PathBuf, PathBuf, WriteStatus, WriteStatus)> {
+) -> Result<(
+    PathBuf,
+    PathBuf,
+    PathBuf,
+    WriteStatus,
+    WriteStatus,
+    WriteStatus,
+)> {
     std::fs::create_dir_all(plugins_dir)
         .with_context(|| format!("Failed to create plugins dir {}", plugins_dir.display()))?;
 
     let readme_path = plugins_dir.join("README.md");
     let readme_status = write_template_file(&readme_path, plugins_readme_template(), force)?;
 
-    let example_path = plugins_dir.join("example").join("PLUGIN.md");
-    ensure_parent_dir(&example_path)?;
-    let example_status = write_template_file(&example_path, plugin_example_template(), force)?;
+    let manifest_path = plugins_dir.join("example").join("plugin.toml");
+    ensure_parent_dir(&manifest_path)?;
+    let manifest_status =
+        write_template_file(&manifest_path, plugin_example_manifest_template(), force)?;
 
-    Ok((readme_path, example_path, readme_status, example_status))
+    let skill_path = plugins_dir
+        .join("example")
+        .join("skills")
+        .join("hello")
+        .join("SKILL.md");
+    ensure_parent_dir(&skill_path)?;
+    let skill_status = write_template_file(&skill_path, plugin_example_skill_template(), force)?;
+
+    Ok((
+        readme_path,
+        manifest_path,
+        skill_path,
+        readme_status,
+        manifest_status,
+        skill_status,
+    ))
 }
 
 /// Resolve the user-supplied CORS origins for `codewhale serve --http`.
@@ -2971,15 +3016,16 @@ fn run_setup(config: &Config, workspace: &Path, args: SetupArgs) -> Result<()> {
 
     if run_plugins {
         let plugins_dir = default_plugins_dir();
-        let (readme_path, example_path, readme_status, example_status) =
+        let (readme_path, manifest_path, skill_path, readme_status, manifest_status, skill_status) =
             init_plugins_dir(&plugins_dir, args.force)?;
         report_write_status("Plugins README", &readme_path, readme_status);
-        report_write_status("Example plugin", &example_path, example_status);
+        report_write_status("Example plugin manifest", &manifest_path, manifest_status);
+        report_write_status("Example plugin skill", &skill_path, skill_status);
         println!(
             "    Plugins dir: {}",
             crate::utils::display_path(&plugins_dir)
         );
-        println!("    Next: copy the example dir, edit PLUGIN.md, wire via skill/MCP.");
+        println!("    Next: run `/plugin validate`, review `example`, then trust and enable it.");
     }
 
     let sandbox = crate::sandbox::get_platform_sandbox();
@@ -6198,6 +6244,10 @@ fn resolve_workspace(cli: &Cli) -> PathBuf {
     cli.workspace
         .clone()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+}
+
+fn initialize_plugin_registry(cli: &Cli) {
+    crate::plugins::init_registry(&resolve_workspace(cli));
 }
 
 fn load_config_from_cli(cli: &Cli) -> Result<Config> {
@@ -11217,6 +11267,42 @@ mod terminal_mode_tests {
         Cli::try_parse_from(args).expect("CLI args should parse")
     }
 
+    #[test]
+    fn plugin_registry_initializes_for_plain_resume_fork_exec_and_serve_routes() {
+        let _env_lock = crate::test_support::lock_test_env();
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        let codewhale_home = temp.path().join("home");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &codewhale_home);
+        let workspace_arg = workspace.to_string_lossy().into_owned();
+
+        for route in [
+            Vec::<&str>::new(),
+            vec!["resume", "--last"],
+            vec!["fork", "--last"],
+            vec!["exec", "hello"],
+            vec!["serve", "--mcp"],
+        ] {
+            let mut args = vec![
+                "codewhale-tui".to_string(),
+                "--workspace".to_string(),
+                workspace_arg.clone(),
+            ];
+            args.extend(route.into_iter().map(str::to_string));
+            let cli = Cli::try_parse_from(args).expect("route should parse");
+            initialize_plugin_registry(&cli);
+            assert_eq!(
+                crate::plugins::registry_workspace().as_deref(),
+                Some(workspace.as_path())
+            );
+            assert!(
+                !codewhale_home.join("plugins/state.json").exists(),
+                "startup discovery must remain read-only"
+            );
+        }
+    }
+
     fn custom_exec_config(active: &str) -> Config {
         let mut custom = std::collections::HashMap::new();
         for (name, base_url, model) in [
@@ -14213,19 +14299,29 @@ mod setup_helper_tests {
     fn init_plugins_dir_creates_readme_and_example_layout() {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path().join("plugins");
-        let (readme_path, example_path, readme_status, example_status) =
+        let (readme_path, manifest_path, skill_path, readme_status, manifest_status, skill_status) =
             init_plugins_dir(&dir, false).unwrap();
 
         assert_eq!(readme_path, dir.join("README.md"));
-        assert_eq!(example_path, dir.join("example").join("PLUGIN.md"));
+        assert_eq!(manifest_path, dir.join("example").join("plugin.toml"));
+        assert_eq!(
+            skill_path,
+            dir.join("example/skills/hello").join("SKILL.md")
+        );
         assert!(matches!(readme_status, WriteStatus::Created));
-        assert!(matches!(example_status, WriteStatus::Created));
+        assert!(matches!(manifest_status, WriteStatus::Created));
+        assert!(matches!(skill_status, WriteStatus::Created));
         assert!(readme_path.exists());
-        assert!(example_path.exists());
+        assert!(manifest_path.exists());
+        assert!(skill_path.exists());
 
-        let plugin_md = std::fs::read_to_string(&example_path).unwrap();
-        assert!(plugin_md.contains("---"));
-        assert!(plugin_md.contains("name: example"));
+        let manifest = std::fs::read_to_string(&manifest_path).unwrap();
+        assert!(manifest.contains("schema_version = 1"));
+        assert!(manifest.contains("name = \"example\""));
+        let validated =
+            crate::plugins::manifest::PluginManifest::validate_from_path(&manifest_path)
+                .expect("scaffolded plugin should validate");
+        assert_eq!(validated.inventory.skills, 1);
     }
 
     #[test]

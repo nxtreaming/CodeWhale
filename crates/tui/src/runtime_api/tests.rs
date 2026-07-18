@@ -5141,6 +5141,7 @@ fn skill_entry_is_bundled_requires_configured_bundle_path() {
         localized_descriptions: std::collections::HashMap::new(),
         body: String::new(),
         path: bundled_skill_path,
+        source: crate::skills::SkillSource::Native,
     };
     let override_skill = crate::skills::Skill {
         name: "delegate".to_string(),
@@ -5148,6 +5149,7 @@ fn skill_entry_is_bundled_requires_configured_bundle_path() {
         localized_descriptions: std::collections::HashMap::new(),
         body: String::new(),
         path: override_skill_path,
+        source: crate::skills::SkillSource::Native,
     };
 
     assert!(skill_entry_is_bundled(&bundled_skill, &bundled_skills_dir));

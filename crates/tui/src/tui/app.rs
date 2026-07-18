@@ -1836,6 +1836,11 @@ pub struct App {
     pub workspace: PathBuf,
     pub config_path: Option<PathBuf>,
     pub config_profile: Option<String>,
+    /// Legacy executable plugin-tool directory resolved from the already
+    /// loaded configuration. Slash-command inventory must not reload the full
+    /// config (and thereby re-read credential-bearing fields) merely to find
+    /// this path.
+    pub legacy_plugin_tools_dir: Option<PathBuf>,
     pub mcp_config_path: PathBuf,
     pub skills_dir: PathBuf,
     pub skills_scan_codewhale_only: bool,
@@ -3083,6 +3088,11 @@ impl App {
             workspace,
             config_path,
             config_profile,
+            legacy_plugin_tools_dir: config
+                .tools
+                .as_ref()
+                .and_then(|tools| tools.plugin_dir.as_deref())
+                .map(PathBuf::from),
             mcp_config_path: mcp_config_path.clone(),
             skills_dir,
             skills_scan_codewhale_only,

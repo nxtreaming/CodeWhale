@@ -2635,9 +2635,9 @@ pub fn workspace_mcp_config_path(workspace: &Path) -> PathBuf {
 pub fn load_config_with_workspace(global_path: &Path, workspace: &Path) -> Result<McpConfig> {
     let plugins = crate::plugins::try_with_registry(|registry| {
         registry
-            .list_enabled()
+            .active_plugins()
             .into_iter()
-            .map(|(name, plugin)| (name.clone(), plugin.clone()))
+            .map(|plugin| (plugin.name().to_string(), plugin.clone()))
             .collect::<Vec<_>>()
     })
     .unwrap_or_default();
@@ -2648,7 +2648,7 @@ pub fn load_config_with_workspace(global_path: &Path, workspace: &Path) -> Resul
 fn load_config_with_workspace_from_plugins(
     global_path: &Path,
     workspace: &Path,
-    plugins: impl IntoIterator<Item = (String, crate::plugins::manifest::LoadedPlugin)>,
+    plugins: impl IntoIterator<Item = (String, crate::plugins::types::LoadedPlugin)>,
 ) -> Result<McpConfig> {
     let mut merged = load_config(global_path)?;
     let workspace = checked_workspace_path(workspace)?;
@@ -2676,12 +2676,45 @@ fn load_config_with_workspace_from_plugins(
 
 fn merge_plugin_mcp_servers_from_plugins(
     mut config: McpConfig,
-    plugins: impl IntoIterator<Item = (String, crate::plugins::manifest::LoadedPlugin)>,
+    plugins: impl IntoIterator<Item = (String, crate::plugins::types::LoadedPlugin)>,
 ) -> Result<McpConfig> {
     for (plugin_name, plugin) in plugins {
+        // Adapter-level denial keeps headless paths fail-closed even if a
+        // future caller accidentally passes the full inventory instead of the
+        // registry's active-only view.
+        if !plugin.active() {
+            continue;
+        }
+        let snapshot_current = crate::plugins::manifest::PluginManifest::validate_from_path(
+            &plugin.canonical_root.join("plugin.toml"),
+        )
+        .is_ok_and(|current| {
+            current.content_hash == plugin.content_hash
+                && current.capability_hash == plugin.capability_hash
+        });
+        if !snapshot_current {
+            tracing::warn!(
+                target: "mcp",
+                plugin = %plugin_name,
+                "plugin bundle changed after review; denying its MCP servers until reload and re-review"
+            );
+            continue;
+        }
         if let Some(mcp_servers) = &plugin.manifest.mcp_servers {
+            let mut mcp_servers = mcp_servers.iter().collect::<Vec<_>>();
+            mcp_servers.sort_by_key(|(name, _)| *name);
             for (server_name, server_config) in mcp_servers {
                 let qualified_name = format!("{}-{}", plugin_name, server_name);
+                if config.servers.contains_key(&qualified_name) {
+                    tracing::warn!(
+                        target: "mcp",
+                        plugin = %plugin_name,
+                        server = %server_name,
+                        qualified_name = %qualified_name,
+                        "explicit MCP configuration keeps precedence over a colliding plugin server"
+                    );
+                    continue;
+                }
                 let mut server_config = server_config.clone();
 
                 if server_config.command.is_some() && server_config.url.is_none() {

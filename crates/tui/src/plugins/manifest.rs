@@ -1,65 +1,507 @@
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fs;
+use std::io::Read;
+use std::path::{Component, Path, PathBuf};
 
-use serde::Deserialize;
+use semver::Version;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
-use crate::mcp::McpServerConfig;
+use crate::mcp::{McpServerConfig, is_relative_stdio_path_arg};
 
-#[derive(Debug, Clone, Deserialize)]
+pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+const MAX_PLUGIN_NAME_CHARS: usize = 64;
+const MAX_COMPONENT_PATHS: usize = 64;
+const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
+const MAX_HASHED_FILES: usize = 4_096;
+const MAX_HASHED_BYTES: u64 = 64 * 1024 * 1024;
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct PluginManifest {
+    /// Missing means the legacy, pre-versioned Codewhale manifest. Legacy
+    /// manifests remain readable, but `/plugin validate` reports the migration.
+    #[serde(default)]
+    pub schema_version: u32,
     pub plugin: PluginMeta,
-    pub skills: Option<PluginSkills>,
+    #[serde(default)]
+    pub skills: Option<PluginPathSpec>,
+    #[serde(default)]
+    pub commands: Option<PluginPathSpec>,
+    #[serde(default, alias = "profiles")]
+    pub agents: Option<PluginPathSpec>,
+    #[serde(default)]
+    pub hooks: Option<PluginPathSpec>,
+    #[serde(default, alias = "lsp_servers")]
+    pub lsp: Option<PluginPathSpec>,
+    #[serde(default, alias = "native_extension")]
+    pub native: Option<PluginPathSpec>,
     #[serde(default)]
     pub mcp_servers: Option<HashMap<String, McpServerConfig>>,
+    #[serde(default)]
+    pub capabilities: PluginCapabilities,
+    #[serde(default)]
     pub when: Option<PluginWhen>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct PluginMeta {
     pub name: String,
+    #[serde(default)]
     pub description: Option<String>,
-    pub version: Option<String>,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
     pub author: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct PluginSkills {
+/// A declarative component location. `path` preserves the original manifest
+/// shape; `paths` lets a bundle split one component kind across directories.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginPathSpec {
+    #[serde(default)]
     pub path: Option<String>,
+    #[serde(default)]
+    pub paths: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+impl PluginPathSpec {
+    fn declared_paths(&self, default: Option<&str>) -> Result<Vec<String>, String> {
+        let mut paths = Vec::new();
+        if let Some(path) = self.path.as_deref() {
+            paths.push(path.to_string());
+        }
+        paths.extend(self.paths.iter().cloned());
+        if paths.is_empty()
+            && let Some(default) = default
+        {
+            paths.push(default.to_string());
+        }
+        if paths.is_empty() {
+            return Err("component table must declare `path` or `paths`".to_string());
+        }
+        if paths.len() > MAX_COMPONENT_PATHS {
+            return Err(format!(
+                "component declares {} paths; maximum is {MAX_COMPONENT_PATHS}",
+                paths.len()
+            ));
+        }
+        let mut seen = BTreeSet::new();
+        for path in &paths {
+            if !seen.insert(path.clone()) {
+                return Err(format!(
+                    "component path `{path}` is declared more than once"
+                ));
+            }
+        }
+        Ok(paths)
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginCapabilities {
+    /// Requested filesystem roots are inventory-only in v0.9.1. Declaring any
+    /// keeps the bundle inactive until a later permission adapter exists.
+    #[serde(default)]
+    pub filesystem_roots: Vec<String>,
+    /// Requested hosts are inventory-only. MCP URL hosts are added to the
+    /// effective capability inventory automatically.
+    #[serde(default)]
+    pub network_hosts: Vec<String>,
+    /// Lifecycle mutation is inventoried but unsupported in v0.9.1.
+    #[serde(default)]
+    pub lifecycle_mutation: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct PluginWhen {
+    #[serde(default)]
     pub os: Option<Vec<String>>,
+    #[serde(default)]
     pub binaries: Option<Vec<String>>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResolvedPluginComponents {
+    pub skills: Vec<PathBuf>,
+    pub commands: Vec<PathBuf>,
+    pub agents: Vec<PathBuf>,
+    pub hooks: Vec<PathBuf>,
+    pub lsp: Vec<PathBuf>,
+    pub native: Vec<PathBuf>,
+}
+
+impl ResolvedPluginComponents {
+    pub fn all_paths(&self) -> impl Iterator<Item = &PathBuf> {
+        self.skills
+            .iter()
+            .chain(&self.commands)
+            .chain(&self.agents)
+            .chain(&self.hooks)
+            .chain(&self.lsp)
+            .chain(&self.native)
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginInventory {
+    pub skills: usize,
+    pub mcp_servers: usize,
+    pub commands: usize,
+    pub agents: usize,
+    pub hooks: usize,
+    pub lsp: usize,
+    pub native: usize,
+    pub filesystem_roots: Vec<String>,
+    pub network_hosts: Vec<String>,
+    pub lifecycle_mutation: bool,
+}
+
+impl PluginInventory {
+    #[must_use]
+    pub fn unsupported_labels(&self) -> Vec<&'static str> {
+        let mut labels = Vec::new();
+        if self.commands > 0 {
+            labels.push("commands");
+        }
+        if self.agents > 0 {
+            labels.push("agents");
+        }
+        if self.hooks > 0 {
+            labels.push("hooks");
+        }
+        if self.lsp > 0 {
+            labels.push("lsp");
+        }
+        if self.native > 0 {
+            labels.push("native");
+        }
+        if !self.filesystem_roots.is_empty() {
+            labels.push("filesystem-roots");
+        }
+        if self.lifecycle_mutation {
+            labels.push("lifecycle-mutation");
+        }
+        labels
+    }
+
+    #[must_use]
+    pub fn has_unsupported_capabilities(&self) -> bool {
+        !self.unsupported_labels().is_empty()
+    }
+
+    #[must_use]
+    pub fn summary(&self) -> String {
+        format!(
+            "skills={} mcp={} commands={} agents={} hooks={} lsp={} native={}",
+            self.skills,
+            self.mcp_servers,
+            self.commands,
+            self.agents,
+            self.hooks,
+            self.lsp,
+            self.native
+        )
+    }
+}
+
 #[derive(Debug, Clone)]
-pub struct LoadedPlugin {
+pub struct ValidatedManifest {
     pub manifest: PluginManifest,
-    pub base_path: PathBuf,
-    pub enabled: bool,
+    pub canonical_root: PathBuf,
+    pub components: ResolvedPluginComponents,
+    pub inventory: PluginInventory,
+    pub content_hash: String,
+    pub capability_hash: String,
+    pub applicable: bool,
+    pub warnings: Vec<String>,
 }
 
 impl PluginManifest {
     pub fn from_path(path: &Path) -> Result<Self, String> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| format!("failed to read plugin.toml: {}", e))?;
-        toml::from_str(&content).map_err(|e| format!("failed to parse plugin.toml: {}", e))
+        let metadata = fs::symlink_metadata(path)
+            .map_err(|e| format!("failed to inspect plugin.toml: {e}"))?;
+        if metadata.file_type().is_symlink() {
+            return Err("plugin.toml may not be a symbolic link".to_string());
+        }
+        let bytes = read_manifest_bytes(path)?;
+        let content = std::str::from_utf8(&bytes)
+            .map_err(|_| "plugin.toml must be valid UTF-8".to_string())?;
+        toml::from_str(content).map_err(|error| safe_toml_parse_error(&error))
     }
 
-    pub fn check_when(&self) -> bool {
+    pub fn validate_from_path(path: &Path) -> Result<ValidatedManifest, String> {
+        let manifest_metadata = fs::symlink_metadata(path)
+            .map_err(|e| format!("failed to inspect plugin.toml: {e}"))?;
+        if manifest_metadata.file_type().is_symlink() || !manifest_metadata.is_file() {
+            return Err("plugin.toml must be a regular file, not a symbolic link".to_string());
+        }
+        let root = path
+            .parent()
+            .ok_or_else(|| "plugin.toml has no parent directory".to_string())?;
+        let root_metadata = fs::symlink_metadata(root)
+            .map_err(|e| format!("failed to inspect plugin root: {e}"))?;
+        if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+            return Err("plugin root must be a directory, not a symbolic link".to_string());
+        }
+        let canonical_root = root
+            .canonicalize()
+            .map_err(|e| format!("failed to canonicalize plugin root: {e}"))?;
+        if !canonical_root.is_dir() {
+            return Err("plugin root is not a directory".to_string());
+        }
+
+        let manifest_bytes = read_manifest_bytes(path)?;
+        let mut manifest: Self = toml::from_str(
+            std::str::from_utf8(&manifest_bytes)
+                .map_err(|_| "plugin.toml must be valid UTF-8".to_string())?,
+        )
+        .map_err(|error| safe_toml_parse_error(&error))?;
+        let warnings = if manifest.schema_version == 0 {
+            let mut warnings = vec![format!(
+                "legacy manifest: add `schema_version = {CURRENT_SCHEMA_VERSION}`"
+            )];
+            if manifest.plugin.version.trim().is_empty() {
+                manifest.plugin.version = "0.0.0".to_string();
+                warnings.push(
+                    "legacy manifest: add a semantic `[plugin].version`; displaying `0.0.0`"
+                        .to_string(),
+                );
+            }
+            warnings
+        } else {
+            Vec::new()
+        };
+        manifest.validate_metadata()?;
+
+        let components = manifest.resolve_components(&canonical_root)?;
+        manifest.validate_mcp_servers(&canonical_root)?;
+        let inventory = manifest.inventory(&components)?;
+        let content_hash = hash_bundle(&canonical_root, &manifest_bytes)?;
+        let capability_hash = hash_inventory(&inventory);
+        let applicable = manifest.check_when();
+        if read_manifest_bytes(path)? != manifest_bytes {
+            return Err(
+                "plugin.toml changed while it was being validated; retry discovery".to_string(),
+            );
+        }
+
+        Ok(ValidatedManifest {
+            manifest,
+            canonical_root,
+            components,
+            inventory,
+            content_hash,
+            capability_hash,
+            applicable,
+            warnings,
+        })
+    }
+
+    fn validate_metadata(&self) -> Result<(), String> {
+        if self.schema_version > CURRENT_SCHEMA_VERSION {
+            return Err(format!(
+                "unsupported schema_version {}; maximum is {CURRENT_SCHEMA_VERSION}",
+                self.schema_version
+            ));
+        }
+        validate_plugin_name(&self.plugin.name)?;
+        Version::parse(self.plugin.version.trim()).map_err(|e| {
+            format!(
+                "plugin version `{}` is not valid semantic versioning: {e}",
+                self.plugin.version
+            )
+        })?;
+        validate_optional_text("description", self.plugin.description.as_deref(), 1_024)?;
+        validate_optional_text("author", self.plugin.author.as_deref(), 256)?;
+        validate_unique_texts("filesystem root", &self.capabilities.filesystem_roots, 512)?;
+        validate_unique_texts("network host", &self.capabilities.network_hosts, 253)?;
+        for host in &self.capabilities.network_hosts {
+            validate_network_host(host)?;
+        }
         if let Some(when) = &self.when {
-            if let Some(os_list) = &when.os {
-                let os = std::env::consts::OS;
-                if !os_list.iter().any(|o| o.eq_ignore_ascii_case(os)) {
-                    return false;
+            if let Some(os_values) = &when.os {
+                validate_unique_texts("OS", os_values, 32)?;
+                const SUPPORTED: &[&str] = &[
+                    "windows", "linux", "macos", "freebsd", "openbsd", "netbsd", "android", "ios",
+                ];
+                for os in os_values {
+                    if !SUPPORTED.contains(&os.to_ascii_lowercase().as_str()) {
+                        return Err(format!("unsupported OS selector `{os}`"));
+                    }
                 }
             }
             if let Some(binaries) = &when.binaries {
+                validate_unique_texts("binary", binaries, 128)?;
                 for binary in binaries {
-                    if !Self::has_binary(binary) {
-                        return false;
+                    if binary.contains('/')
+                        || binary.contains('\\')
+                        || looks_windows_absolute(binary)
+                    {
+                        return Err(format!(
+                            "binary condition `{binary}` must be a bare executable name"
+                        ));
                     }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn resolve_components(&self, root: &Path) -> Result<ResolvedPluginComponents, String> {
+        Ok(ResolvedPluginComponents {
+            skills: resolve_spec(root, "skills", self.skills.as_ref(), Some("skills"))?,
+            commands: resolve_spec(root, "commands", self.commands.as_ref(), None)?,
+            agents: resolve_spec(root, "agents", self.agents.as_ref(), None)?,
+            hooks: resolve_spec(root, "hooks", self.hooks.as_ref(), None)?,
+            lsp: resolve_spec(root, "lsp", self.lsp.as_ref(), None)?,
+            native: resolve_spec(root, "native", self.native.as_ref(), None)?,
+        })
+    }
+
+    fn validate_mcp_servers(&self, root: &Path) -> Result<(), String> {
+        let Some(servers) = &self.mcp_servers else {
+            return Ok(());
+        };
+        if servers.len() > MAX_COMPONENT_PATHS {
+            return Err(format!(
+                "manifest declares {} MCP servers; maximum is {MAX_COMPONENT_PATHS}",
+                servers.len()
+            ));
+        }
+        for (name, server) in servers {
+            validate_component_name("MCP server", name)?;
+            for arg in &server.args {
+                validate_text("MCP argument", arg, 4_096)?;
+            }
+            match (server.command.as_deref(), server.url.as_deref()) {
+                (Some(command), None) => {
+                    validate_text("MCP command", command, 512)?;
+                    if command.contains('/') || command.contains('\\') {
+                        resolve_contained_path(root, command, "MCP command")?;
+                    }
+                    if let Some(cwd) = server.cwd.as_deref() {
+                        let raw = cwd.to_string_lossy();
+                        let resolved = resolve_contained_path(root, &raw, "MCP cwd")?;
+                        if !resolved.is_dir() {
+                            return Err(format!(
+                                "MCP server `{name}` cwd is not a directory: {}",
+                                resolved.display()
+                            ));
+                        }
+                    }
+                    for (index, arg) in server.args.iter().enumerate() {
+                        if Path::new(arg).is_absolute() || looks_windows_absolute(arg) {
+                            return Err(format!(
+                                "MCP server `{name}` argument #{} must not use an absolute path",
+                                index + 1
+                            ));
+                        }
+                        if is_relative_stdio_path_arg(arg)
+                            && Path::new(arg)
+                                .components()
+                                .any(|part| matches!(part, Component::ParentDir))
+                        {
+                            return Err(format!(
+                                "MCP server `{name}` argument #{} escapes the plugin root",
+                                index + 1
+                            ));
+                        }
+                    }
+                }
+                (None, Some(url)) => {
+                    let parsed = reqwest::Url::parse(url)
+                        .map_err(|e| format!("MCP server `{name}` URL is invalid: {e}"))?;
+                    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+                        return Err(format!(
+                            "MCP server `{name}` URL must use http or https and include a host"
+                        ));
+                    }
+                    if !parsed.username().is_empty() || parsed.password().is_some() {
+                        return Err(format!(
+                            "MCP server `{name}` URL must not embed credentials; use environment-backed authentication"
+                        ));
+                    }
+                    if server.cwd.is_some() {
+                        return Err(format!("remote MCP server `{name}` may not declare cwd"));
+                    }
+                }
+                (Some(_), Some(_)) => {
+                    return Err(format!(
+                        "MCP server `{name}` must declare exactly one of command or url"
+                    ));
+                }
+                (None, None) => {
+                    return Err(format!(
+                        "MCP server `{name}` must declare exactly one of command or url"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn inventory(&self, components: &ResolvedPluginComponents) -> Result<PluginInventory, String> {
+        let mut network_hosts = self
+            .capabilities
+            .network_hosts
+            .iter()
+            .map(|host| host.to_ascii_lowercase())
+            .collect::<Vec<_>>();
+        if let Some(servers) = &self.mcp_servers {
+            for server in servers.values() {
+                if let Some(url) = server.url.as_deref()
+                    && let Ok(url) = reqwest::Url::parse(url)
+                    && let Some(host) = url.host_str()
+                {
+                    network_hosts.push(host.to_ascii_lowercase());
+                }
+            }
+        }
+        network_hosts.sort();
+        network_hosts.dedup();
+
+        let mut filesystem_roots = self.capabilities.filesystem_roots.clone();
+        filesystem_roots.sort();
+        filesystem_roots.dedup();
+
+        Ok(PluginInventory {
+            skills: components.skills.len(),
+            mcp_servers: self.mcp_servers.as_ref().map_or(0, HashMap::len),
+            commands: components.commands.len(),
+            agents: components.agents.len(),
+            hooks: components.hooks.len(),
+            lsp: components.lsp.len(),
+            native: components.native.len(),
+            filesystem_roots,
+            network_hosts,
+            lifecycle_mutation: self.capabilities.lifecycle_mutation,
+        })
+    }
+
+    #[must_use]
+    pub fn check_when(&self) -> bool {
+        let Some(when) = &self.when else {
+            return true;
+        };
+        if let Some(os_list) = &when.os {
+            let os = std::env::consts::OS;
+            if !os_list
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(os))
+            {
+                return false;
+            }
+        }
+        if let Some(binaries) = &when.binaries {
+            for binary in binaries {
+                if !Self::has_binary(binary) {
+                    return false;
                 }
             }
         }
@@ -70,17 +512,578 @@ impl PluginManifest {
         let paths = std::env::var_os("PATH").unwrap_or_default();
         for path in std::env::split_paths(&paths) {
             let candidate = path.join(name);
-            if candidate.exists() {
+            if candidate.is_file() {
                 return true;
             }
             #[cfg(windows)]
-            {
-                let candidate_exe = candidate.with_extension("exe");
-                if candidate_exe.exists() {
-                    return true;
-                }
+            if candidate.with_extension("exe").is_file() {
+                return true;
             }
         }
         false
+    }
+}
+
+fn safe_toml_parse_error(error: &toml::de::Error) -> String {
+    // `Display` includes source excerpts and can echo a malformed literal
+    // secret. Byte location is enough to repair the file without copying
+    // manifest values into logs, diagnostics, or transcripts.
+    error.span().map_or_else(
+        || "failed to parse plugin.toml; check the v1 schema and field types".to_string(),
+        |span| {
+            format!(
+                "failed to parse plugin.toml near bytes {}..{}; check the v1 schema and field types",
+                span.start, span.end
+            )
+        },
+    )
+}
+
+fn read_manifest_bytes(path: &Path) -> Result<Vec<u8>, String> {
+    let file = open_bundle_file(path)
+        .map_err(|e| format!("failed to open plugin.toml without following links: {e}"))?;
+    let mut bytes = Vec::new();
+    file.take(MAX_MANIFEST_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("failed to read plugin.toml: {e}"))?;
+    if bytes.len() as u64 > MAX_MANIFEST_BYTES {
+        return Err(format!(
+            "plugin.toml exceeds the {MAX_MANIFEST_BYTES}-byte review limit"
+        ));
+    }
+    Ok(bytes)
+}
+
+pub fn validate_plugin_name(name: &str) -> Result<(), String> {
+    let count = name.chars().count();
+    let valid = count > 0
+        && count <= MAX_PLUGIN_NAME_CHARS
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+        && name
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit())
+        && name
+            .chars()
+            .last()
+            .is_some_and(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit());
+    if valid {
+        Ok(())
+    } else {
+        Err(format!(
+            "plugin name `{name}` must be 1-{MAX_PLUGIN_NAME_CHARS} lowercase ASCII letters, digits, or internal hyphens"
+        ))
+    }
+}
+
+fn validate_component_name(kind: &str, name: &str) -> Result<(), String> {
+    let count = name.chars().count();
+    let valid = count > 0
+        && count <= MAX_PLUGIN_NAME_CHARS
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+        && !name.starts_with(['-', '_'])
+        && !name.ends_with(['-', '_']);
+    if valid {
+        Ok(())
+    } else {
+        Err(format!("{kind} name `{name}` is invalid"))
+    }
+}
+
+fn validate_optional_text(
+    field: &str,
+    value: Option<&str>,
+    max_chars: usize,
+) -> Result<(), String> {
+    if let Some(value) = value {
+        validate_text(field, value, max_chars)?;
+    }
+    Ok(())
+}
+
+fn validate_text(field: &str, value: &str, max_chars: usize) -> Result<(), String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.chars().count() > max_chars {
+        return Err(format!(
+            "{field} must contain 1-{max_chars} non-whitespace characters"
+        ));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(format!("{field} may not contain control characters"));
+    }
+    Ok(())
+}
+
+fn validate_unique_texts(field: &str, values: &[String], max_chars: usize) -> Result<(), String> {
+    if values.len() > MAX_COMPONENT_PATHS {
+        return Err(format!(
+            "too many {field} values; maximum is {MAX_COMPONENT_PATHS}"
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    for value in values {
+        validate_text(field, value, max_chars)?;
+        let normalized = value.to_ascii_lowercase();
+        if !seen.insert(normalized) {
+            return Err(format!("duplicate {field} value `{value}`"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_network_host(host: &str) -> Result<(), String> {
+    if host.contains("://") || host.contains('/') || host.contains('\\') {
+        return Err(format!(
+            "network host `{host}` must be a host name, not a URL or path"
+        ));
+    }
+    let parsed = reqwest::Url::parse(&format!("https://{host}"))
+        .map_err(|e| format!("network host `{host}` is invalid: {e}"))?;
+    if parsed.host_str().is_none() {
+        return Err(format!("network host `{host}` is invalid"));
+    }
+    Ok(())
+}
+
+fn resolve_spec(
+    root: &Path,
+    kind: &str,
+    spec: Option<&PluginPathSpec>,
+    default: Option<&str>,
+) -> Result<Vec<PathBuf>, String> {
+    let Some(spec) = spec else {
+        return Ok(Vec::new());
+    };
+    spec.declared_paths(default)?
+        .iter()
+        .map(|path| resolve_contained_path(root, path, kind))
+        .collect()
+}
+
+fn resolve_contained_path(root: &Path, raw: &str, kind: &str) -> Result<PathBuf, String> {
+    validate_text(&format!("{kind} path"), raw, 1_024)?;
+    if Path::new(raw).is_absolute() || looks_windows_absolute(raw) {
+        return Err(format!("{kind} path must be relative: `{raw}`"));
+    }
+    if Path::new(raw).components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        return Err(format!("{kind} path escapes the plugin root: `{raw}`"));
+    }
+    let joined = root.join(raw);
+    reject_symlink_components(root, &joined, kind)?;
+    let canonical = joined
+        .canonicalize()
+        .map_err(|e| format!("{kind} path `{raw}` cannot be resolved: {e}"))?;
+    if !canonical.starts_with(root) {
+        return Err(format!("{kind} path escapes the plugin root: `{raw}`"));
+    }
+    Ok(canonical)
+}
+
+fn reject_symlink_components(root: &Path, target: &Path, kind: &str) -> Result<(), String> {
+    let relative = target
+        .strip_prefix(root)
+        .map_err(|_| format!("{kind} path is outside the plugin root"))?;
+    let mut cursor = root.to_path_buf();
+    for component in relative.components() {
+        cursor.push(component.as_os_str());
+        let metadata = fs::symlink_metadata(&cursor)
+            .map_err(|e| format!("failed to inspect {kind} path {}: {e}", cursor.display()))?;
+        if metadata.file_type().is_symlink() {
+            return Err(format!(
+                "{kind} path may not traverse symbolic link {}",
+                cursor.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn looks_windows_absolute(raw: &str) -> bool {
+    let bytes = raw.as_bytes();
+    raw.starts_with("\\\\")
+        || raw.starts_with("//")
+        || (bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'\\' | b'/'))
+}
+
+fn hash_bundle(root: &Path, manifest_bytes: &[u8]) -> Result<String, String> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"codewhale-plugin-content-v1\0plugin.toml\0");
+    hasher.update(manifest_bytes);
+    let mut budget = HashBudget::default();
+    // Hash the complete bundle, not only declared component roots. Local MCP
+    // entrypoints and companion assets are security-relevant even when they do
+    // not have a separate component table.
+    hash_path(root, root, &mut hasher, &mut budget)?;
+    Ok(hex_digest(hasher.finalize()))
+}
+
+#[derive(Default)]
+struct HashBudget {
+    files: usize,
+    bytes: u64,
+}
+
+fn hash_path(
+    root: &Path,
+    path: &Path,
+    hasher: &mut Sha256,
+    budget: &mut HashBudget,
+) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|e| format!("failed to inspect component {}: {e}", path.display()))?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!(
+            "component trees may not contain symbolic link {}",
+            path.display()
+        ));
+    }
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|_| format!("component {} is outside the plugin root", path.display()))?;
+    let relative = relative.to_string_lossy();
+    hash_permissions(&metadata, hasher);
+    if metadata.is_dir() {
+        hasher.update(b"D\0");
+        hasher.update(relative.as_bytes());
+        hasher.update(b"\0");
+        let mut entries = fs::read_dir(path)
+            .map_err(|e| format!("failed to read component directory {}: {e}", path.display()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("failed to read component directory {}: {e}", path.display()))?;
+        entries.sort_by_key(fs::DirEntry::file_name);
+        for entry in entries {
+            hash_path(root, &entry.path(), hasher, budget)?;
+        }
+    } else if metadata.is_file() {
+        budget.files += 1;
+        if budget.files > MAX_HASHED_FILES {
+            return Err(format!(
+                "plugin bundle content exceeds the v0.9.1 review limit ({MAX_HASHED_FILES} files / {MAX_HASHED_BYTES} bytes)"
+            ));
+        }
+        hasher.update(b"F\0");
+        hasher.update(relative.as_bytes());
+        hasher.update(b"\0");
+        let mut file = open_bundle_file(path)
+            .map_err(|e| format!("failed to read component file {}: {e}", path.display()))?;
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let read = file
+                .read(&mut buffer)
+                .map_err(|e| format!("failed to read component file {}: {e}", path.display()))?;
+            if read == 0 {
+                break;
+            }
+            budget.bytes = budget.bytes.saturating_add(read as u64);
+            if budget.bytes > MAX_HASHED_BYTES {
+                return Err(format!(
+                    "plugin bundle content exceeds the v0.9.1 review limit ({MAX_HASHED_FILES} files / {MAX_HASHED_BYTES} bytes)"
+                ));
+            }
+            hasher.update(&buffer[..read]);
+        }
+        hasher.update(b"\0");
+    } else {
+        return Err(format!(
+            "component {} is neither a regular file nor directory",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn hash_permissions(metadata: &fs::Metadata, hasher: &mut Sha256) {
+    use std::os::unix::fs::PermissionsExt;
+
+    hasher.update(b"unix-mode\0");
+    hasher.update((metadata.permissions().mode() & 0o7777).to_le_bytes());
+}
+
+#[cfg(not(unix))]
+fn hash_permissions(metadata: &fs::Metadata, hasher: &mut Sha256) {
+    hasher.update(b"readonly\0");
+    hasher.update([u8::from(metadata.permissions().readonly())]);
+}
+
+#[cfg(unix)]
+fn open_bundle_file(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_bundle_file(path: &Path) -> std::io::Result<fs::File> {
+    fs::File::open(path)
+}
+
+fn hash_inventory(inventory: &PluginInventory) -> String {
+    let mut normalized = BTreeMap::new();
+    normalized.insert("skills", inventory.skills.to_string());
+    normalized.insert("mcp", inventory.mcp_servers.to_string());
+    normalized.insert("commands", inventory.commands.to_string());
+    normalized.insert("agents", inventory.agents.to_string());
+    normalized.insert("hooks", inventory.hooks.to_string());
+    normalized.insert("lsp", inventory.lsp.to_string());
+    normalized.insert("native", inventory.native.to_string());
+    normalized.insert("filesystem", inventory.filesystem_roots.join("\n"));
+    normalized.insert("network", inventory.network_hosts.join("\n"));
+    normalized.insert("lifecycle", inventory.lifecycle_mutation.to_string());
+    let mut hasher = Sha256::new();
+    hasher.update(b"codewhale-plugin-capabilities-v1\0");
+    for (key, value) in normalized {
+        hasher.update(key.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(value.as_bytes());
+        hasher.update(b"\0");
+    }
+    hex_digest(hasher.finalize())
+}
+
+fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
+    let bytes = bytes.as_ref();
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(output, "{byte:02x}");
+    }
+    output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_manifest(root: &Path, extra: &str) -> PathBuf {
+        fs::create_dir_all(root.join("skills/example")).unwrap();
+        fs::write(
+            root.join("skills/example/SKILL.md"),
+            "---\nname: example\ndescription: example\n---\nbody\n",
+        )
+        .unwrap();
+        let path = root.join("plugin.toml");
+        fs::write(
+            &path,
+            format!(
+                "schema_version = 1\n[plugin]\nname = \"example-plugin\"\nversion = \"1.2.3\"\n[skills]\npath = \"skills\"\n{extra}"
+            ),
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn validates_versioned_manifest_and_hashes_declared_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_manifest(tmp.path(), "");
+        let first = PluginManifest::validate_from_path(&path).unwrap();
+        assert_eq!(first.inventory.skills, 1);
+        assert!(first.warnings.is_empty());
+
+        fs::write(
+            tmp.path().join("skills/example/SKILL.md"),
+            "---\nname: example\ndescription: changed\n---\nbody\n",
+        )
+        .unwrap();
+        let second = PluginManifest::validate_from_path(&path).unwrap();
+        assert_ne!(first.content_hash, second.content_hash);
+        assert_eq!(first.capability_hash, second.capability_hash);
+    }
+
+    #[test]
+    fn bundle_hash_is_deterministic_and_covers_undeclared_companion_files() {
+        let left = tempfile::tempdir().unwrap();
+        let right = tempfile::tempdir().unwrap();
+        let left_manifest = write_manifest(left.path(), "");
+        let right_manifest = write_manifest(right.path(), "");
+        fs::write(left.path().join("z.txt"), "z").unwrap();
+        fs::write(left.path().join("a.txt"), "a").unwrap();
+        fs::write(right.path().join("a.txt"), "a").unwrap();
+        fs::write(right.path().join("z.txt"), "z").unwrap();
+
+        let left_hash = PluginManifest::validate_from_path(&left_manifest).unwrap();
+        let right_hash = PluginManifest::validate_from_path(&right_manifest).unwrap();
+        assert_eq!(left_hash.content_hash, right_hash.content_hash);
+        assert_eq!(left_hash.capability_hash, right_hash.capability_hash);
+
+        fs::write(right.path().join("z.txt"), "changed").unwrap();
+        let changed = PluginManifest::validate_from_path(&right_manifest).unwrap();
+        assert_ne!(right_hash.content_hash, changed.content_hash);
+        assert_eq!(right_hash.capability_hash, changed.capability_hash);
+    }
+
+    #[test]
+    fn legacy_manifest_is_accepted_with_migration_warning() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("plugin.toml"),
+            "[plugin]\nname = \"legacy\"\n",
+        )
+        .unwrap();
+        let validated =
+            PluginManifest::validate_from_path(&tmp.path().join("plugin.toml")).unwrap();
+        assert_eq!(validated.manifest.schema_version, 0);
+        assert_eq!(validated.manifest.plugin.version, "0.0.0");
+        assert_eq!(validated.warnings.len(), 2);
+    }
+
+    #[test]
+    fn rejects_unknown_fields_invalid_names_and_versions() {
+        let invalid = [
+            "schema_version = 1\nunknown = true\n[plugin]\nname = \"ok\"\nversion = \"1.0.0\"\n",
+            "schema_version = 1\n[plugin]\nname = \"Bad_Name\"\nversion = \"1.0.0\"\n",
+            "schema_version = 1\n[plugin]\nname = \"ok\"\nversion = \"latest\"\n",
+            "schema_version = 1\n[plugin]\nname = \"ok\"\n",
+        ];
+        for source in invalid {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("plugin.toml");
+            fs::write(&path, source).unwrap();
+            assert!(PluginManifest::validate_from_path(&path).is_err());
+        }
+    }
+
+    #[test]
+    fn parse_diagnostics_do_not_echo_manifest_values() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("plugin.toml");
+        fs::write(
+            &path,
+            "schema_version = 1\n[plugin]\nname = \"safe\"\nversion = \"1.0.0\"\ndescription = [\"sk-sensitive-value\"]\n",
+        )
+        .unwrap();
+        let error = PluginManifest::validate_from_path(&path).unwrap_err();
+        assert!(!error.contains("sk-sensitive-value"));
+    }
+
+    #[test]
+    fn rejects_parent_absolute_and_windows_absolute_component_paths() {
+        for bad in [
+            "../escape",
+            "/tmp/escape",
+            r"C:\\escape",
+            r"\\\\server\\share",
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = write_manifest(tmp.path(), &format!("\n[commands]\npath = {bad:?}\n"));
+            assert!(
+                PluginManifest::validate_from_path(&path).is_err(),
+                "accepted {bad}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlinked_component_and_nested_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("SKILL.md"), "# outside").unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_manifest(tmp.path(), "");
+        fs::remove_dir_all(tmp.path().join("skills")).unwrap();
+        symlink(outside.path(), tmp.path().join("skills")).unwrap();
+        assert!(PluginManifest::validate_from_path(&path).is_err());
+
+        fs::remove_file(tmp.path().join("skills")).unwrap();
+        fs::create_dir_all(tmp.path().join("skills/example")).unwrap();
+        fs::write(tmp.path().join("skills/example/SKILL.md"), "# safe").unwrap();
+        symlink(
+            outside.path().join("SKILL.md"),
+            tmp.path().join("skills/example/linked.md"),
+        )
+        .unwrap();
+        assert!(PluginManifest::validate_from_path(&path).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlinked_manifest() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real.toml");
+        fs::write(
+            &real,
+            "schema_version = 1\n[plugin]\nname = \"linked\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+        let linked = tmp.path().join("plugin.toml");
+        symlink(&real, &linked).unwrap();
+
+        assert!(PluginManifest::validate_from_path(&linked).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlinked_bundle_root() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let real_root = tmp.path().join("real");
+        fs::create_dir(&real_root).unwrap();
+        fs::write(
+            real_root.join("plugin.toml"),
+            "schema_version = 1\n[plugin]\nname = \"linked-root\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+        let linked_root = tmp.path().join("linked");
+        symlink(&real_root, &linked_root).unwrap();
+
+        assert!(PluginManifest::validate_from_path(&linked_root.join("plugin.toml")).is_err());
+    }
+
+    #[test]
+    fn rejects_absolute_mcp_arguments_and_embedded_url_credentials() {
+        let absolute = tempfile::tempdir().unwrap();
+        let absolute_path = write_manifest(
+            absolute.path(),
+            "\n[mcp_servers.local]\ncommand = \"node\"\nargs = [\"/tmp/server.js\"]\n",
+        );
+        assert!(PluginManifest::validate_from_path(&absolute_path).is_err());
+
+        let credentialed = tempfile::tempdir().unwrap();
+        let credentialed_path = write_manifest(
+            credentialed.path(),
+            "\n[mcp_servers.remote]\nurl = \"https://user:secret@example.invalid/mcp\"\n",
+        );
+        assert!(PluginManifest::validate_from_path(&credentialed_path).is_err());
+    }
+
+    #[test]
+    fn unsupported_capabilities_are_inventoried() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("hooks")).unwrap();
+        let path = write_manifest(
+            tmp.path(),
+            "\n[hooks]\npath = \"hooks\"\n[capabilities]\nfilesystem_roots = [\"workspace\"]\nlifecycle_mutation = true\n",
+        );
+        let validated = PluginManifest::validate_from_path(&path).unwrap();
+        assert!(validated.inventory.has_unsupported_capabilities());
+        assert!(validated.inventory.unsupported_labels().contains(&"hooks"));
+        assert!(
+            validated
+                .inventory
+                .unsupported_labels()
+                .contains(&"filesystem-roots")
+        );
     }
 }

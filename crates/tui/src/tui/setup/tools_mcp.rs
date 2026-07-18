@@ -488,13 +488,17 @@ fn plugins_inventory(app: &App, config: &Config, codewhale_home: &Path) -> Inven
     let path = display_path(&plugins_dir);
 
     // Manifest-based plugins (plugin.toml) — prefer live registry when init'd.
-    let (manifest_total, manifest_enabled) = if let Some(counts) =
-        crate::plugins::try_with_registry(|registry| {
-            let list = registry.list();
-            let total = list.len();
-            let enabled = list.iter().filter(|(_, p)| p.enabled).count();
-            (total, enabled)
-        }) {
+    let live_counts = crate::plugins::registry_workspace()
+        .filter(|workspace| workspace == &app.workspace)
+        .and_then(|_| {
+            crate::plugins::try_with_registry(|registry| {
+                let list = registry.list();
+                let total = list.len();
+                let active = list.iter().filter(|plugin| plugin.active()).count();
+                (total, active)
+            })
+        });
+    let (manifest_total, manifest_active) = if let Some(counts) = live_counts {
         counts
     } else {
         count_manifest_plugins(&plugins_dir)
@@ -539,11 +543,11 @@ fn plugins_inventory(app: &App, config: &Config, codewhale_home: &Path) -> Inven
         };
     }
 
-    let disabled = manifest_total.saturating_sub(manifest_enabled);
+    let inactive = manifest_total.saturating_sub(manifest_active);
     InventoryRow {
         status: InventoryStatus::Healthy,
         detail: format!(
-            "{manifest_total} manifest plugins ({manifest_enabled} enabled, {disabled} off), {script_count} script tools; path {path}; /plugin inspects metadata only — never auto-run"
+            "{manifest_total} manifest plugin bundles ({manifest_active} trusted+active, {inactive} inactive), {script_count} legacy script tools; path {path}; setup is read-only — use /plugin to review trust and enablement"
         ),
     }
 }
@@ -616,9 +620,9 @@ fn count_manifest_plugins(dir: &Path) -> (usize, usize) {
             total += 1;
         }
     }
-    // Without overrides store, treat discovered manifests as enabled by default
-    // (matches discovery: enabled = !builtin for user plugins).
-    (total, total)
+    // A directory count cannot prove trust. All bundles are inactive unless
+    // the live, workspace-matched registry says otherwise.
+    (total, 0)
 }
 
 #[cfg(test)]
@@ -772,7 +776,7 @@ mod tests {
         std::fs::create_dir_all(plugins_dir.join("demo")).expect("plugin");
         std::fs::write(
             plugins_dir.join("demo").join("plugin.toml"),
-            "[plugin]\nname = \"demo\"\ndescription = \"hides sk-plugin-secret\"\n",
+            "schema_version = 1\n[plugin]\nname = \"demo\"\nversion = \"1.0.0\"\ndescription = \"hides sk-plugin-secret\"\n",
         )
         .expect("manifest");
 

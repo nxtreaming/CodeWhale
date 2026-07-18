@@ -1,109 +1,336 @@
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
-use super::manifest::LoadedPlugin;
+use serde::{Deserialize, Serialize};
+
+use super::manifest::PluginInventory;
+use super::types::{
+    LoadedPlugin, PluginDiagnostic, PluginDiagnosticLevel, PluginId, PluginTrustStatus,
+};
+
+const STATE_SCHEMA_VERSION: u32 = 1;
+const MAX_REVIEW_HISTORY: usize = 32;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PluginStateFile {
+    schema_version: u32,
+    #[serde(default)]
+    plugins: BTreeMap<PluginId, PersistedPluginState>,
+}
+
+impl Default for PluginStateFile {
+    fn default() -> Self {
+        Self {
+            schema_version: STATE_SCHEMA_VERSION,
+            plugins: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedPluginState {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    trust: Option<TrustReceipt>,
+    #[serde(default)]
+    review_history: Vec<TrustReceipt>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TrustReceipt {
+    content_hash: String,
+    capability_hash: String,
+    reviewed_capabilities: PluginInventory,
+    reviewed_at: String,
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct PluginRegistry {
-    plugins: HashMap<String, LoadedPlugin>,
-    user_overrides: HashMap<String, bool>,
-    /// Where `user_overrides` is persisted. Discovery always sets this via
-    /// [`set_overrides_store`](Self::set_overrides_store); it is `None` only
-    /// when a registry is built without a persistence store (e.g. a direct
-    /// `PluginRegistry::new()` in unit tests), in which case enable/disable
-    /// stays in-memory.
-    overrides_path: Option<PathBuf>,
+    plugins: BTreeMap<PluginId, LoadedPlugin>,
+    names: BTreeMap<String, PluginId>,
+    diagnostics: Vec<PluginDiagnostic>,
+    state: PluginStateFile,
+    state_path: Option<PathBuf>,
+    state_error: Option<String>,
 }
 
 impl PluginRegistry {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Seed the persisted enable/disable overrides and remember where to write
-    /// them back. Called by discovery before plugins are registered; the
-    /// overrides are then applied with [`apply_overrides`](Self::apply_overrides).
-    pub fn set_overrides_store(&mut self, path: PathBuf, overrides: HashMap<String, bool>) {
-        self.overrides_path = Some(path);
-        self.user_overrides = overrides;
+    pub(crate) fn from_discovery(
+        plugins: Vec<LoadedPlugin>,
+        mut diagnostics: Vec<PluginDiagnostic>,
+        state_path: PathBuf,
+    ) -> Self {
+        let (state, state_error) = match load_state(&state_path) {
+            Ok(state) => (state, None),
+            Err(error) => {
+                diagnostics.push(PluginDiagnostic::error(
+                    "state-invalid",
+                    format!("Plugin state is fail-closed and will not be overwritten: {error}"),
+                    Some(state_path.clone()),
+                ));
+                (PluginStateFile::default(), Some(error))
+            }
+        };
+        let mut registry = Self {
+            plugins: BTreeMap::new(),
+            names: BTreeMap::new(),
+            diagnostics,
+            state,
+            state_path: Some(state_path),
+            state_error,
+        };
+        for plugin in plugins {
+            registry.register_loaded(plugin);
+        }
+        registry.apply_state();
+        registry
     }
 
-    /// Apply every persisted override onto the currently-registered plugins.
-    /// Discovery recomputes `enabled` from scratch (`!builtin`) on each launch,
-    /// so this is what makes a prior `/plugin enable|disable` actually stick.
-    pub fn apply_overrides(&mut self) {
-        for (name, &enabled) in &self.user_overrides {
-            if let Some(plugin) = self.plugins.get_mut(name) {
-                plugin.enabled = enabled;
+    fn register_loaded(&mut self, plugin: LoadedPlugin) {
+        self.names
+            .insert(plugin.name().to_string(), plugin.id.clone());
+        self.plugins.insert(plugin.id.clone(), plugin);
+    }
+
+    fn apply_state(&mut self) {
+        for (id, plugin) in &mut self.plugins {
+            let persisted = self.state.plugins.get(id);
+            plugin.enabled = persisted.is_some_and(|state| state.enabled);
+            plugin.trust_status = match persisted.and_then(|state| state.trust.as_ref()) {
+                Some(receipt) if receipt.capability_hash != plugin.capability_hash => {
+                    PluginTrustStatus::CapabilitiesChanged
+                }
+                Some(receipt) if receipt.content_hash != plugin.content_hash => {
+                    PluginTrustStatus::ContentChanged
+                }
+                Some(_) => PluginTrustStatus::Trusted,
+                None => PluginTrustStatus::NeverReviewed,
+            };
+            if self.state_error.is_some() {
+                plugin.enabled = false;
+                plugin.trust_status = PluginTrustStatus::NeverReviewed;
             }
         }
     }
 
-    pub fn register(&mut self, name: String, plugin: LoadedPlugin) {
-        self.plugins.insert(name, plugin);
+    #[must_use]
+    pub fn list(&self) -> Vec<&LoadedPlugin> {
+        let mut plugins = self.plugins.values().collect::<Vec<_>>();
+        plugins.sort_by(|left, right| {
+            left.scope
+                .cmp(&right.scope)
+                .then_with(|| left.name().cmp(right.name()))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        plugins
     }
 
-    pub fn enable(&mut self, name: &str) -> bool {
-        if let Some(plugin) = self.plugins.get_mut(name) {
-            plugin.enabled = true;
-            self.user_overrides.insert(name.to_string(), true);
-            self.persist_overrides();
-            true
-        } else {
-            false
+    #[must_use]
+    pub fn get(&self, selector: &str) -> Option<&LoadedPlugin> {
+        let id = self.resolve_id(selector)?;
+        self.plugins.get(id)
+    }
+
+    #[must_use]
+    pub fn active_plugins(&self) -> Vec<&LoadedPlugin> {
+        self.list()
+            .into_iter()
+            .filter(|plugin| plugin.active())
+            .collect()
+    }
+
+    /// Compatibility name retained for the MCP adapter. Unlike the old
+    /// registry this returns only trusted, active bundles.
+    #[must_use]
+    pub fn list_enabled(&self) -> Vec<&LoadedPlugin> {
+        self.active_plugins()
+    }
+
+    #[must_use]
+    pub fn enabled_plugins(&self) -> Vec<&LoadedPlugin> {
+        self.list()
+            .into_iter()
+            .filter(|plugin| plugin.enabled)
+            .collect()
+    }
+
+    #[must_use]
+    pub fn is_enabled(&self, selector: &str) -> bool {
+        self.get(selector).is_some_and(|plugin| plugin.enabled)
+    }
+
+    #[must_use]
+    pub fn is_active(&self, selector: &str) -> bool {
+        self.get(selector).is_some_and(LoadedPlugin::active)
+    }
+
+    #[must_use]
+    pub fn diagnostics(&self) -> &[PluginDiagnostic] {
+        &self.diagnostics
+    }
+
+    #[must_use]
+    pub fn validation_is_clean(&self) -> bool {
+        !self
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.level == PluginDiagnosticLevel::Error)
+            && self.plugins.values().all(|plugin| {
+                !plugin
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.level == PluginDiagnosticLevel::Error)
+            })
+    }
+
+    #[must_use]
+    pub fn state_error(&self) -> Option<&str> {
+        self.state_error.as_deref()
+    }
+
+    #[must_use]
+    pub fn state_path(&self) -> Option<&Path> {
+        self.state_path.as_deref()
+    }
+
+    pub fn trust(&mut self, selector: &str) -> Result<(), String> {
+        let plugin = self
+            .get(selector)
+            .ok_or_else(|| format!("Plugin bundle `{selector}` was not found"))?;
+        let id = plugin.id.clone();
+        let receipt = TrustReceipt {
+            content_hash: plugin.content_hash.clone(),
+            capability_hash: plugin.capability_hash.clone(),
+            reviewed_capabilities: plugin.inventory.clone(),
+            reviewed_at: chrono::Utc::now().to_rfc3339(),
+        };
+        self.commit_state_change(|state| {
+            let entry = state.plugins.entry(id).or_default();
+            entry.trust = Some(receipt.clone());
+            entry.review_history.push(receipt);
+            if entry.review_history.len() > MAX_REVIEW_HISTORY {
+                let remove = entry.review_history.len() - MAX_REVIEW_HISTORY;
+                entry.review_history.drain(..remove);
+            }
+        })
+    }
+
+    pub fn revoke_trust(&mut self, selector: &str) -> Result<(), String> {
+        let id = self
+            .resolve_id(selector)
+            .cloned()
+            .ok_or_else(|| format!("Plugin bundle `{selector}` was not found"))?;
+        self.commit_state_change(|state| {
+            state.plugins.entry(id).or_default().trust = None;
+        })
+    }
+
+    pub fn enable(&mut self, selector: &str) -> Result<(), String> {
+        let plugin = self
+            .get(selector)
+            .ok_or_else(|| format!("Plugin bundle `{selector}` was not found"))?;
+        if !plugin.trusted() {
+            return Err(format!(
+                "Plugin bundle `{}` requires capability review before enablement (trust: {})",
+                plugin.name(),
+                plugin.trust_status.as_str()
+            ));
         }
-    }
-
-    pub fn disable(&mut self, name: &str) -> bool {
-        if let Some(plugin) = self.plugins.get_mut(name) {
-            plugin.enabled = false;
-            self.user_overrides.insert(name.to_string(), false);
-            self.persist_overrides();
-            true
-        } else {
-            false
+        if !plugin.applicable {
+            return Err(format!(
+                "Plugin bundle `{}` does not apply to this host",
+                plugin.name()
+            ));
         }
-    }
-
-    /// Write the current override map to disk (best-effort). A failure here is
-    /// logged but never fails the command — the in-memory toggle still applies
-    /// for the current session.
-    fn persist_overrides(&self) {
-        if let Some(path) = &self.overrides_path
-            && let Err(e) = super::discovery::save_overrides(path, &self.user_overrides)
-        {
-            tracing::warn!(
-                "failed to persist plugin overrides to {}: {e}",
-                path.display()
-            );
+        let unsupported = plugin.inventory.unsupported_labels();
+        if !unsupported.is_empty() {
+            return Err(format!(
+                "Plugin bundle `{}` declares v0.9.1-inactive capabilities: {}",
+                plugin.name(),
+                unsupported.join(", ")
+            ));
         }
+        let id = plugin.id.clone();
+        self.commit_state_change(|state| {
+            state.plugins.entry(id).or_default().enabled = true;
+        })
     }
 
-    pub fn list(&self) -> Vec<(&String, &LoadedPlugin)> {
-        self.plugins.iter().collect()
+    pub fn disable(&mut self, selector: &str) -> Result<(), String> {
+        let id = self
+            .resolve_id(selector)
+            .cloned()
+            .ok_or_else(|| format!("Plugin bundle `{selector}` was not found"))?;
+        self.commit_state_change(|state| {
+            state.plugins.entry(id).or_default().enabled = false;
+        })
     }
 
-    pub fn get(&self, name: &str) -> Option<&LoadedPlugin> {
-        self.plugins.get(name)
+    fn commit_state_change(
+        &mut self,
+        mutate: impl FnOnce(&mut PluginStateFile),
+    ) -> Result<(), String> {
+        if let Some(error) = &self.state_error {
+            return Err(format!(
+                "Plugin state is fail-closed; repair or move the malformed state file before mutating it: {error}"
+            ));
+        }
+        let Some(path) = self.state_path.as_deref() else {
+            return Err("Plugin registry has no persistence store".to_string());
+        };
+        let mut next = self.state.clone();
+        mutate(&mut next);
+        save_state(path, &next)?;
+        self.state = next;
+        self.apply_state();
+        Ok(())
     }
 
-    pub fn enabled_plugins(&self) -> Vec<(&String, &LoadedPlugin)> {
-        self.list_enabled()
+    fn resolve_id(&self, selector: &str) -> Option<&PluginId> {
+        self.plugins
+            .keys()
+            .find(|id| id.as_str() == selector)
+            .or_else(|| self.names.get(selector))
     }
 
-    pub fn list_enabled(&self) -> Vec<(&String, &LoadedPlugin)> {
-        self.plugins.iter().filter(|(_, p)| p.enabled).collect()
-    }
-
-    pub fn is_enabled(&self, name: &str) -> bool {
-        self.plugins.get(name).is_some_and(|p| p.enabled)
-    }
-
+    #[must_use]
     pub fn len(&self) -> usize {
         self.plugins.len()
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.plugins.is_empty()
     }
+}
+
+fn load_state(path: &Path) -> Result<PluginStateFile, String> {
+    if !path.exists() {
+        return Ok(PluginStateFile::default());
+    }
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    let state: PluginStateFile = serde_json::from_str(&raw)
+        .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
+    if state.schema_version != STATE_SCHEMA_VERSION {
+        return Err(format!(
+            "unsupported plugin state schema {}; expected {STATE_SCHEMA_VERSION}",
+            state.schema_version
+        ));
+    }
+    Ok(state)
+}
+
+fn save_state(path: &Path, state: &PluginStateFile) -> Result<(), String> {
+    codewhale_config::persistence::atomic_write_json(path, state)
+        .map_err(|e| format!("failed to atomically persist {}: {e}", path.display()))
 }

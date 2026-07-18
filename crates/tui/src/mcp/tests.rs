@@ -786,12 +786,15 @@ fn workspace_manager_snapshot_counts_global_and_project_servers() {
 fn plugin_mcp_servers_are_qualified_and_resolve_relative_cwd() {
     let dir = tempfile::tempdir().unwrap();
     let plugin_base = dir.path().join("plugins").join("fleet");
-    fs::create_dir_all(&plugin_base).unwrap();
+    fs::create_dir_all(plugin_base.join("servers/local")).unwrap();
 
-    let manifest = toml::from_str::<crate::plugins::manifest::PluginManifest>(
+    fs::write(
+        plugin_base.join("plugin.toml"),
         r#"
+schema_version = 1
 [plugin]
 name = "fleet"
+version = "1.0.0"
 
 [mcp_servers.local]
 command = "node"
@@ -803,11 +806,11 @@ url = "https://example.invalid/mcp"
 "#,
     )
     .unwrap();
-    let plugin = crate::plugins::manifest::LoadedPlugin {
-        manifest,
-        base_path: plugin_base.clone(),
-        enabled: true,
-    };
+    let mut plugin =
+        crate::plugins::discovery::load_plugin_for_test(&plugin_base.join("plugin.toml")).unwrap();
+    plugin.enabled = true;
+    plugin.trust_status = crate::plugins::types::PluginTrustStatus::Trusted;
+    let plugin_for_collision = plugin.clone();
     let mut config = McpConfig::default();
     config.servers.insert(
         "global".to_string(),
@@ -824,12 +827,102 @@ url = "https://example.invalid/mcp"
     assert_eq!(local.args, vec!["server.js"]);
     assert_eq!(
         local.cwd.as_deref(),
-        Some(plugin_base.join("servers/local").as_path())
+        Some(
+            plugin_base
+                .join("servers/local")
+                .canonicalize()
+                .unwrap()
+                .as_path()
+        )
     );
 
     let remote = cfg.servers.get("fleet-remote").unwrap();
     assert_eq!(remote.url.as_deref(), Some("https://example.invalid/mcp"));
     assert!(remote.cwd.is_none());
+
+    let mut explicit = McpConfig::default();
+    explicit.servers.insert(
+        "fleet-local".to_string(),
+        serde_json::from_str(r#"{"command":"node","args":["explicit.js"]}"#).unwrap(),
+    );
+    let collision_safe = merge_plugin_mcp_servers_from_plugins(
+        explicit,
+        vec![("fleet".to_string(), plugin_for_collision)],
+    )
+    .unwrap();
+    assert_eq!(
+        collision_safe.servers["fleet-local"].args,
+        vec!["explicit.js"],
+        "explicit MCP config must outrank a colliding plugin server"
+    );
+}
+
+#[test]
+fn plugin_mcp_adapter_denies_disabled_and_untrusted_bundles() {
+    let dir = tempfile::tempdir().unwrap();
+    let plugin_base = dir.path().join("plugin");
+    fs::create_dir_all(&plugin_base).unwrap();
+    fs::write(
+        plugin_base.join("plugin.toml"),
+        r#"
+schema_version = 1
+[plugin]
+name = "denied"
+version = "1.0.0"
+
+[mcp_servers.local]
+command = "node"
+"#,
+    )
+    .unwrap();
+    let disabled =
+        crate::plugins::discovery::load_plugin_for_test(&plugin_base.join("plugin.toml")).unwrap();
+    let mut untrusted = disabled.clone();
+    untrusted.enabled = true;
+
+    for plugin in [disabled, untrusted] {
+        let config = merge_plugin_mcp_servers_from_plugins(
+            McpConfig::default(),
+            vec![("denied".to_string(), plugin)],
+        )
+        .unwrap();
+        assert!(
+            config.servers.is_empty(),
+            "headless MCP adapter admitted an inactive bundle"
+        );
+    }
+}
+
+#[test]
+fn plugin_mcp_adapter_denies_content_changed_after_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let plugin_base = dir.path().join("plugin");
+    fs::create_dir_all(&plugin_base).unwrap();
+    let manifest_path = plugin_base.join("plugin.toml");
+    fs::write(
+        &manifest_path,
+        r#"
+schema_version = 1
+[plugin]
+name = "changed"
+version = "1.0.0"
+
+[mcp_servers.local]
+command = "node"
+"#,
+    )
+    .unwrap();
+    let mut plugin = crate::plugins::discovery::load_plugin_for_test(&manifest_path).unwrap();
+    plugin.enabled = true;
+    plugin.trust_status = crate::plugins::types::PluginTrustStatus::Trusted;
+    fs::write(plugin_base.join("late-change.txt"), "changed after review").unwrap();
+
+    let config = merge_plugin_mcp_servers_from_plugins(
+        McpConfig::default(),
+        vec![("changed".to_string(), plugin)],
+    )
+    .unwrap();
+    assert!(config.servers.is_empty());
 }
 
 fn plugin_with_local_mcp(name: &str, base_path: PathBuf) -> crate::plugins::manifest::LoadedPlugin {

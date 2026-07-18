@@ -3,11 +3,11 @@
 use std::fmt::Write;
 
 use crate::network_policy::NetworkPolicy;
-use crate::skills::SkillRegistry;
 use crate::skills::install::{
     self, DEFAULT_MAX_SIZE_BYTES, DEFAULT_REGISTRY_URL, InstallOutcome, InstallSource,
     RegistryFetchResult, SkillSyncOutcome, SyncResult, UpdateResult,
 };
+use crate::skills::{SkillRegistry, SkillSource};
 use crate::tui::app::{App, AppAction};
 use crate::tui::history::HistoryCell;
 
@@ -82,6 +82,20 @@ fn visible_skill_directories(app: &App) -> Vec<std::path::PathBuf> {
     )
 }
 
+fn skill_source_label(source: &SkillSource) -> String {
+    match source {
+        SkillSource::Native => "native".to_string(),
+        SkillSource::Plugin {
+            plugin_id,
+            plugin_name,
+            plugin_root,
+        } => format!(
+            "plugin {plugin_name} ({plugin_id}) at {}",
+            plugin_root.display()
+        ),
+    }
+}
+
 fn inspect_skills(app: &mut App) -> CommandResult {
     let mode = skill_discovery_mode(app);
     let dirs = visible_skill_directories(app);
@@ -121,6 +135,7 @@ fn inspect_skills(app: &mut App) -> CommandResult {
             } else {
                 let _ = writeln!(output, "  - {} — {}", skill.name, skill.description);
             }
+            let _ = writeln!(output, "    source: {}", skill_source_label(&skill.source));
             let _ = writeln!(output, "    path: {}", skill.path.display());
         }
     }

@@ -28,7 +28,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use crate::skills::{
-    Skill, SkillDiscoveryMode, discover_for_workspace_and_dir_with_mode,
+    Skill, SkillDiscoveryMode, SkillSource, discover_for_workspace_and_dir_with_mode,
     discover_in_workspace_with_mode, skill_directories_for_workspace_and_dir,
     skills_directories_for_mode,
 };
@@ -142,9 +142,21 @@ impl ToolSpec for LoadSkillTool {
         };
 
         let body = format_skill_body(skill);
+        let (skill_path, skill_source) = match &skill.source {
+            SkillSource::Native => (Some(skill.path.display().to_string()), "native".to_string()),
+            SkillSource::Plugin {
+                plugin_id,
+                plugin_name,
+                ..
+            } => (
+                None,
+                format!("reviewed-plugin-snapshot:{plugin_name}:{plugin_id}"),
+            ),
+        };
         Ok(ToolResult::success(body).with_metadata(json!({
             "skill_name": skill.name,
-            "skill_path": skill.path.display().to_string(),
+            "skill_path": skill_path,
+            "skill_source": skill_source,
             "companion_files": collect_companion_files(skill)
                 .into_iter()
                 .map(|p| p.display().to_string())
@@ -164,7 +176,16 @@ fn format_skill_body(skill: &Skill) -> String {
     if !skill.description.trim().is_empty() {
         out.push_str(&format!("> {}\n\n", skill.description.trim()));
     }
-    out.push_str(&format!("Source: `{}`\n\n", skill.path.display()));
+    match &skill.source {
+        SkillSource::Native => out.push_str(&format!("Source: `{}`\n\n", skill.path.display())),
+        SkillSource::Plugin {
+            plugin_id,
+            plugin_name,
+            ..
+        } => out.push_str(&format!(
+            "Source: reviewed in-memory plugin snapshot `{plugin_name}` ({plugin_id})\n\n"
+        )),
+    }
     out.push_str("## SKILL.md\n\n");
     out.push_str(skill.body.trim());
     out.push('\n');
@@ -187,6 +208,11 @@ fn format_skill_body(skill: &Skill) -> String {
 /// listing stays focused on at-hand resources. Sorted lexically for
 /// deterministic output (matters for transcript diffing in tests).
 fn collect_companion_files(skill: &Skill) -> Vec<std::path::PathBuf> {
+    if matches!(&skill.source, SkillSource::Plugin { .. }) {
+        // Companion files remain hashed, but exposing their mutable on-disk
+        // paths would let content change after review and bypass the snapshot.
+        return Vec::new();
+    }
     let Some(dir) = skill.path.parent() else {
         return Vec::new();
     };
@@ -273,6 +299,32 @@ mod tests {
             names,
             vec!["data.json".to_string(), "script.py".to_string()]
         );
+    }
+
+    #[test]
+    fn plugin_skill_body_uses_reviewed_snapshot_without_mutable_file_paths() {
+        let tmp = tempdir().unwrap();
+        let skill_path = tmp.path().join("SKILL.md");
+        fs::write(&skill_path, "changed on disk").unwrap();
+        fs::write(tmp.path().join("companion.txt"), "changed companion").unwrap();
+        let skill = Skill {
+            name: "demo:hello".to_string(),
+            description: "hello".to_string(),
+            localized_descriptions: std::collections::HashMap::new(),
+            body: "reviewed body".to_string(),
+            path: skill_path.clone(),
+            source: SkillSource::Plugin {
+                plugin_id: "workspace/123/demo".to_string(),
+                plugin_name: "demo".to_string(),
+                plugin_root: tmp.path().to_path_buf(),
+            },
+        };
+
+        let rendered = format_skill_body(&skill);
+        assert!(rendered.contains("reviewed body"));
+        assert!(rendered.contains("reviewed in-memory plugin snapshot"));
+        assert!(!rendered.contains(&skill_path.display().to_string()));
+        assert!(collect_companion_files(&skill).is_empty());
     }
 
     #[test]
