@@ -331,7 +331,7 @@ textarea::placeholder {
 }
 
 .connection-dot.ready {
-  background: var(--live);
+  background: var(--ok);
 }
 
 .connection-dot.error {

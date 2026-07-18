@@ -67,6 +67,7 @@ test("embedded web client uses the Blue Stage semantic palette", async () => {
     "--live: #4fd1c5",
     "--warning: #ff7a59",
     "--danger: #ff86b2",
+    "--ok: #9bd66f",
   ]) {
     assert.match(styles, new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
@@ -89,6 +90,10 @@ test("embedded web client uses the Blue Stage semantic palette", async () => {
   assert.match(
     cssDeclarations(styles, "\\.status-banner"),
     /color: var\(--warning\)/,
+  );
+  assert.match(
+    cssDeclarations(styles, "\\.connection-dot\\.ready"),
+    /background: var\(--ok\)/,
   );
   assert.match(html, /name="theme-color" content="#03070d"/);
 });
