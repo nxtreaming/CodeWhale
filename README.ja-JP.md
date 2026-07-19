@@ -1,11 +1,32 @@
-<!-- source: README.md sha256:ddc9cd7b5aea -->
+<!-- source: README.md sha256:120251f534ca -->
 # Codewhale
 
-ターミナルで動くコーディングエージェント。あらゆるモデルで動作し、オープンモデルを最優先します。
+**ひとつのランタイム。あらゆるモデル。あなたのマシン。**
 
-プロバイダ、モデル、タスクを渡すと、コードを読み、ファイルを編集し、コマンドを実行し、結果を確認して、タスクが完了するかあなたの手が必要になるまで作業を続けます。対話的な作業には TUI を、スクリプトと CI には `codewhale exec` を。Rust 製、MIT ライセンスで、すべて手元のマシン上で動きます。
+Codewhale はターミナルで動くコーディングエージェントです。あらゆるモデルで
+動作し、オープンモデルを最優先します。プロバイダ、モデル、タスクを渡すと、
+コードを読み、ファイルを編集し、コマンドを実行し、自分の作業を確認して、
+タスクが完了するかあなたの手が必要になった時点で止まります。タスクの途中でも
+`/model` でモデルを切り替えられます。対話的な作業には TUI を、スクリプトと
+CI には `codewhale exec` を。Rust 製、MIT ライセンス、あなたのマシン上で
+動きます。
 
-このプロジェクトは `deepseek-tui` として始まりました。その周りに生まれたコミュニティがより多くのプロバイダを必要としたため、いまでは DeepSeek、Claude、GPT、Kimi、GLM ほか 30 以上のモデルが、同じランタイムと同じツール群を通って動いています。
+**Codewhale を選ぶ理由:**
+- **ロックインなし。** DeepSeek、Claude、GPT、Kimi、GLM をはじめ 30 以上の
+  プロバイダ、そしてキー不要のあなた自身の vLLM・SGLang・Ollama が、ひとつの
+  ランタイムとひとつのツール群を通って動きます。コンテキスト予算と価格は
+  実際のルートに由来します。不明な価格は不明と表示され、$0 とは決して
+  表示されません。
+- **構造として安全。** Plan モードは読み取り専用。リスクのある呼び出しは
+  すべて承認でゲートされます。OS サンドボックスが守ります — Seatbelt、
+  Landlock、seccomp、bwrap。リポジトリの `constitution.json` は書き込み
+  ホールドへとコンパイルされ、Full Access でもスキップできません。
+- **消えない作業。** Fleet はすべてのステップを追記専用の台帳に記録し、
+  `fleet resume` で止めたところから再開できます。どのターンも検証できる
+  レシートを残します。
+
+`deepseek-tui` として生まれました。コミュニティがより多くのプロバイダを
+必要としたので、モデルを製品ではなく部品として扱うランタイムを作りました。
 
 [English](README.md) · [简体中文](README.zh-CN.md) · [Tiếng Việt](README.vi.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [codewhale.net](https://codewhale.net/) · [Docs](docs) · [Changelog](CHANGELOG.md)
 
@@ -33,17 +54,17 @@ codewhale exec "fix the failing test"    # headless
 
 TUI では、`/model` がプロバイダとモデルをまとめて切り替え、`/fleet` がワーカーのチームを走らせ、`/restore` がターンを取り消します。`Tab` は Plan / Act / Operate を順に切り替え、`Shift+Tab` は Ask / Auto-Review / Full Access の承認スタンスを順に切り替え、`!` は Shell コマンドを通常の承認経路で実行します。
 
-## できること
+## さらに詳しく
 
-- プロバイダとモデルの選択を具体的なルートに解決します: エンドポイント、ワイヤプロトコル、コンテキスト上限、価格。コンテキスト予算とコスト表示は実際のルートに基づき、不明な価格は $0 ではなく不明として表示されます。([docs/PROVIDERS.md](docs/PROVIDERS.md))
-- ホスト型のオープンモデルプロバイダ（`deepseek`、`openrouter`、`moonshot`、`zai`、`minimax`、`nvidia-nim` など）、キー不要で使える自前の `vllm` / `sglang` / `ollama`、そして thinking とプロンプトキャッシュに対応した Messages API 経由のネイティブな Anthropic と通信します。
-- 複数のワーカーを耐久的に走らせます: Fleet は作業を追記専用の台帳（ledger）に記録するため、実行は再起動を生き延び、`fleet resume` が止まったところから再開します。Workflow は大きなジョブを、再開可能で検証可能なレーンへ計画します。([docs/FLEET.md](docs/FLEET.md))
-- リスクは雰囲気ではなくコードでゲートします: 3 つのモード（Plan は読み取り専用）、独立した承認スタンス、OS サンドボックス（Seatbelt、Landlock + seccomp、bwrap）、ツール呼び出しごとに allow/deny/ask を判定できるフック、そして `/restore` が実際の履歴に決して触れないようにする side-git スナップショット。
-- リポジトリが自らの法を宣言できます: `.codewhale/constitution.json` の不変条件は、Full Access でもスキップできない書き込みホールドにコンパイルされます。([docs/CONFIGURATION.md](docs/CONFIGURATION.md))
-- MCP はクライアントとサーバーの両方向に対応し、再利用可能なスキルを読み込み、HTTP/SSE と ACP の Runtime API を公開し、コミュニティ製の [VS Code GUI](https://github.com/HengQuWorld/CodeWhale-VSCode) を支えています。
-- TUI は作業を検査可能なレシートとして表示し、ライブに動く行は常に 1 行だけに保ち、本物のコンテキストインスペクタ、12 のテーマ、モーション低減モードと ASCII セーフモードを備えます。UI は英語、简体中文、日本語、Tiếng Việt、Español、Português、한국어で利用でき、繁體中文には部分的に対応しています。
+- [docs/PROVIDERS.md](docs/PROVIDERS.md) — ホスト型・ゲートウェイ・ローカル
+  まで、すべてのプロバイダルート
+- [docs/FLEET.md](docs/FLEET.md) — Fleet、台帳、再開
+- [docs/CONFIGURATION.md](docs/CONFIGURATION.md) — `config.toml`、フック、
+  constitution
 
-それ以外のすべて — 設定、キーバインド、サンドボックスの詳細、アーキテクチャ — は [docs](docs) と [codewhale.net](https://codewhale.net/) にあります。
+その他 — モード、キーバインド、サンドボックスの詳細、MCP、ランタイム API、
+アーキテクチャ — は [docs](docs) と [codewhale.net](https://codewhale.net/)
+にあります。
 
 ## コントリビューション
 

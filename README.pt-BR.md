@@ -1,18 +1,31 @@
-<!-- source: README.md sha256:ddc9cd7b5aea -->
+<!-- source: README.md sha256:120251f534ca -->
 # Codewhale
 
-Um agente de código para o seu terminal. Funciona com qualquer modelo; modelos
-abertos em primeiro lugar.
+**Um runtime. Todos os modelos. Sua máquina.**
 
-Você informa um provedor, um modelo e uma tarefa. Ele lê código, edita
-arquivos, executa comandos, verifica os resultados e continua até a tarefa
-terminar ou até precisar de você. TUI para trabalho interativo,
-`codewhale exec` para scripts e CI. Rust, MIT, roda inteiramente na sua
-máquina.
+O Codewhale é um agente de código para o seu terminal. Funciona com qualquer
+modelo; modelos abertos em primeiro lugar. Você informa um provedor, um
+modelo e uma tarefa: ele lê seu código, edita arquivos, executa comandos,
+verifica o próprio trabalho e para quando a tarefa termina ou quando precisa
+de você. Troque de modelo no meio da tarefa com `/model`. Use a TUI para
+trabalho interativo e `codewhale exec` para scripts e CI. Rust, MIT, roda na
+sua máquina.
 
-Começou como `deepseek-tui`. A comunidade que se formou em volta dele
-precisava de mais provedores, então hoje DeepSeek, Claude, GPT, Kimi, GLM e
-mais de 30 outros rodam pelo mesmo runtime e pelas mesmas ferramentas.
+**Por que Codewhale:**
+- **Sem lock-in.** DeepSeek, Claude, GPT, Kimi, GLM, mais de 30 provedores, e
+  seu próprio vLLM, SGLang ou Ollama — sem key — rodam por um único runtime e
+  um único conjunto de ferramentas. Orçamentos de contexto e preços vêm da
+  rota real. Um preço desconhecido aparece como desconhecido, nunca como $0.
+- **Seguro por construção.** O modo Plan é somente leitura. Aprovações
+  controlam cada chamada arriscada. O sandbox do sistema operacional segura —
+  Seatbelt, Landlock, seccomp, bwrap. O `constitution.json` de um repositório
+  é compilado em bloqueios de escrita que nem o Full Access consegue pular.
+- **Trabalho que sobrevive.** Fleets registram cada passo em um livro-razão
+  de apenas inclusão; `fleet resume` retoma de onde você parou. Cada turno
+  deixa um recibo que você pode inspecionar.
+
+Nasceu como `deepseek-tui`. Sua comunidade precisava de mais provedores,
+então construímos um runtime em que o modelo é um componente, não o produto.
 
 [English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [codewhale.net](https://codewhale.net/) · [Docs](docs) · [Changelog](CHANGELOG.md)
 
@@ -46,43 +59,17 @@ de workers, `/restore` desfaz um turno, `Tab` cicla entre Plan / Act / Operate,
 `Shift+Tab` cicla a postura de permissão Ask / Auto-Review / Full Access, e
 `!` executa um comando de shell pelo caminho normal de aprovação.
 
-## O que ele faz
+## Saiba mais
 
-- Resolve sua escolha de provedor + modelo em uma rota concreta: endpoint,
-  protocolo de comunicação, limite de contexto, preço. Orçamentos de contexto
-  e a exibição de custo vêm da rota real; um preço desconhecido aparece como
-  desconhecido, não como $0.
-  ([docs/PROVIDERS.md](docs/PROVIDERS.md))
-- Conversa com provedores hospedados de modelos abertos (`deepseek`,
-  `openrouter`, `moonshot`, `zai`, `minimax`, `nvidia-nim`, …), com seu
-  próprio `vllm` / `sglang` / `ollama` sem chave, e com a Anthropic
-  nativamente pela Messages API, com thinking e cache de prompt.
-- Executa vários workers de forma durável: o Fleet registra o trabalho em um
-  ledger append-only, então as execuções sobrevivem a reinícios e
-  `fleet resume` retoma de onde as coisas pararam. O Workflow planeja
-  trabalhos maiores em trilhas retomáveis e verificáveis.
-  ([docs/FLEET.md](docs/FLEET.md))
-- Controla risco em código, não em achismo: três modos (Plan é somente
-  leitura), uma postura de permissão separada, sandbox do sistema operacional
-  (Seatbelt, Landlock + seccomp, bwrap), hooks que podem
-  permitir/negar/perguntar a cada chamada de ferramenta, e snapshots em um git
-  paralelo para que `/restore` nunca toque no seu histórico real.
-- Permite que um repositório declare sua própria lei: os invariantes de
-  `.codewhale/constitution.json` compilam em bloqueios de escrita que nem o
-  Full Access consegue pular.
-  ([docs/CONFIGURATION.md](docs/CONFIGURATION.md))
-- Fala MCP nas duas direções, carrega skills reutilizáveis, expõe APIs de
-  runtime HTTP/SSE e ACP, e dá suporte a uma
-  [GUI para VS Code](https://github.com/HengQuWorld/CodeWhale-VSCode) da
-  comunidade.
-- A TUI mostra o trabalho como recibos que você pode inspecionar, mantém uma
-  única linha ao vivo em movimento, tem um inspetor de contexto de verdade,
-  12 temas, modos de movimento reduzido e ASCII seguro, e é distribuída em
-  English, 简体中文, 日本語, Tiếng Việt, Español, Português, 한국어 e 繁體中文
-  parcial.
+- [docs/PROVIDERS.md](docs/PROVIDERS.md) — cada rota de provedor: hospedada,
+  gateway e local
+- [docs/FLEET.md](docs/FLEET.md) — fleets, o livro-razão e resume
+- [docs/CONFIGURATION.md](docs/CONFIGURATION.md) — `config.toml`, hooks e a
+  constitution
 
-Todo o resto — configuração, atalhos de teclado, detalhes do sandbox,
-arquitetura — está em [docs](docs) e em [codewhale.net](https://codewhale.net/).
+Todo o resto — modos, atalhos de teclado, detalhes do sandbox, MCP, a API do
+runtime, arquitetura — está em [docs](docs) e em
+[codewhale.net](https://codewhale.net/).
 
 ## Contribuindo
 

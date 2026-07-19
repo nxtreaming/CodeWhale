@@ -1,11 +1,16 @@
-<!-- source: README.md sha256:ddc9cd7b5aea -->
+<!-- source: README.md sha256:120251f534ca -->
 # Codewhale
 
-一个运行在终端里的编程智能体。适配任意模型；开放模型优先。
+**一个运行时。所有模型。你的机器。**
 
-你给它一个 provider、一个模型和一个任务。它读代码、改文件、跑命令、检查结果，一直做到任务完成或需要你介入为止。交互式工作用 TUI，脚本和 CI 用 `codewhale exec`。Rust 编写，MIT 许可，完全在你自己的机器上运行。
+Codewhale 是运行在终端里的编程智能体。适配任意模型；开放模型优先。给它一个 provider、一个模型和一个任务：它会读你的代码、改文件、跑命令、检查自己的工作，在任务完成或需要你介入时停下。任务中途用 `/model` 切换模型。交互式工作用 TUI，脚本和 CI 用 `codewhale exec`。Rust 编写，MIT 许可，运行在你自己的机器上。
 
-它最初叫 `deepseek-tui`。围绕它形成的社区需要更多 provider，于是现在 DeepSeek、Claude、GPT、Kimi、GLM 以及其他 30 多个模型都跑在同一套运行时和工具之上。
+**为什么选 Codewhale：**
+- **不被锁定。** DeepSeek、Claude、GPT、Kimi、GLM 等 30 多家 provider，以及你自己的 vLLM、SGLang、Ollama——无需 key——都跑在同一套运行时和同一套工具之上。上下文预算与价格取自真实路由；价格未知时显示未知，绝不显示 $0。
+- **安全靠构造。** Plan 模式只读。审批把关每一次高风险调用。操作系统级沙箱守住底线——Seatbelt、Landlock、seccomp、bwrap。仓库的 `constitution.json` 会编译成写入拦截，连 Full Access 也无法跳过。
+- **工作不丢失。** Fleet 把每一步记录在只追加的账本里；`fleet resume` 从你停下的地方继续。每一轮都留下可查验的回执。
+
+它诞生于 `deepseek-tui`。社区需要更多 provider，于是我们造了一个把模型当组件、而不是当产品的运行时。
 
 [English](README.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [codewhale.net](https://codewhale.net/) · [Docs](docs) · [Changelog](CHANGELOG.md)
 
@@ -33,17 +38,13 @@ codewhale exec "fix the failing test"    # headless
 
 在 TUI 中：`/model` 同时切换 provider 和模型，`/fleet` 运行一组 worker，`/restore` 撤销某一轮，`Tab` 在 Plan / Act / Operate 之间循环切换，`Shift+Tab` 在 Ask / Auto-Review / Full Access 审批姿态之间循环切换，`!` 让 shell 命令经由正常的审批路径运行。
 
-## 它做什么
+## 了解更多
 
-- 把你选定的 provider + 模型解析为一条具体路由：端点、传输协议、上下文上限、价格。上下文预算与费用显示都取自真实路由；价格未知时就显示未知，而不是 $0。（[docs/PROVIDERS.md](docs/PROVIDERS.md)）
-- 可连接托管的开放模型 provider（`deepseek`、`openrouter`、`moonshot`、`zai`、`minimax`、`nvidia-nim` 等），可无 key 直连你自己的 `vllm` / `sglang` / `ollama`，也能通过 Messages API 原生对接 Anthropic，支持 thinking 与 prompt 缓存。
-- 以可持久化的方式运行多个 worker：Fleet 把工作记录在只追加的账本里，运行不会因重启而丢失，`fleet resume` 能从中断处继续。Workflow 把更大的任务规划成可恢复、可验证的 lane。（[docs/FLEET.md](docs/FLEET.md)）
-- 风险把关靠代码，不靠感觉：三种模式（Plan 为只读）、独立的审批姿态、操作系统级沙箱（Seatbelt、Landlock + seccomp、bwrap）、可对每次工具调用做 allow/deny/ask 决策的 hooks，以及 side-git 快照——`/restore` 永远不会碰你真正的提交历史。
-- 允许仓库声明自己的法律：`.codewhale/constitution.json` 中的不变量会编译成写入拦截，连 Full Access 也无法跳过。（[docs/CONFIGURATION.md](docs/CONFIGURATION.md)）
-- 双向支持 MCP，可加载可复用的 skills，对外提供 HTTP/SSE 与 ACP 运行时 API，并支撑社区维护的 [VS Code GUI](https://github.com/HengQuWorld/CodeWhale-VSCode)。
-- TUI 把工作显示为可逐条查验的回执，同一时间只让一行保持动态，内置真实的上下文查看器、12 套主题、减弱动效与 ASCII 安全模式，界面语言覆盖英语、简体中文、日语、越南语、西班牙语、葡萄牙语和韩语，繁体中文为部分翻译。
+- [docs/PROVIDERS.md](docs/PROVIDERS.md) — 每一条 provider 路由：托管、网关与本地
+- [docs/FLEET.md](docs/FLEET.md) — Fleet、账本与恢复
+- [docs/CONFIGURATION.md](docs/CONFIGURATION.md) — `config.toml`、hooks 与 constitution
 
-其余内容——配置、键位绑定、沙箱细节、架构——见 [docs](docs) 与 [codewhale.net](https://codewhale.net/)。
+其余内容——模式、键位绑定、沙箱细节、MCP、运行时 API、架构——见 [docs](docs) 与 [codewhale.net](https://codewhale.net/)。
 
 ## 贡献
 
